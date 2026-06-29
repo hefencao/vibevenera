@@ -201,6 +201,9 @@ class _GalleryModeState extends State<_GalleryMode>
 
   int fingers = 0;
 
+  /// WebP 三级缓存（生命周期绑定本 State）
+  final DecodedImageCache webpCache = DecodedImageCache();
+
   @override
   void initState() {
     reader = context.reader;
@@ -210,6 +213,12 @@ class _GalleryModeState extends State<_GalleryMode>
       context.readerScaffold.setFloatingButton(0);
     });
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    webpCache.dispose();
+    super.dispose();
   }
 
   /// Get the range of images for the given page. [page] is 1-based.
@@ -404,6 +413,8 @@ class _GalleryModeState extends State<_GalleryMode>
               photoViewControllers.remove(key);
             }
           }
+          // 更新 WebP 缓存活跃页面
+          _updateWebPCacheActivePages();
         },
       ),
     );
@@ -631,16 +642,34 @@ class _GalleryModeState extends State<_GalleryMode>
 
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        var imageKey =
-            (imageState.widget.image as ReaderImageProvider).imageKey;
-        int index = reader.images!.indexOf(imageKey);
-        if (index >= startIndex && index < endIndex) {
-          return imageKey;
+        var provider = imageState.widget.image;
+        String? imageKey;
+        if (provider is ReaderImageProvider) {
+          imageKey = provider.imageKey;
+        } else if (provider is WebPImageProvider) {
+          imageKey = provider.imageKey;
+        }
+        if (imageKey != null) {
+          int index = reader.images!.indexOf(imageKey);
+          if (index >= startIndex && index < endIndex) {
+            return imageKey;
+          }
         }
       }
     }
 
     return reader.images![startIndex];
+  }
+
+  /// 更新 WebP 缓存的活动页面列表，
+  /// 通知缓存驱逐离屏页的 L1/L3。
+  void _updateWebPCacheActivePages() {
+    var keys = <String>[];
+    var (start, end) = getCurrentPageImageRange() ?? (-1, -1);
+    for (int i = start; i < end && i < (reader.images?.length ?? 0); i++) {
+      keys.add(reader.images![i]);
+    }
+    webpCache.setActivePages(keys);
   }
 }
 
@@ -1206,7 +1235,12 @@ class _ContinuousModeState extends State<_ContinuousMode>
     String? imageKey;
     for (var imageState in imageStates) {
       if ((imageState as _ComicImageState).containsPoint(offset)) {
-        imageKey = (imageState.widget.image as ReaderImageProvider).imageKey;
+        var provider = imageState.widget.image;
+        if (provider is ReaderImageProvider) {
+          imageKey = provider.imageKey;
+        } else if (provider is WebPImageProvider) {
+          imageKey = provider.imageKey;
+        }
       }
     }
     return imageKey;
@@ -1219,14 +1253,53 @@ ImageProvider _createImageProviderFromKey(
   int page,
 ) {
   var reader = context.reader;
+
+  // 检测是否为 WebP — 通过扩展名快速判断
+  if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
+    var size = MediaQuery.of(context).size;
+    var targetWidth = size.width.round();
+    var targetHeight = size.height.round();
+    // 最大尺寸限制避免极端情况
+    if (targetWidth > 1920) targetWidth = 1920;
+    if (targetHeight > 2560) targetHeight = 2560;
+
+    // Gallery 模式需要注入 DecodedImageCache
+    var imageCtrl = reader._imageViewController;
+    DecodedImageCache? cache;
+    if (imageCtrl is _GalleryModeState) {
+      cache = imageCtrl.webpCache;
+    }
+
+    return WebPImageProvider(
+      imageKey,
+      reader.type.comicSource?.key,
+      reader.cid,
+      reader.eid,
+      reader.page,
+      cache: cache,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+    );
+  }
+
   return ReaderImageProvider(
     imageKey,
     reader.type.comicSource?.key,
     reader.cid,
     reader.eid,
     reader.page,
-    enableResize: reader.mode.isContinuous, // For continuous mode, we need to resize the image to improve performance
+    enableResize: reader.mode.isContinuous,
   );
+}
+
+/// 根据图片 key 的格式推断是否可能为 WebP。
+/// 对于不带扩展名的 key，只在原始字节层面检测。
+bool _isLikelyWebP(String imageKey) {
+  // 如果 key 看起来是个 URL 或路径，检查扩展名
+  var lower = imageKey.toLowerCase();
+  if (lower.contains('.webp')) return true;
+  // 无法确定的返回 false，由 WebPImageProvider 在加载后检测 magic bytes
+  return false;
 }
 
 ImageProvider _createImageProvider(int page, BuildContext context) {

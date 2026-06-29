@@ -282,6 +282,10 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     if (_lastException != null) {
+      // 关键修复：图片加载失败时立即清理该图片的尺寸缓存。
+      // 避免因为之前的旧尺寸导致错误 UI 在全分辨率下渲染而出现比例失常。
+      _cache.remove(widget.image.hashCode);
+
       // display error and retry button on screen
       return SizedBox(
         height: widget.height == null ? 300 : null,

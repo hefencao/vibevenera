@@ -44,15 +44,6 @@ android {
         }
     }
 
-    splits{
-        abi {
-            reset()
-            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
-            enable true
-            universalApk true
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -88,21 +79,26 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                cFlags "-O3"
+                abiFilters "arm64-v8a"
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled true
             shrinkResources true
-            ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
-            }
             signingConfig signingConfigs.release
         }
         debug {
-            ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
-            }
             signingConfig signingConfigs.debug
         }
     }
@@ -124,6 +120,13 @@ android {
             } else if (variant.buildType.name == "debug") {
                 versionCodeOverride = variant.versionCode * 10 + 4
             }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
         }
     }
 
