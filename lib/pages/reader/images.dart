@@ -1311,10 +1311,38 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
 /// [_precacheImage] is used to precache the image for the given page.
 /// The image is cached using the flutter's [precacheImage] method.
 /// The image will be downloaded and decoded into memory.
+///
+/// 对于动画 WebP：使用 [WebPImageProvider.precreateDecoder] 预创建解码器
+/// 但不启动动画循环。解码器缓存在 [WebPImageProvider._precreatedDecoders]，
+/// 显示时从 [_decodeAnimated] 瞬间取用，无加载动画。
 void _precacheImage(int page, BuildContext context) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;
   }
+  final imageKey = context.reader.images![page - 1];
+  final reader = context.reader;
+
+  // 动画 WebP：下载原始字节并预创建解码器（不启动动画循环）
+  if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
+    final size = MediaQuery.of(context).size;
+    var targetWidth = size.width.round();
+    var targetHeight = size.height.round();
+    if (targetWidth > 1920) targetWidth = 1920;
+    if (targetHeight > 2560) targetHeight = 2560;
+
+    WebPImageProvider.precreateDecoder(
+      imageKey: imageKey,
+      sourceKey: reader.type.comicSource?.key,
+      cid: reader.cid,
+      eid: reader.eid,
+      page: page,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+    );
+    return;
+  }
+
+  // 非 WebP：使用 Flutter 内置 precache
   precacheImage(_createImageProvider(page, context), context);
 }
 

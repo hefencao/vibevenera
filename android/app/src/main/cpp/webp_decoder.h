@@ -90,6 +90,11 @@ void webp_anim_decoder_reset(WebPAnimContext* ctx);
  */
 void webp_anim_decoder_delete(WebPAnimContext* ctx);
 
+/**
+ * 返回当前存活的解码器数量（调试内存泄漏）。
+ */
+int webp_anim_decoder_alive_count(void);
+
 /* ─── 帧信息提取（用于并行解码） ─── */
 
 /** 单帧信息 */

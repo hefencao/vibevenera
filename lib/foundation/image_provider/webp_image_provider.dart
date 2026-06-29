@@ -13,7 +13,105 @@ import 'package:venera/utils/webp_decoder.dart' as webp;
 /// 基于 FFI libwebp 的 WebP 图像提供器。
 ///
 /// 支持静态和动画 WebP，集成三级缓存。
+///
+/// **动画解码器预创建缓存**：解决 PageView 永不 dispose 旧页面导致
+/// 解码器无限堆积的问题。预缓存创建解码器但不启动动画循环；
+/// 显示时从缓存取用，瞬间就绪。
 class WebPImageProvider extends ImageProvider<WebPImageProvider> {
+  /// 预创建的动画解码器缓存。
+  /// key = "$imageKey@$targetWidth×$targetHeight"，value = (decoder, rawBytes)。
+  static final Map<String, _PrecreatedDecoder> _precreatedDecoders = {};
+
+  /// 正在预创建中的 key 集合（防止并发重复创建）。
+  static final Set<String> _precreating = {};
+
+  /// 最大预创建解码器数（超出则驱逐最旧条目）。
+  static const int _maxPrecreatedDecoders = 4;
+
+  /// 预创建动画解码器（下载原始字节 + demux，但不启动动画循环）。
+  static Future<void> precreateDecoder({
+    required String imageKey,
+    required String? sourceKey,
+    required String cid,
+    required String eid,
+    required int page,
+    required int targetWidth,
+    required int targetHeight,
+  }) async {
+    final cacheKey = '$imageKey@${targetWidth}x$targetHeight';
+    if (_precreatedDecoders.containsKey(cacheKey)) return; // 已存在
+    if (_precreating.contains(cacheKey)) return; // 正在创建中，防并发
+    _precreating.add(cacheKey);
+
+    try {
+      // 下载原始字节
+      Uint8List rawBytes;
+      if (imageKey.startsWith('file://')) {
+        final file = File(imageKey.substring(7));
+        if (!await file.exists()) { _precreating.remove(cacheKey); return; }
+        rawBytes = await file.readAsBytes();
+      } else {
+        // 网络图片：通过 ImageDownloader 获取
+        final completer = Completer<Uint8List>();
+        late StreamSubscription sub;
+        sub = ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid).listen(
+          (event) {
+            if (event.imageBytes != null) {
+              completer.complete(event.imageBytes!);
+              sub.cancel();
+            }
+          },
+          onError: (e) { if (!completer.isCompleted) completer.completeError(e); },
+          cancelOnError: true,
+        );
+        try {
+          rawBytes = await completer.future;
+        } catch (_) {
+          _precreating.remove(cacheKey);
+          return;
+        }
+      }
+
+      if (!webp.isWebP(rawBytes)) { _precreating.remove(cacheKey); return; }
+      final info = webp.getInfo(rawBytes);
+      if (info == null || !info.isAnimated) { _precreating.remove(cacheKey); return; }
+
+      // 创建解码器（不启动动画循环）。decoder 构造时已做 demux。
+      final decoder = webp.createAnimDecoder(rawBytes,
+          targetWidth: targetWidth, targetHeight: targetHeight);
+      if (decoder == null) { _precreating.remove(cacheKey); return; }
+
+      // 存入缓存（不调用 getNextFrame，避免不必要的 C 状态变更）
+      _precreatedDecoders[cacheKey] = _PrecreatedDecoder(
+        decoder: decoder,
+        rawBytes: rawBytes,
+      );
+      _precreating.remove(cacheKey);
+
+      // 驱逐超出限制的旧条目
+      while (_precreatedDecoders.length > _maxPrecreatedDecoders) {
+        final oldestKey = _precreatedDecoders.keys.first;
+        final evicted = _precreatedDecoders.remove(oldestKey);
+        evicted?.decoder.dispose();
+      }
+
+      debugPrint('[WebP-PRECREATE] decoder ready for $cacheKey (cache size=${_precreatedDecoders.length})');
+    } catch (e) {
+      _precreating.remove(cacheKey);
+      debugPrint('[WebP-PRECREATE] failed for $imageKey: $e');
+    }
+  }
+
+  /// 尝试从预创建缓存获取解码器。取出后缓存条目被移除。
+  static ({webp.WebPAnimDecoder decoder, Uint8List rawBytes})? takePrecreatedDecoder(
+      String imageKey, int targetWidth, int targetHeight) {
+    final cacheKey = '$imageKey@${targetWidth}x$targetHeight';
+    final entry = _precreatedDecoders.remove(cacheKey);
+    if (entry != null) {
+      debugPrint('[WebP-PRECREATE] cache HIT for $cacheKey (remaining=${_precreatedDecoders.length})');
+    }
+    return entry != null ? (decoder: entry.decoder, rawBytes: entry.rawBytes) : null;
+  }
   WebPImageProvider(
     this.imageKey,
     this.sourceKey,
@@ -117,7 +215,15 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   }
 
   Future<_ImageResult> _decodeAnimated(Uint8List rawBytes) async {
-    // 使用 FFI libwebp 解码
+    // 优先从预创建缓存获取解码器（precache 已 demux + 合成首帧，瞬间就绪）
+    final precreated = WebPImageProvider.takePrecreatedDecoder(
+        imageKey, targetWidth, targetHeight);
+    if (precreated != null) {
+      debugPrint('[WebP] using precreated decoder: ${precreated.decoder.frameCount}frames target=${precreated.decoder.targetWidth}x${precreated.decoder.targetHeight}');
+      return _ImageResult.animated(precreated.decoder);
+    }
+
+    // 缓存未命中：现场创建解码器
     final sw = Stopwatch()..start();
     final decoder = webp.createAnimDecoder(rawBytes,
         targetWidth: targetWidth, targetHeight: targetHeight);
@@ -160,6 +266,13 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
   @override
   String toString() => 'WebPImageProvider($key)';
+}
+
+/// 预创建的解码器条目
+class _PrecreatedDecoder {
+  final webp.WebPAnimDecoder decoder;
+  final Uint8List rawBytes;
+  _PrecreatedDecoder({required this.decoder, required this.rawBytes});
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -205,12 +318,16 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
   }
 
   void _onResult(_ImageResult result) {
-    if (_disposed) return;
+    if (_disposed) {
+      debugPrint('[WebP-COMPLETER] _onResult but already disposed, discarding');
+      return;
+    }
     switch (result.type) {
       case _ResultType.static:
         setImage(result.imageInfo!);
         break;
       case _ResultType.animated:
+        debugPrint('[WebP-COMPLETER] _onResult -> _startAnimation for key=${_provider.key}');
         _startAnimation(result.decoder!);
         break;
       case _ResultType.fallback:
@@ -340,16 +457,20 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
     webp.WebPAnimFrameAddress? pendingFrame;
     bool fetching = false;
     int consecutiveNullFrames = 0;
+    int noListenerCount = 0; // 连续无监听者计数，达阈值才停止
 
     void releaseDecoder() {
       if (!isActive) return;
       isActive = false;
+      debugPrint('[WebP-ANIM] releaseDecoder called, disposing decoder');
       decoder.dispose();
+      debugPrint('[WebP-ANIM] releaseDecoder done');
     }
 
     /// 预取下一帧到 [pendingFrame]（非阻塞，pipeline 方式）
     Future<void> fetchNext() async {
       if (fetching || pendingFrame != null || !isActive || _disposed) return;
+      if (!hasListeners) return; // 无监听者不预取，但不释放（由 playNext 统一判断）
       fetching = true;
       try {
         if (!decoder.hasMoreFrames) {
@@ -375,10 +496,23 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
     }
 
     /// 播放一帧：等待 pending frame → 上传 GPU → 预取下一帧 → 定时回调
+    /// 若 completer 连续多次无监听者（页面已滚走），自动停止并释放资源。
     Future<void> playNext() async {
       if (!isActive || _disposed) {
         releaseDecoder();
         return;
+      }
+
+      // 连续 5 次无监听者才停止（容忍短暂的无监听者窗口）
+      if (!hasListeners) {
+        noListenerCount++;
+        if (noListenerCount >= 5) {
+          debugPrint('[WebP-ANIM] no listeners for $noListenerCount checks, stopping animation');
+          releaseDecoder();
+          return;
+        }
+      } else {
+        noListenerCount = 0;
       }
 
       // 等待 pending frame 就绪
@@ -387,6 +521,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           await fetchNext();
         }
         if (pendingFrame == null) {
+          if (!hasListeners) noListenerCount++;
           await Future.delayed(const Duration(milliseconds: 2));
         }
       }
@@ -437,6 +572,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
 
   @override
   void onDisposed() {
+    debugPrint('[WebP-COMPLETER] onDisposed key=${_provider.key} _disposed=$_disposed');
     _disposed = true;
     super.onDisposed();
   }

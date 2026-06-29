@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(adb install -r d:\\\\work\\\\Source\\\\venera\\\\build\\\\app\\\\outputs\\\\flutter-apk\\\\app-release.apk 2>&1)",
+      "PowerShell(adb shell am force-stop com.github.wgh136.venera)",
+      "PowerShell(adb shell monkey -p com.github.wgh136.venera -c android.intent.category.LAUNCHER 1 2>&1)",
+      "Bash(adb logcat *)",
+      "PowerShell(adb logcat -c 2>&1)",
+      "Bash(adb shell *)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

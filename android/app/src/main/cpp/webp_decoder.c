@@ -23,6 +23,7 @@
 
 #define LOGTAG "WebP_Native"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOGTAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOGTAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOGTAG, __VA_ARGS__)
 
 #include "src/webp/decode.h"
@@ -183,6 +184,9 @@ static void clear_region(uint8_t* canvas, int stride, int canvas_w, int canvas_h
     for (int j = 0; j < h; j++) memset(canvas + (y + j) * stride + x * 4, 0, (size_t)w * 4);
 }
 
+/* ─── 全局存活计数（调试内存泄漏） ─── */
+static int g_alive_contexts = 0;
+
 /* ================================================================
  * 公共 API
  * ================================================================ */
@@ -233,6 +237,9 @@ WebPAnimContext* webp_anim_decoder_new(const uint8_t* data, size_t size, int tar
     size_t canvas_bytes = (size_t)t_w * t_h * 4;
     ctx->composite_canvas = (uint8_t*)calloc(1, canvas_bytes);
     for (int i = 0; i < OUTPUT_BUFFER_COUNT; i++) ctx->output_buf[i] = (uint8_t*)calloc(1, canvas_bytes);
+    g_alive_contexts++;
+    LOGI("[LIFECYCLE] NEW  ctx=%p total_alive=%d frames=%d canvas=%dx%d target=%dx%d",
+         (void*)ctx, g_alive_contexts, ctx->frame_count, orig_w, orig_h, t_w, t_h);
     if (canvas_width) *canvas_width = orig_w; if (canvas_height) *canvas_height = orig_h;
     if (frame_count) *frame_count = ctx->frame_count; if (loop_count) *loop_count = ctx->loop_count;
     if (actual_width) *actual_width = t_w; if (actual_height) *actual_height = t_h;
@@ -349,7 +356,14 @@ void webp_anim_decoder_delete(WebPAnimContext* ctx) {
     if (ctx->demux) WebPDemuxDelete(ctx->demux);
     free(ctx->composite_canvas);
     for (int i = 0; i < OUTPUT_BUFFER_COUNT; i++) free(ctx->output_buf[i]);
-    free(ctx->frame_buf); free(ctx);
+    free(ctx->frame_buf);
+    g_alive_contexts--;
+    LOGI("[LIFECYCLE] DEL  ctx=%p total_alive=%d", (void*)ctx, g_alive_contexts);
+    free(ctx);
+}
+
+int webp_anim_decoder_alive_count(void) {
+    return g_alive_contexts;
 }
 
 WebPFrameList* webp_anim_extract_frames(const uint8_t* data, size_t size) {

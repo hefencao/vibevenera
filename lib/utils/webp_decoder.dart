@@ -140,6 +140,9 @@ typedef _WebPAnimDecoderResetDart = void Function(Pointer<Void> ctx);
 typedef _WebPAnimDecoderDeleteNative = Void Function(Pointer<Void> ctx);
 typedef _WebPAnimDecoderDeleteDart = void Function(Pointer<Void> ctx);
 
+typedef _WebPAnimDecoderAliveCountNative = Int32 Function();
+typedef _WebPAnimDecoderAliveCountDart = int Function();
+
 typedef _WebPFreeBufferNative = Void Function(Pointer<Uint8> buf);
 typedef _WebPFreeBufferDart = void Function(Pointer<Uint8> buf);
 
@@ -207,6 +210,7 @@ class _WebPBindings {
   late final _WebPAnimDecoderHasMoreDart animHasMore;
   late final _WebPAnimDecoderResetDart animReset;
   late final _WebPAnimDecoderDeleteDart animDelete;
+  late final _WebPAnimDecoderAliveCountDart animAliveCount;
   late final _WebPFreeBufferDart freeBuffer;
   late final _WebPAnimExtractFramesDart animExtractFrames;
   late final _WebPFreeFrameListDart freeFrameList;
@@ -227,6 +231,8 @@ class _WebPBindings {
         _WebPAnimDecoderResetDart>('webp_anim_decoder_reset');
     animDelete = _lib.lookupFunction<_WebPAnimDecoderDeleteNative,
         _WebPAnimDecoderDeleteDart>('webp_anim_decoder_delete');
+    animAliveCount = _lib.lookupFunction<_WebPAnimDecoderAliveCountNative,
+        _WebPAnimDecoderAliveCountDart>('webp_anim_decoder_alive_count');
     freeBuffer = _lib.lookupFunction<_WebPFreeBufferNative, _WebPFreeBufferDart>(
         'webp_free_buffer');
     animExtractFrames = _lib.lookupFunction<_WebPAnimExtractFramesNative,
@@ -342,6 +348,8 @@ const int _kMaxCachedFrames = 20;
 ///
 /// 每次调用创建独立解码器实例。调用者通过 [WebPAnimDecoder.dispose] 释放资源。
 /// 注意：不再复用解码器以避免多 Completer 间共享 C 状态导致的竞态条件。
+///
+/// 返回 null 表示失败（nativeData 已释放）。
 WebPAnimDecoder? createAnimDecoder(Uint8List data,
     {required int targetWidth, required int targetHeight}) {
   if (!isWebP(data)) return null;
@@ -371,10 +379,11 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 
     if (ctx == Pointer.fromAddress(0)) {
       nativeData._free();
+      debugPrint('[WebP-DECODER] createAnimDecoder FAILED');
       return null;
     }
 
-    return WebPAnimDecoder._(
+    final decoder = WebPAnimDecoder._(
       bindings: _bind,
       ctx: ctx,
       nativeData: nativeData,
@@ -385,6 +394,8 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
       targetWidth: aW.value,
       targetHeight: aH.value,
     );
+    debugPrint('[WebP-DECODER] CREATE #${_bind.animAliveCount()} ctx=${ctx.address.toRadixString(16)} frames=${decoder.frameCount} target=${decoder.targetWidth}x${decoder.targetHeight}');
+    return decoder;
   } finally {
     calloc.free(cW);
     calloc.free(cH);
@@ -564,7 +575,10 @@ class WebPAnimDecoder {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    final ctxAddr = _ctx.address.toRadixString(16);
     _bindings.animDelete(_ctx);
+    final alive = _bindings.animAliveCount();
+    debugPrint('[WebP-DECODER] DISPOSE ctx=$ctxAddr remaining=$alive');
     _nativeData._free();
     _cachedFrames.clear();
     _cachedTimestamps.clear();
