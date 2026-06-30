@@ -76,6 +76,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       final info = webp.getInfo(bytes);
       if (info == null || !info.isAnimated) { _poolCreating.remove(key); return; }
 
+      // 存入 L2 缓存，避免 _loadImageAsync 重复下载
+      if (l2Cache != null) l2Cache.putL2(imageKey, bytes);
+
       // 2. 创建解码器
       final decoder = webp.createAnimDecoder(bytes, targetWidth: targetWidth, targetHeight: targetHeight);
       if (decoder == null) { _poolCreating.remove(key); return; }
@@ -248,13 +251,19 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   }
 
   Future<_ImageResult> _decodeAnimated(Uint8List rawBytes) async {
-    // 优先从预缓存池获取（已解码 + 已上传 GPU）
+    // 优先从预缓存池获取
     final precached = WebPImageProvider.takePrecached(imageKey, targetWidth, targetHeight);
     if (precached != null) {
       debugPrint('[WebP] precache hit: ${precached.gpuFrames.length} frames ready on GPU');
       preUploadedFrames = precached.gpuFrames;
       preUploadedDurations = precached.durations;
       return _ImageResult.animated(precached.decoder);
+    }
+    // 池正在创建中，存入 L2 等待下次使用（避免重复创建 decoder）
+    final poolKey = '$imageKey@${targetWidth}x$targetHeight';
+    if (_poolCreating.contains(poolKey)) {
+      if (cache != null) cache!.putL2(imageKey, rawBytes);
+      // 池未就绪，现场创建
     }
     // 池未命中：现场创建
     final sw = Stopwatch()..start();
@@ -432,54 +441,54 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       doDispose();
     }
 
-    _disposeDecoder = stopAnimation; // 走 stopAnimation 检查 fetching
+    _disposeDecoder = stopAnimation;
 
-    Future<void> fetchNext() async {
-      if (fetching || pendingFrame != null || !isActive || _disposed) {
-        if (frameIndex == 0 && (fetching || pendingFrame != null)) {
-          debugPrint('[WebP-DIAG] fetchNext blocked: fetching=$fetching pending=${pendingFrame != null} active=$isActive');
-        }
-        return;
-      }
+    /// 缓存的解码 Future（复用 + 直接 await，消除 2ms 轮询）
+    Future<void>? _currentFetch;
+
+    Future<void> fetchNext() {
+      if (_currentFetch != null) return _currentFetch!;
+      if (!isActive || _disposed) return Future.value();
+
       fetching = true;
-      try {
-        if (!decoder.hasMoreFrames) decoder.reset();
-        final int t0 = DateTime.now().millisecondsSinceEpoch;
-        final result = await decoder.getNextFrameAsync();
-        final int dt = DateTime.now().millisecondsSinceEpoch - t0;
-        if (result != null) {
-          pendingFrame = result;
-          consecutiveNullFrames = 0;
-          if (frameIndex < 5) debugPrint('[WebP-TIMING] Isolate decode=${dt}ms frame#$frameIndex');
-        } else {
+      _currentFetch = () async {
+        try {
+          if (!decoder.hasMoreFrames) decoder.reset();
+          final result = await decoder.getNextFrameAsync();
+          if (result != null) {
+            pendingFrame = result;
+            consecutiveNullFrames = 0;
+          } else {
+            consecutiveNullFrames++;
+            if (consecutiveNullFrames > 3) stopAnimation();
+          }
+        } catch (_) {
           consecutiveNullFrames++;
-          debugPrint('[WebP-DIAG] fetchNext returned null (#$consecutiveNullFrames)');
-          if (consecutiveNullFrames > 3) stopAnimation();
+        } finally {
+          fetching = false;
+          _currentFetch = null;
+          if (pendingDispose) { pendingDispose = false; doDispose(); }
         }
-      } catch (e) {
-        consecutiveNullFrames++;
-        debugPrint('[WebP-DIAG] fetchNext exception: $e');
-      } finally {
-        fetching = false;
-        if (pendingDispose) { pendingDispose = false; doDispose(); }
-      }
+      }();
+      return _currentFetch!;
     }
 
     Future<void> playNext() async {
       if (!isActive || _disposed) { stopAnimation(); return; }
 
-      int waitLoops = 0;
-      final tWaitStart = DateTime.now().millisecondsSinceEpoch;
-      while (pendingFrame == null && isActive && !_disposed) {
-        if (!fetching) await fetchNext();
-        if (pendingFrame == null) {
-          waitLoops++;
-          await Future.delayed(const Duration(milliseconds: 2));
-        }
+      // 无监听者 → 低功耗挂起，200ms 后重检
+      if (!hasListeners) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (isActive && !_disposed) { Future.microtask(playNext); }
+        else { stopAnimation(); }
+        return;
       }
-      final waitTotal = DateTime.now().millisecondsSinceEpoch - tWaitStart;
-      if (waitTotal > 20) debugPrint('[WebP-WAIT] playNext waited ${waitTotal}ms (${waitLoops} loops) frame#$frameIndex');
-      if (!isActive || _disposed) { stopAnimation(); return; }
+
+      // 直接 await 解码任务（消除 2ms 轮询）
+      if (pendingFrame == null && isActive && !_disposed) {
+        await fetchNext();
+      }
+      if (!isActive || _disposed || pendingFrame == null) { stopAnimation(); return; }
 
       final frame = pendingFrame!;
       pendingFrame = null;
@@ -488,7 +497,8 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       final rgba = Pointer<Uint8>.fromAddress(frame.address).asTypedList(length);
       final int t0 = DateTime.now().millisecondsSinceEpoch;
 
-      fetchNext(); // pipeline: start next decode in parallel with GPU upload
+      // 提前启动下一帧解码（管线化，与 GPU 上传并行）
+      if (isActive && !_disposed) { fetchNext(); }
 
       ui.decodeImageFromPixels(rgba, decoder.targetWidth, decoder.targetHeight,
         ui.PixelFormat.rgba8888, (image) {
@@ -496,11 +506,6 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           setImage(ImageInfo(image: image, scale: _provider.scale));
           final int elapsed = DateTime.now().millisecondsSinceEpoch - t0;
           final int delay = (duration - elapsed).clamp(8, duration);
-          if (frameIndex == 0) {
-            final e2e = DateTime.now().millisecondsSinceEpoch - _loadStartMs;
-            debugPrint('[WebP-E2E] load-to-first-frame=${e2e}ms (fetch=${_loadStartMs > 0 ? t0 - _loadStartMs : -1}ms upload=${elapsed}ms)');
-          }
-          if (frameIndex < 5) debugPrint('[WebP-TIMING] upload=${elapsed}ms delay=${delay}ms frame#$frameIndex');
           frameIndex++;
           Future.delayed(Duration(milliseconds: delay), playNext);
         });

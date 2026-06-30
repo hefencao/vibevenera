@@ -157,22 +157,35 @@ static void composite_region(uint8_t* canvas, int stride, int c_w, int c_h,
     }
 }
 
-/** 转换为直通 Alpha (Straight Alpha) 供 Flutter 使用 */
+/* ─── 快速去预乘查表（避免每像素 3 次整数除法） ─── */
+static uint32_t g_unpremul_table[256];
+static int g_unpremul_table_init = 0;
+
+static void init_unpremul_table(void) {
+    if (g_unpremul_table_init) return;
+    g_unpremul_table[0] = 0;
+    for (int i = 1; i <= 255; i++) {
+        g_unpremul_table[i] = (uint32_t)((255.0 * 65536.0) / i + 0.5);
+    }
+    g_unpremul_table_init = 1;
+}
+
+/** 转换为直通 Alpha (Straight Alpha) 供 Flutter 使用（LUT 定点数，无除法） */
 static void copy_premul_to_straight(const uint8_t* src, int s_stride, uint8_t* dst, int d_stride, int w, int h) {
+    init_unpremul_table();
     for (int j = 0; j < h; j++) {
         const uint32_t* s32 = (const uint32_t*)(src + j * s_stride);
         uint32_t* d32 = (uint32_t*)(dst + j * d_stride);
         for (int i = 0; i < w; i++) {
             uint32_t p = s32[i];
             uint32_t a = (p >> 24) & 0xff;
-            if (a == 0 || a == 255) { d32[i] = p; }
-            else {
-                uint32_t r = ((p & 0xff) * 255) / a;
-                uint32_t g = (((p >> 8) & 0xff) * 255) / a;
-                uint32_t b = (((p >> 16) & 0xff) * 255) / a;
-                if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
-                d32[i] = (a << 24) | (b << 16) | (g << 8) | r;
-            }
+            if (a == 0 || a == 255) { d32[i] = p; continue; }
+            uint32_t f = g_unpremul_table[a];
+            uint32_t r = (((p & 0xff) * f) >> 16);
+            uint32_t g = ((((p >> 8) & 0xff) * f) >> 16);
+            uint32_t b = ((((p >> 16) & 0xff) * f) >> 16);
+            if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
+            d32[i] = (a << 24) | (b << 16) | (g << 8) | r;
         }
     }
 }

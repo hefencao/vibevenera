@@ -417,24 +417,49 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 /// 帧解码直接得到目标尺寸的 RGBA（C 层已完成 composite + downscale）。
 ///
 /// **第一次循环时缓存所有帧 RGBA，后续循环直接从缓存读取，不再调用 C。**
-/// 简易信号量：限制并发 Isolate C decode 数量，防止线程耗尽导致首帧卡死。
-class _Semaphore {
-  int _permits;
-  final _waiters = <Completer<void>>[];
-  _Semaphore(this._permits);
-  Future<void> acquire() {
-    if (_permits > 0) { _permits--; return Future.value(); }
-    final c = Completer<void>();
-    _waiters.add(c);
-    return c.future;
+/// Isolate Worker 池：N 个持久化 Worker，匹配活跃动画数。
+/// 消除 Isolate.run() 创建/销毁开销，同时保持 N 路并发避免串行瓶颈。
+class _WorkerPool {
+  final List<SendPort> _workers = [];
+  int _next = 0;
+  bool _init = false;
+
+  Future<void> _ensureInit() async {
+    if (_init) return;
+    _init = true;
+    // 匹配 _maxActive=3，创建 3 个 worker
+    for (int i = 0; i < 3; i++) {
+      final r = ReceivePort();
+      await Isolate.spawn((SendPort mainPort) {
+        final workerR = ReceivePort();
+        mainPort.send(workerR.sendPort);
+        final lib = DynamicLibrary.open('libvenera_webp.so');
+        final animGetFrame = lib.lookupFunction<_WebPAnimDecoderGetFrameNative, _WebPAnimDecoderGetFrameDart>('webp_anim_decoder_get_frame');
+        workerR.listen((msg) {
+          final list = msg as List<Object?>;
+          final replyTo = list[0] as SendPort;
+          final ctxAddr = list[1] as int;
+          final durationMs = calloc<Int32>();
+          try {
+            final ctx = Pointer<Void>.fromAddress(ctxAddr);
+            final rgbaPtr = animGetFrame(ctx, durationMs);
+            replyTo.send(rgbaPtr != Pointer.fromAddress(0) ? [rgbaPtr.address, durationMs.value] : null);
+          } finally {
+            calloc.free(durationMs);
+          }
+        });
+      }, r.sendPort);
+      _workers.add(await r.first as SendPort);
+      r.close();
+    }
   }
-  void release() {
-    if (_waiters.isNotEmpty) { _waiters.removeAt(0).complete(); return; }
-    _permits++;
+
+  Future<SendPort> acquire() async {
+    await _ensureInit();
+    return _workers[_next++ % _workers.length]; // 轮询分配
   }
 }
-final _decodeSemaphore = _Semaphore(3); // 活跃动画帧解码
-final _poolSemaphore = _Semaphore(2);   // 池预创建帧解码（独立，不竞争）
+final _workerPool = _WorkerPool();
 
 class WebPAnimDecoder {
   final _WebPBindings _bindings;
@@ -505,38 +530,17 @@ class WebPAnimDecoder {
     return _getNextFrameInternal();
   }
 
-  /// 在后台 Isolate 中获取下一帧地址
+  /// 通过 Isolate Worker 池获取下一帧（3 个持久化 Worker，轮询分配）
   Future<WebPAnimFrameAddress?> getNextFrameAsync({bool pool = false}) async {
     _checkNotDisposed();
-    final ctxAddress = _ctx.address;
-
-    final tWait = DateTime.now().millisecondsSinceEpoch;
-    await (pool ? _poolSemaphore : _decodeSemaphore).acquire();
-    final waitMs = DateTime.now().millisecondsSinceEpoch - tWait;
-    try {
-      final tIso = DateTime.now().millisecondsSinceEpoch;
-      final result = await Isolate.run(() {
-        final ctx = Pointer<Void>.fromAddress(ctxAddress);
-        final durationMs = calloc<Int32>();
-        try {
-          final rgbaPtr = _bind.animGetFrame(ctx, durationMs);
-          if (rgbaPtr == Pointer.fromAddress(0)) return null;
-          return WebPAnimFrameAddress(
-            address: rgbaPtr.address,
-            durationMs: durationMs.value,
-          );
-        } finally {
-          calloc.free(durationMs);
-        }
-      });
-      final isoMs = DateTime.now().millisecondsSinceEpoch - tIso;
-      if (waitMs > 5 || isoMs > 100) {
-        debugPrint('[WebP-ISO] sem_wait=${waitMs}ms isolate=${isoMs}ms pool=$pool');
-      }
-      return result;
-    } finally {
-      (pool ? _poolSemaphore : _decodeSemaphore).release();
-    }
+    final sp = await _workerPool.acquire();
+    final reply = ReceivePort();
+    sp.send([reply.sendPort, _ctx.address]);
+    final result = await reply.first;
+    reply.close();
+    if (result == null) return null;
+    final list = result as List<Object?>;
+    return WebPAnimFrameAddress(address: list[0] as int, durationMs: list[1] as int);
   }
 
   WebPAnimFrame? _getNextFrameInternal() {
