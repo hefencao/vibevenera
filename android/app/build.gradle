@@ -44,6 +44,15 @@ android {
         }
     }
 
+    splits{
+        abi {
+            reset()
+            include 'arm64-v8a'
+            enable true
+            universalApk true
+            }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -96,9 +105,15 @@ android {
         release {
             minifyEnabled true
             shrinkResources true
+            ndk {
+                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+            }
             signingConfig signingConfigs.release
         }
         debug {
+            ndk {
+                abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+            }
             signingConfig signingConfigs.debug
         }
     }

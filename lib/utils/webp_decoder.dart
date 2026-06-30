@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:typed_data';
 import 'dart:isolate';
@@ -416,6 +417,25 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 /// 帧解码直接得到目标尺寸的 RGBA（C 层已完成 composite + downscale）。
 ///
 /// **第一次循环时缓存所有帧 RGBA，后续循环直接从缓存读取，不再调用 C。**
+/// 简易信号量：限制并发 Isolate C decode 数量，防止线程耗尽导致首帧卡死。
+class _Semaphore {
+  int _permits;
+  final _waiters = <Completer<void>>[];
+  _Semaphore(this._permits);
+  Future<void> acquire() {
+    if (_permits > 0) { _permits--; return Future.value(); }
+    final c = Completer<void>();
+    _waiters.add(c);
+    return c.future;
+  }
+  void release() {
+    if (_waiters.isNotEmpty) { _waiters.removeAt(0).complete(); return; }
+    _permits++;
+  }
+}
+final _decodeSemaphore = _Semaphore(3); // 活跃动画帧解码
+final _poolSemaphore = _Semaphore(2);   // 池预创建帧解码（独立，不竞争）
+
 class WebPAnimDecoder {
   final _WebPBindings _bindings;
   final Pointer<Void> _ctx;
@@ -486,28 +506,37 @@ class WebPAnimDecoder {
   }
 
   /// 在后台 Isolate 中获取下一帧地址
-  Future<WebPAnimFrameAddress?> getNextFrameAsync() async {
+  Future<WebPAnimFrameAddress?> getNextFrameAsync({bool pool = false}) async {
     _checkNotDisposed();
-
-    // 缓存命中逻辑（暂不处理缓存以简化逻辑，后续可优化）
     final ctxAddress = _ctx.address;
 
-    return Isolate.run(() {
-      final ctx = Pointer<Void>.fromAddress(ctxAddress);
-      final durationMs = calloc<Int32>();
-      try {
-        // 直接返回 C 层合成画布的地址（双缓冲 output buffer），避免大数据块在 Isolate 间拷贝
-        final rgbaPtr = _bind.animGetFrame(ctx, durationMs);
-        if (rgbaPtr == Pointer.fromAddress(0)) return null;
-
-        return WebPAnimFrameAddress(
-          address: rgbaPtr.address,
-          durationMs: durationMs.value,
-        );
-      } finally {
-        calloc.free(durationMs);
+    final tWait = DateTime.now().millisecondsSinceEpoch;
+    await (pool ? _poolSemaphore : _decodeSemaphore).acquire();
+    final waitMs = DateTime.now().millisecondsSinceEpoch - tWait;
+    try {
+      final tIso = DateTime.now().millisecondsSinceEpoch;
+      final result = await Isolate.run(() {
+        final ctx = Pointer<Void>.fromAddress(ctxAddress);
+        final durationMs = calloc<Int32>();
+        try {
+          final rgbaPtr = _bind.animGetFrame(ctx, durationMs);
+          if (rgbaPtr == Pointer.fromAddress(0)) return null;
+          return WebPAnimFrameAddress(
+            address: rgbaPtr.address,
+            durationMs: durationMs.value,
+          );
+        } finally {
+          calloc.free(durationMs);
+        }
+      });
+      final isoMs = DateTime.now().millisecondsSinceEpoch - tIso;
+      if (waitMs > 5 || isoMs > 100) {
+        debugPrint('[WebP-ISO] sem_wait=${waitMs}ms isolate=${isoMs}ms pool=$pool');
       }
-    });
+      return result;
+    } finally {
+      (pool ? _poolSemaphore : _decodeSemaphore).release();
+    }
   }
 
   WebPAnimFrame? _getNextFrameInternal() {

@@ -263,17 +263,43 @@ class _GalleryModeState extends State<_GalleryMode>
           isChapterCommentsPage(i)) {
         continue;
       }
-      _cachePage(i, i == startPage + 1 || i == startPage - 1);
+      // 计算帧数：前一张4帧，后一张5帧，后二张4帧
+      int? frameCount;
+      final bool isWebPPage = _isWebPPage(i);
+      if (isWebPPage) {
+        if (i == startPage - 1) {
+          frameCount = 4; // prev
+        } else if (i == startPage + 1) {
+          frameCount = 5; // next
+        } else if (i == startPage + 2) {
+          frameCount = 4; // next+1
+        }
+      }
+      if (frameCount != null) {
+        _cachePage(i, true, frameCount);
+      } else {
+        _cachePage(i, i == startPage + 1 || i == startPage - 1);
+      }
     }
   }
 
-  void _cachePage(int page, bool shouldPreCache) {
+  bool _isWebPPage(int page) {
+    if (page <= 0 || page > (reader.images?.length ?? 0)) return false;
+    final key = reader.images![page - 1];
+    return key.endsWith('.webp') || _isLikelyWebP(key);
+  }
+
+  void _cachePage(int page, bool shouldPreCache, [int? webpFrameCount]) {
     if (isChapterCommentsPage(page)) return;
     var (startIndex, endIndex) = getPageImagesRange(page);
     for (int i = startIndex; i < endIndex; i++) {
-      shouldPreCache
-          ? _precacheImage(i + 1, context)
-          : _preDownloadImage(i + 1, context);
+      if (webpFrameCount != null) {
+        _precacheImage(i + 1, context, frameCount: webpFrameCount);
+      } else if (shouldPreCache) {
+        _precacheImage(i + 1, context);
+      } else {
+        _preDownloadImage(i + 1, context);
+      }
     }
   }
 
@@ -367,27 +393,8 @@ class _GalleryModeState extends State<_GalleryMode>
         },
         pageController: controller,
         loadingBuilder: (context, event) {
-          return PhotoView.customChild(
-            childSize: MediaQuery.of(context).size,
-            initialScale: PhotoViewComputedScale.contained,
-            minScale: PhotoViewComputedScale.contained * 1.0,
-            maxScale: PhotoViewComputedScale.covered * 10.0,
-            backgroundDecoration: BoxDecoration(
-              color: context.colorScheme.surface,
-            ),
-            child: Center(
-              child: SizedBox(
-                width: 20.0,
-                height: 20.0,
-                child: CircularProgressIndicator(
-                  backgroundColor: context.colorScheme.surfaceContainerHigh,
-                  value: event == null || event.expectedTotalBytes == null
-                      ? null
-                      : event.cumulativeBytesLoaded / event.expectedTotalBytes!,
-                ),
-              ),
-            ),
-          );
+          // 不显示转圈动画：gaplessPlayback 保持上一张可见，预缓存池确保新图就绪
+          return const SizedBox.shrink();
         },
         onPageChanged: (i) {
           if (i == 0) {
@@ -436,6 +443,7 @@ class _GalleryModeState extends State<_GalleryMode>
       imageWidgets = [
         Expanded(
           child: ComicImage(
+            gaplessPlayback: true,
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
@@ -453,6 +461,7 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
         Expanded(
           child: ComicImage(
+            gaplessPlayback: true,
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
@@ -479,6 +488,7 @@ class _GalleryModeState extends State<_GalleryMode>
         );
         return Expanded(
           child: ComicImage(
+            gaplessPlayback: true,
             image: imageProvider,
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
@@ -903,6 +913,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
         return ColoredBox(
           color: context.colorScheme.surface,
           child: ComicImage(
+            gaplessPlayback: true,
             filterQuality: FilterQuality.medium,
             image: image,
             width: width,
@@ -1257,8 +1268,9 @@ ImageProvider _createImageProviderFromKey(
   // 检测是否为 WebP — 通过扩展名快速判断
   if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
     var size = MediaQuery.of(context).size;
-    var targetWidth = size.width.round();
-    var targetHeight = size.height.round();
+    var dpr = MediaQuery.of(context).devicePixelRatio;
+    var targetWidth = (size.width * dpr).round();
+    var targetHeight = (size.height * dpr).round();
     // 最大尺寸限制避免极端情况
     if (targetWidth > 1920) targetWidth = 1920;
     if (targetHeight > 2560) targetHeight = 2560;
@@ -1275,10 +1287,11 @@ ImageProvider _createImageProviderFromKey(
       reader.type.comicSource?.key,
       reader.cid,
       reader.eid,
-      reader.page,
+      page, // 使用图片所在的实际页码，而非 reader.page（避免翻页时 key 变化触发重载）
       cache: cache,
       targetWidth: targetWidth,
       targetHeight: targetHeight,
+      scale: 1.0 / dpr, // 使 1 图像像素 = 1 物理像素
     );
   }
 
@@ -1309,40 +1322,34 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
 }
 
 /// [_precacheImage] is used to precache the image for the given page.
-/// The image is cached using the flutter's [precacheImage] method.
-/// The image will be downloaded and decoded into memory.
-///
-/// 对于动画 WebP：使用 [WebPImageProvider.precreateDecoder] 预创建解码器
-/// 但不启动动画循环。解码器缓存在 [WebPImageProvider._precreatedDecoders]，
-/// 显示时从 [_decodeAnimated] 瞬间取用，无加载动画。
-void _precacheImage(int page, BuildContext context) {
+/// [frameCount] for WebP: number of frames to pre-decode + upload to GPU.
+/// 前一张 4 帧，后一张 5 帧，后二张 4 帧。
+void _precacheImage(int page, BuildContext context, {int frameCount = 4}) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;
   }
   final imageKey = context.reader.images![page - 1];
-  final reader = context.reader;
-
-  // 动画 WebP：下载原始字节并预创建解码器（不启动动画循环）
   if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
+    final reader = context.reader;
     final size = MediaQuery.of(context).size;
-    var targetWidth = size.width.round();
-    var targetHeight = size.height.round();
-    if (targetWidth > 1920) targetWidth = 1920;
-    if (targetHeight > 2560) targetHeight = 2560;
-
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final targetW = (size.width * dpr).round().clamp(0, 1920);
+    final targetH = (size.height * dpr).round().clamp(0, 2560);
+    final ctrl = reader._imageViewController;
+    final cache = ctrl is _GalleryModeState ? ctrl.webpCache : null;
     WebPImageProvider.precreateDecoder(
       imageKey: imageKey,
+      l2Cache: cache,
       sourceKey: reader.type.comicSource?.key,
       cid: reader.cid,
       eid: reader.eid,
-      page: page,
-      targetWidth: targetWidth,
-      targetHeight: targetHeight,
+      targetWidth: targetW,
+      targetHeight: targetH,
+      frameCount: frameCount,
+      scale: 1.0 / dpr,
     );
     return;
   }
-
-  // 非 WebP：使用 Flutter 内置 precache
   precacheImage(_createImageProvider(page, context), context);
 }
 

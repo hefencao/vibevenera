@@ -2,16 +2,39 @@ cmake_minimum_required(VERSION 3.16)
 project(venera_webp C)
 
 # ============================================================
-# libwebp 源码路径 — 修改此变量指向你的 libwebp 目录
+# libwebp 源码路径
+# 支持通过 -DLIBWEBP_PATH=... 指定，或自动从常见位置查找。
 # ============================================================
-set(LIBWEBP_PATH "D:/work/Source/libwebp" CACHE PATH "Path to libwebp source tree")
+set(LIBWEBP_PATH "$ENV{LIBWEBP_PATH}" CACHE PATH "Path to libwebp source tree")
+if(NOT LIBWEBP_PATH)
+    set(_candidate_paths
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../libwebp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../libwebp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../libwebp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../libwebp"
+        "D:/work/Source/libwebp"
+    )
+    foreach(_candidate IN LISTS _candidate_paths)
+        if(EXISTS "${_candidate}/src/webp/decode.h")
+            set(LIBWEBP_PATH "${_candidate}")
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT EXISTS "${LIBWEBP_PATH}/src/webp/decode.h")
+    message(FATAL_ERROR "libwebp source tree not found. Set LIBWEBP_PATH or place libwebp under a supported path.")
+endif()
 
 # ============================================================
 # 编译选项
 # ============================================================
-# 启用 NEON SIMD 优化（arm64-v8a 强制可用）
-if(ANDROID_ABI STREQUAL "arm64-v8a")
+# 启用 NEON SIMD 优化（arm64-v8a 强制可用，armeabi-v7a 需 -mfpu=neon）
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
     add_definitions(-DWEBP_HAVE_NEON)
+    if(ANDROID_ABI STREQUAL "armeabi-v7a")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfpu=neon")
+    endif()
 endif()
 
 # 注：不使用 -fvisibility=hidden，因为 Dart FFI 需要符号可见
@@ -53,8 +76,8 @@ set(WEBP_DSP_SOURCES
     ${LIBWEBP_PATH}/src/dsp/yuv.c
 )
 
-# NEON SIMD 优化（arm64-v8a）
-if(ANDROID_ABI STREQUAL "arm64-v8a")
+# NEON SIMD 优化（arm64-v8a / armeabi-v7a）
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
     list(APPEND WEBP_DSP_SOURCES
         ${LIBWEBP_PATH}/src/dsp/alpha_processing_neon.c
         ${LIBWEBP_PATH}/src/dsp/dec_neon.c
@@ -63,6 +86,24 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
         ${LIBWEBP_PATH}/src/dsp/rescaler_neon.c
         ${LIBWEBP_PATH}/src/dsp/upsampling_neon.c
         ${LIBWEBP_PATH}/src/dsp/yuv_neon.c
+    )
+endif()
+
+# x86 SIMD 优化（x86_64 SSE2/SSE41）
+if(ANDROID_ABI STREQUAL "x86_64")
+    list(APPEND WEBP_DSP_SOURCES
+        ${LIBWEBP_PATH}/src/dsp/alpha_processing_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/alpha_processing_sse41.c
+        ${LIBWEBP_PATH}/src/dsp/dec_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/dec_sse41.c
+        ${LIBWEBP_PATH}/src/dsp/filters_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/lossless_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/lossless_sse41.c
+        ${LIBWEBP_PATH}/src/dsp/rescaler_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/upsampling_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/upsampling_sse41.c
+        ${LIBWEBP_PATH}/src/dsp/yuv_sse2.c
+        ${LIBWEBP_PATH}/src/dsp/yuv_sse41.c
     )
 endif()
 
