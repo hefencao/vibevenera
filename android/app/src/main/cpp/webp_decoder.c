@@ -3,12 +3,10 @@
  *
  * 核心修复与优化：
  * 1. 彻底解决画面撕裂：使用 8 级输出环形缓冲区，隔离 C 层合成与 Dart 层读取。
- * 2. 消除色块拉伸/花屏：
- *    - 使用 MODE_RGBA (Straight Alpha) 解码，让 libwebp 缩放器在正确的色彩空间插值；
- *    - 解码后手动转换到 Premultiplied Alpha 用于合成。
+ * 2. 消除 Premul 往返转换：MODE_rgbA 直接输出 Premul，删除 straight_to_premul。
  * 3. 完美对齐：采用 (floor(x2*s) - floor(x1*s)) 计算宽度，确保子区域缩放后无缝拼接且无重叠。
  * 4. 状态原子性：帧迭代器推进放在解码成功之后，避免解码失败导致的状态不一致。
- * 5. 高性能混合：内部管线全面采用 Premultiplied Alpha，消除每像素除法开销。
+ * 5. 纯 Premultiplied Alpha 管线：MODE_rgbA 解码 → composite_region 合成 → 直接输出（无转换）。
  */
 
 #include "webp_decoder.h"
@@ -30,8 +28,7 @@
 #include "src/webp/demux.h"
 #include "src/webp/mux_types.h"
 
-/* 输出环形缓冲区数量（从 4 增加到 8，提供更大的安全余量） */
-#define OUTPUT_BUFFER_COUNT 8
+#define OUTPUT_BUFFER_COUNT 3
 
 /* ─── 微秒级计时 ─── */
 static int64_t now_us() {
@@ -64,7 +61,7 @@ struct WebPAnimContext {
     uint8_t* composite_canvas;
     int canvas_stride;
 
-    /* 输出环形缓冲区 (Straight Alpha) */
+    /* 输出环形缓冲区 (Premultiplied Alpha) */
     uint8_t* output_buf[OUTPUT_BUFFER_COUNT];
     int output_idx;
 
@@ -94,35 +91,12 @@ static void compute_scaled_dimensions(int src_w, int src_h, int max_w, int max_h
 }
 
 /**
- * 将 Straight Alpha RGBA 就地转换为 Premultiplied Alpha。
- *
- * 背景：libwebp 的缩放器对每个通道独立插值。若输入是 Premultiplied Alpha，
- * 颜色通道在透明区域的插值结果会出现数学错误，表现为动画中的"色块拉伸"。
- * 因此我们使用 MODE_RGBA (Straight Alpha) 解码，让缩放器在正确的色彩空间
- * 插值，然后再手动转换为 Premultiplied Alpha 供合成管线使用。
- */
-static void straight_to_premul(uint8_t* rgba, int stride, int w, int h) {
-    for (int j = 0; j < h; j++) {
-        uint32_t* p32 = (uint32_t*)(rgba + j * stride);
-        for (int i = 0; i < w; i++) {
-            uint32_t p = p32[i];
-            uint32_t a = (p >> 24) & 0xff;
-            if (a == 0 || a == 255) continue; /* 已是 Premultiplied */
-            uint32_t r = (((p & 0xff) * a) + 128) >> 8;
-            uint32_t g = ((((p >> 8) & 0xff) * a) + 128) >> 8;
-            uint32_t b = ((((p >> 16) & 0xff) * a) + 128) >> 8;
-            p32[i] = (a << 24) | (b << 16) | (g << 8) | r;
-        }
-    }
-}
-
-/**
- * 高效的 Premultiplied Alpha 混合。
+ * Premultiplied Alpha 混合（仅帧区域，无除法）。
  * 公式：out = src + dst * (255 - src_alpha) / 255
  */
 static void composite_region(uint8_t* canvas, int stride, int c_w, int c_h,
                              const uint8_t* frame, int f_stride, int f_w, int f_h,
-                             int off_x, int off_y, int blend) {
+                             int off_x, int off_y, int blend, int has_alpha) {
     int copy_w = f_w, copy_h = f_h;
     if (off_x < 0) { int s = -off_x; frame += s * 4; copy_w -= s; off_x = 0; }
     if (off_y < 0) { int s = -off_y; frame += s * f_stride; copy_h -= s; off_y = 0; }
@@ -130,62 +104,34 @@ static void composite_region(uint8_t* canvas, int stride, int c_w, int c_h,
     if (off_y + copy_h > c_h) copy_h = c_h - off_y;
     if (copy_w <= 0 || copy_h <= 0) return;
 
+    /* 快速路径：不混合 或 帧无 alpha → memcpy */
+    if (!blend || !has_alpha) {
+        for (int j = 0; j < copy_h; j++) {
+            uint32_t* dst32 = (uint32_t*)(canvas + (off_y + j) * stride + off_x * 4);
+            const uint32_t* src32 = (const uint32_t*)(frame + j * f_stride);
+            memcpy(dst32, src32, (size_t)copy_w * 4);
+        }
+        return;
+    }
+
+    /* Premultiplied Alpha 混合（仅半透明像素触发） */
     for (int j = 0; j < copy_h; j++) {
         uint32_t* dst32 = (uint32_t*)(canvas + (off_y + j) * stride + off_x * 4);
         const uint32_t* src32 = (const uint32_t*)(frame + j * f_stride);
-        if (!blend) {
-            memcpy(dst32, src32, (size_t)copy_w * 4);
-        } else {
-            for (int i = 0; i < copy_w; i++) {
-                uint32_t s = src32[i];
-                uint32_t sa = (s >> 24) & 0xff;
-                if (sa == 0) continue;
-                if (sa == 255) { dst32[i] = s; continue; }
+        for (int i = 0; i < copy_w; i++) {
+            uint32_t s = src32[i];
+            uint32_t sa = (s >> 24) & 0xff;
+            if (sa == 0) continue;
+            if (sa == 255) { dst32[i] = s; continue; }
 
-                uint32_t d = dst32[i];
-                uint32_t inv_sa = 255 - sa;
-
-                uint32_t r = (s & 0xff) + (((d & 0xff) * inv_sa + 128) >> 8);
-                uint32_t g = ((s >> 8) & 0xff) + ((((d >> 8) & 0xff) * inv_sa + 128) >> 8);
-                uint32_t b = ((s >> 16) & 0xff) + ((((d >> 16) & 0xff) * inv_sa + 128) >> 8);
-                uint32_t a = sa + ((((d >> 24) & 0xff) * inv_sa + 128) >> 8);
-
-                if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255; if (a > 255) a = 255;
-                dst32[i] = (a << 24) | (b << 16) | (g << 8) | r;
-            }
-        }
-    }
-}
-
-/* ─── 快速去预乘查表（避免每像素 3 次整数除法） ─── */
-static uint32_t g_unpremul_table[256];
-static int g_unpremul_table_init = 0;
-
-static void init_unpremul_table(void) {
-    if (g_unpremul_table_init) return;
-    g_unpremul_table[0] = 0;
-    for (int i = 1; i <= 255; i++) {
-        g_unpremul_table[i] = (uint32_t)((255.0 * 65536.0) / i + 0.5);
-    }
-    g_unpremul_table_init = 1;
-}
-
-/** 转换为直通 Alpha (Straight Alpha) 供 Flutter 使用（LUT 定点数，无除法） */
-static void copy_premul_to_straight(const uint8_t* src, int s_stride, uint8_t* dst, int d_stride, int w, int h) {
-    init_unpremul_table();
-    for (int j = 0; j < h; j++) {
-        const uint32_t* s32 = (const uint32_t*)(src + j * s_stride);
-        uint32_t* d32 = (uint32_t*)(dst + j * d_stride);
-        for (int i = 0; i < w; i++) {
-            uint32_t p = s32[i];
-            uint32_t a = (p >> 24) & 0xff;
-            if (a == 0 || a == 255) { d32[i] = p; continue; }
-            uint32_t f = g_unpremul_table[a];
-            uint32_t r = (((p & 0xff) * f) >> 16);
-            uint32_t g = ((((p >> 8) & 0xff) * f) >> 16);
-            uint32_t b = ((((p >> 16) & 0xff) * f) >> 16);
-            if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
-            d32[i] = (a << 24) | (b << 16) | (g << 8) | r;
+            uint32_t d = dst32[i];
+            uint32_t inv_sa = 255 - sa;
+            uint32_t r = (s & 0xff) + (((d & 0xff) * inv_sa + 128) >> 8);
+            uint32_t g = ((s >> 8) & 0xff) + ((((d >> 8) & 0xff) * inv_sa + 128) >> 8);
+            uint32_t b = ((s >> 16) & 0xff) + ((((d >> 16) & 0xff) * inv_sa + 128) >> 8);
+            uint32_t a = sa + ((((d >> 24) & 0xff) * inv_sa + 128) >> 8);
+            if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255; if (a > 255) a = 255;
+            dst32[i] = (a << 24) | (b << 16) | (g << 8) | r;
         }
     }
 }
@@ -300,10 +246,10 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
         ctx->frame_buf_size = needed;
     }
 
-    /* ── 6. 解码帧碎片（使用 MODE_RGBA Straight Alpha，确保缩放器插值正确） ── */
+    /* ── 6. 解码帧碎片（MODE_rgbA 直接输出 Premul，省去 straight_to_premul） ── */
     WebPDecoderConfig cfg; WebPInitDecoderConfig(&cfg);
     cfg.options.use_scaling = 1; cfg.options.scaled_width = f_w; cfg.options.scaled_height = f_h;
-    cfg.output.colorspace = MODE_RGBA; /* ← 关键：Straight Alpha，避免 Premultiplied 插值错误 */
+    cfg.output.colorspace = MODE_rgbA; /* Premultiplied Alpha，直接用于合成 */
     cfg.output.u.RGBA.rgba = ctx->frame_buf;
     cfg.output.u.RGBA.stride = f_w * 4;
     cfg.output.u.RGBA.size = ctx->frame_buf_size;
@@ -321,27 +267,23 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
         return NULL;
     }
 
-    /* ── 8. Straight → Premultiplied 转换（就地转换 frame_buf 中的有效像素） ── */
-    straight_to_premul(ctx->frame_buf, cfg.output.u.RGBA.stride, dec_w, dec_h);
-
-    /* ── 9. 合成到画布 ── */
+    /* ── 8. Premul 合成到画布（帧已是 Premul，无需 straight_to_premul） ── */
     composite_region(ctx->composite_canvas, ctx->canvas_stride, ctx->target_w, ctx->target_h,
                      ctx->frame_buf, cfg.output.u.RGBA.stride, dec_w, dec_h, f_x, f_y,
-                     (ctx->iter.blend_method == WEBP_MUX_BLEND));
+                     (ctx->iter.blend_method == WEBP_MUX_BLEND), ctx->iter.has_alpha);
 
-    /* ── 10. 记录帧位置与处置方式（用于下一帧的 DISPOSE_BACKGROUND） ── */
+    /* ── 9. 记录帧位置与处置方式 ── */
     ctx->prev_x = f_x; ctx->prev_y = f_y;
     ctx->prev_w = dec_w; ctx->prev_h = dec_h;
     ctx->prev_dispose = ctx->iter.dispose_method;
 
-    /* ── 11. 拷贝到输出环形缓冲区 ── */
+    /* ── 11. 输出到环形缓冲区（Premultiplied Alpha） ── */
     int out_idx = ctx->output_idx;
     ctx->output_idx = (ctx->output_idx + 1) % OUTPUT_BUFFER_COUNT;
-    copy_premul_to_straight(ctx->composite_canvas, ctx->canvas_stride,
-                            ctx->output_buf[out_idx], ctx->canvas_stride,
-                            ctx->target_w, ctx->target_h);
+    memcpy(ctx->output_buf[out_idx], ctx->composite_canvas,
+           (size_t)ctx->target_w * ctx->target_h * 4);
 
-    /* ── 12. 设置帧时长 ── */
+    /* ── 11. 设置帧时长 ── */
     if (duration_ms) {
         int d = ctx->iter.duration;
         if (d <= 10) d = 100;
