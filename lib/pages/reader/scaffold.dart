@@ -253,6 +253,90 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     );
   }
 
+  bool _showSpeedSlider = false;
+  double _dragStartY = 0;
+  double _dragStartSpeed = 1.0;
+
+  Widget _buildSpeedButton(BuildContext context) {
+    const speedMin = 0.25;
+    const speedMax = 2.0;
+    const sliderHeight = 160.0;
+
+    double normalizeSpeed(double s) => ((s - speedMin) / (speedMax - speedMin)).clamp(0.0, 1.0);
+    double denormalizeSpeed(double v) {
+      final s = speedMin + v * (speedMax - speedMin);
+      for (final p in webpSpeedPresets) {
+        if ((s - p).abs() < 0.03) return p;
+      }
+      return (s * 100).round() / 100;
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _showSpeedSlider ? null : () {
+        final idx = webpSpeedPresets.indexOf(webpPlaybackSpeed);
+        final next = webpSpeedPresets[(idx + 1) % webpSpeedPresets.length];
+        setState(() => webpPlaybackSpeed = next);
+      },
+      onLongPressStart: (details) {
+        _dragStartY = details.globalPosition.dy;
+        _dragStartSpeed = webpPlaybackSpeed;
+        setState(() => _showSpeedSlider = true);
+      },
+      onLongPressMoveUpdate: (details) {
+        final delta = (_dragStartY - details.globalPosition.dy) / sliderHeight;
+        final speed = (_dragStartSpeed + delta * (speedMax - speedMin)).clamp(speedMin, speedMax);
+        setState(() => webpPlaybackSpeed = denormalizeSpeed(normalizeSpeed(speed)));
+      },
+      onLongPressEnd: (_) => setState(() => _showSpeedSlider = false),
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.bottomCenter,
+        children: [
+          if (_showSpeedSlider)
+            Positioned(
+              bottom: 40,
+              child: Container(
+                width: 25,
+                height: sliderHeight,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    Text('${webpPlaybackSpeed}x', style: const TextStyle(fontSize: 11)),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: CustomPaint(
+                        painter: _SpeedSliderPainter(
+                          value: normalizeSpeed(webpPlaybackSpeed),
+                          presets: webpSpeedPresets,
+                          min: speedMin,
+                          max: speedMax,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Container(
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.tertiaryContainer,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Center(child: Text('${webpPlaybackSpeed}x', style: const TextStyle(fontSize: 13))),
+          ),
+        ],
+      ),
+    );
+  }
+
   void addImageFavorite() async {
     try {
       if (context.reader.images![0].contains('file://')) {
@@ -397,6 +481,8 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     }
 
     final buttons = [
+      // 播放速度按钮
+      _buildSpeedButton(context),
       Tooltip(
         message: "Collect the image".tl,
         child: IconButton(
@@ -1179,4 +1265,48 @@ class _SelectImageOverlayContentState
       ),
     );
   }
+}
+
+class _SpeedSliderPainter extends CustomPainter {
+  final double value;
+  final List<double> presets;
+  final double min;
+  final double max;
+  final Color color;
+
+  const _SpeedSliderPainter({
+    required this.value,
+    required this.presets,
+    required this.min,
+    required this.max,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centerX = size.width / 2;
+    final trackPaint = Paint()
+      ..color = Colors.grey.withValues(alpha: 0.3)
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    final activePaint = Paint()
+      ..color = color
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round;
+    const topPadding = 8.0, bottomPadding = 8.0;
+    final top = topPadding, bottom = size.height - bottomPadding;
+    canvas.drawLine(Offset(centerX, top), Offset(centerX, bottom), trackPaint);
+    final y = bottom - value * (bottom - top);
+    canvas.drawLine(Offset(centerX, y), Offset(centerX, bottom), activePaint);
+    final tickPaint = Paint()..color = color..strokeWidth = 1.5;
+    for (final p in presets) {
+      final t = (p - min) / (max - min);
+      final py = bottom - t * (bottom - top);
+      canvas.drawLine(Offset(centerX - 6, py), Offset(centerX + 6, py), tickPaint);
+    }
+    canvas.drawCircle(Offset(centerX, y), 6, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_SpeedSliderPainter oldDelegate) => oldDelegate.value != value;
 }

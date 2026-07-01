@@ -344,12 +344,16 @@ List<Map<String, dynamic>>? _decodeAllFramesSync(
 // Stream Completer
 // ═══════════════════════════════════════════════════════════════
 
+/// 全局 WebP 动画播放速度。
+double webpPlaybackSpeed = 1.0;
+const List<double> webpSpeedPresets = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
 class _WebPImageStreamCompleter extends ImageStreamCompleter {
   final WebPImageProvider _provider;
   bool _disposed = false;
-  int _loadStartMs = 0; // loadImage 调用时刻，用于首帧端到端计时
+  int _loadStartMs = 0;
 
-  /// 活跃动画追踪（仅用于内存上限，超限时 dispose 最旧）
+  /// 活跃动画追踪
   static final List<_WebPImageStreamCompleter> _active = [];
   static const int _maxActive = 3; // PageView 可见范围 ~3 页，只保留这些动画
   void Function()? _disposeDecoder;
@@ -492,7 +496,9 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
 
       final frame = pendingFrame!;
       pendingFrame = null;
-      final int duration = frame.durationMs <= 10 ? 33 : frame.durationMs;
+      final int minFrameMs = 16;
+      final int rawDuration = frame.durationMs <= 5 ? 33 : frame.durationMs.clamp(minFrameMs, 500);
+      final int duration = (rawDuration / webpPlaybackSpeed).round().clamp(minFrameMs, 500);
       final int length = decoder.targetWidth * decoder.targetHeight * 4;
       final rgba = Pointer<Uint8>.fromAddress(frame.address).asTypedList(length);
       final int t0 = DateTime.now().millisecondsSinceEpoch;
