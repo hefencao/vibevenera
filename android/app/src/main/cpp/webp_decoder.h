@@ -65,8 +65,9 @@ WebPAnimContext* webp_anim_decoder_new(
 /**
  * 获取下一帧的合成结果（已在目标分辨率）。
  *
- * 使用双缓冲：返回指向 output buffer 的指针（Straight Alpha RGBA，
- * 大小 = target_w * target_h * 4）。该指针在接下来两次调用内有效。
+ * 从原生缓冲池获取缓冲区，写入 Premultiplied Alpha RGBA 数据
+ *（大小 = target_w * target_h * 4）。调用者必须在 GPU 上传完成后
+ * 调用 webp_native_pool_release() 归还缓冲区。
  * 失败或无更多帧时返回 NULL。
  *
  * @param ctx            解码器上下文
@@ -89,6 +90,14 @@ void webp_anim_decoder_reset(WebPAnimContext* ctx);
  * 销毁解码器，释放所有资源。
  */
 void webp_anim_decoder_delete(WebPAnimContext* ctx);
+
+/**
+ * 动态调整动画解码器的 libwebp 内部线程数。
+ *
+ * @param ctx          解码器句柄
+ * @param use_threads  线程数量（0 或 1 表示单线程，2 或 3 表示多线程并发）
+ */
+void webp_anim_decoder_set_thread_limit(WebPAnimContext* ctx, int use_threads);
 
 /**
  * 返回当前存活的解码器数量（调试内存泄漏）。
@@ -144,6 +153,26 @@ uint8_t* webp_decode_fragment_scaled(
  * 释放 webp_decode_scaled 返回的 buffer。
  */
 void webp_free_buffer(uint8_t* buf);
+
+/* ─── 原生缓冲池（Zero-Copy 管线） ─── */
+
+/**
+ * 从缓冲池申请一个空闲的原生缓冲区。
+ * 如果池中有闲置 buffer 则直接复用；若无，则动态分配。
+ * 线程安全。
+ */
+uint8_t* webp_native_pool_acquire(size_t size);
+
+/**
+ * 归还一个原生缓冲区到池中，标记为可重新分配。
+ * 如果 ptr 不在池管理范围内，直接 free()。
+ */
+void webp_native_pool_release(uint8_t* ptr);
+
+/**
+ * 彻底销毁缓冲池，释放所有物理内存。
+ */
+void webp_native_pool_destroy(void);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
 
@@ -140,11 +141,28 @@ typedef _WebPAnimDecoderResetDart = void Function(Pointer<Void> ctx);
 typedef _WebPAnimDecoderDeleteNative = Void Function(Pointer<Void> ctx);
 typedef _WebPAnimDecoderDeleteDart = void Function(Pointer<Void> ctx);
 
+typedef _WebPAnimDecoderSetThreadLimitNative = Void Function(
+  Pointer<Void> ctx,
+  Int32 useThreads,
+);
+typedef _WebPAnimDecoderSetThreadLimitDart = void Function(
+  Pointer<Void> ctx,
+  int useThreads,
+);
+
 typedef _WebPAnimDecoderAliveCountNative = Int32 Function();
 typedef _WebPAnimDecoderAliveCountDart = int Function();
 
 typedef _WebPFreeBufferNative = Void Function(Pointer<Uint8> buf);
 typedef _WebPFreeBufferDart = void Function(Pointer<Uint8> buf);
+
+// ─── 原生缓冲池 API（Zero-Copy 管线） ───
+
+typedef _WebPNativePoolAcquireNative = Pointer<Uint8> Function(Uint64 size);
+typedef _WebPNativePoolAcquireDart = Pointer<Uint8> Function(int size);
+
+typedef _WebPNativePoolReleaseNative = Void Function(Pointer<Uint8> ptr);
+typedef _WebPNativePoolReleaseDart = void Function(Pointer<Uint8> ptr);
 
 // ─── 帧提取 API（用于并行解码） ───
 
@@ -210,8 +228,11 @@ class _WebPBindings {
   late final _WebPAnimDecoderHasMoreDart animHasMore;
   late final _WebPAnimDecoderResetDart animReset;
   late final _WebPAnimDecoderDeleteDart animDelete;
+  late final _WebPAnimDecoderSetThreadLimitDart animSetThreadLimit;
   late final _WebPAnimDecoderAliveCountDart animAliveCount;
   late final _WebPFreeBufferDart freeBuffer;
+  late final _WebPNativePoolAcquireDart poolAcquire;
+  late final _WebPNativePoolReleaseDart poolRelease;
   late final _WebPAnimExtractFramesDart animExtractFrames;
   late final _WebPFreeFrameListDart freeFrameList;
   late final _WebPDecodeFragmentScaledDart decodeFragmentScaled;
@@ -231,10 +252,16 @@ class _WebPBindings {
         _WebPAnimDecoderResetDart>('webp_anim_decoder_reset');
     animDelete = _lib.lookupFunction<_WebPAnimDecoderDeleteNative,
         _WebPAnimDecoderDeleteDart>('webp_anim_decoder_delete');
+    animSetThreadLimit = _lib.lookupFunction<_WebPAnimDecoderSetThreadLimitNative,
+        _WebPAnimDecoderSetThreadLimitDart>('webp_anim_decoder_set_thread_limit');
     animAliveCount = _lib.lookupFunction<_WebPAnimDecoderAliveCountNative,
         _WebPAnimDecoderAliveCountDart>('webp_anim_decoder_alive_count');
     freeBuffer = _lib.lookupFunction<_WebPFreeBufferNative, _WebPFreeBufferDart>(
         'webp_free_buffer');
+    poolAcquire = _lib.lookupFunction<_WebPNativePoolAcquireNative,
+        _WebPNativePoolAcquireDart>('webp_native_pool_acquire');
+    poolRelease = _lib.lookupFunction<_WebPNativePoolReleaseNative,
+        _WebPNativePoolReleaseDart>('webp_native_pool_release');
     animExtractFrames = _lib.lookupFunction<_WebPAnimExtractFramesNative,
         _WebPAnimExtractFramesDart>('webp_anim_extract_frames');
     freeFrameList = _lib.lookupFunction<_WebPFreeFrameListNative,
@@ -267,6 +294,14 @@ bool isWebP(Uint8List data) {
 // ═══════════════════════════════════════════════════════════════
 // 公共 API
 // ═══════════════════════════════════════════════════════════════
+
+/// 归还 Native Buffer Pool 中的缓冲区（零拷贝管线闭环）。
+///
+/// 必须在 decodeImageFromPixels 的完成回调中调用，
+/// 此时 GPU 已安全读取完像素数据。
+void nativePoolRelease(int address) {
+  _bind.poolRelease(Pointer<Uint8>.fromAddress(address));
+}
 
 /// 获取 WebP 图片基本信息
 WebPImageInfo? getInfo(Uint8List data) {
@@ -391,7 +426,7 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
       targetWidth: aW.value,
       targetHeight: aH.value,
     );
-    debugPrint('[WebP-DECODER] CREATE #${_bind.animAliveCount()} ctx=${ctx.address.toRadixString(16)} frames=${decoder.frameCount} target=${decoder.targetWidth}x${decoder.targetHeight}');
+    debugPrint('[WebP] +decoder #${_bind.animAliveCount()} ${decoder.frameCount}f ${decoder.targetWidth}x${decoder.targetHeight}');
     return decoder;
   } finally {
     calloc.free(cW);
@@ -404,132 +439,245 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 动画解码器类
+// 高能效渲染引擎：调度器与解码器
 // ═══════════════════════════════════════════════════════════════
 
-/// 动画 WebP 解码器。
-///
-/// 内部持有 native 的 demuxer + 合成画布。
-/// 帧解码直接得到目标尺寸的 RGBA（C 层已完成 composite + downscale）。
-///
-/// **第一次循环时缓存所有帧 RGBA，后续循环直接从缓存读取，不再调用 C。**
-/// Isolate Worker 池：N 个持久化 Worker。
-///
-/// 消息协议：
-///   Main → Worker decode: [reqId, ctxAddr, gen]
-///   Main → Worker cancel: [null, ctxAddr, 0]
-///   Worker → Main reply:  [reqId, rgbaAddr, durationMs] or null on failure
-///
-/// 所有回复通过单一 ReceivePort 路由，按 reqId 匹配到对应 Completer，
-/// 消除每帧创建 ReceivePort 的开销。
-class _WorkerPool {
-  final List<SendPort> _workers = [];
-  bool _init = false;
-  static int _nextGen = 1;
+/// 任务优先级（对应页面状态）
+enum DecodePriority {
+  current,    // 最高：当前页，多线程
+  next,       // 中等：预取页，单线程
+  background  // 最低：远端预读，单线程
+}
 
-  // ── Request tracking ──
-  final Map<int, Completer<List<Object?>?>> _pending = {};
-  int _nextReqId = 1;
-  late final ReceivePort _replyReceiver;
+/// 解码任务
+class DecodeJob {
+  final int generation;
+  final int decoderAddress;
+  final int framesToDecode;
+  final int targetW;
+  final int targetH;
+  final void Function(List<WebPAnimFrameAddress> frames) onComplete;
 
-  static int nextGen() => _nextGen++;
+  DecodeJob({
+    required this.generation,
+    required this.decoderAddress,
+    required this.framesToDecode,
+    required this.targetW,
+    required this.targetH,
+    required this.onComplete,
+  });
+}
 
-  int _workerIndex(int ctxAddr) =>
-      (ctxAddr.hashCode & 0x7FFFFFFF) % _workers.length;
+/// 全局工作池调度器
+class WorkerPoolScheduler {
+  static final WorkerPoolScheduler instance = WorkerPoolScheduler._();
+  WorkerPoolScheduler._();
 
-  Future<void> _ensureInit() async {
-    if (_init) return;
-    _init = true;
+  final Queue<DecodeJob> _currentQueue = Queue();
+  final Queue<DecodeJob> _nextQueue = Queue();
+  final Queue<DecodeJob> _bgQueue = Queue();
 
-    // 创建全局回复端口，所有 worker 共用
-    _replyReceiver = ReceivePort();
-    _replyReceiver.listen((msg) {
-      final list = msg as List<Object?>?;
-      if (list == null || list.isEmpty) return;
-      final reqId = list[0] as int;
-      final completer = _pending.remove(reqId);
-      if (completer == null) return;
-      // list == [reqId] 表示失败(null)，list == [reqId, addr, dur] 表示成功
-      if (list.length < 3) {
-        completer.complete(null);
-      } else {
-        completer.complete(list);
-      }
-    });
+  bool _isProcessing = false;
+  int _currentGeneration = 0;
 
-    final replySendPort = _replyReceiver.sendPort;
-    for (int i = 0; i < 3; i++) {
-      final r = ReceivePort();
-      await Isolate.spawn((SendPort mainPort) {
-        final workerR = ReceivePort();
-        mainPort.send(workerR.sendPort);
-        final lib = DynamicLibrary.open('libvenera_webp.so');
-        final animGetFrame = lib.lookupFunction<_WebPAnimDecoderGetFrameNative, _WebPAnimDecoderGetFrameDart>('webp_anim_decoder_get_frame');
-        final Map<int, int> validGens = {};
-        // 首条消息是 replySendPort，后续是 List 消息
-        late final SendPort replyPort;
-        bool gotReplyPort = false;
-        workerR.listen((msg) {
-          if (!gotReplyPort) {
-            replyPort = msg as SendPort;
-            gotReplyPort = true;
-            return;
-          }
-          final list = msg as List<Object?>;
-          final reqId = list[0]; // int or null
-          final ctxAddr = list[1] as int;
-          if (reqId == null) {
-            // 控制消息：gen=0 移除 generation
-            if (list[2] as int == 0) validGens.remove(ctxAddr);
-            return;
-          }
-          final gen = list[2] as int;
-          if (validGens.containsKey(ctxAddr) && validGens[ctxAddr] != gen) {
-            replyPort.send(<Object?>[reqId]); // gen 不匹配
-            return;
-          }
-          validGens[ctxAddr] = gen;
-          final durationMs = calloc<Int32>();
-          try {
-            final ctx = Pointer<Void>.fromAddress(ctxAddr);
-            final rgbaPtr = animGetFrame(ctx, durationMs);
-            if (rgbaPtr == Pointer.fromAddress(0)) {
-              replyPort.send(<Object?>[reqId]); // decode 失败
-            } else {
-              replyPort.send(<Object?>[reqId, rgbaPtr.address, durationMs.value]);
-            }
-          } finally {
-            calloc.free(durationMs);
-          }
-        });
-      }, r.sendPort);
-      // worker 先发来它的 SendPort，我们再把 reply port 发回去
-      final workerSendPort = await r.first as SendPort;
-      workerSendPort.send(replySendPort);
-      _workers.add(workerSendPort);
-      r.close();
+  // 双工作线程：Worker 0 优先服务 CURRENT，Worker 1 处理 NEXT/BG 及溢出
+  final List<SendPort?> _workerPorts = [null, null];
+  final List<bool> _isInitializing = [false, false];
+  final List<bool> _workerBusy = [false, false];
+
+  void updateGeneration(int newGen) {
+    _currentGeneration = newGen;
+  }
+
+  Future<void> _ensureWorker(int index) async {
+    if (_workerPorts[index] != null || _isInitializing[index]) return;
+    _isInitializing[index] = true;
+    try {
+      final receivePort = ReceivePort();
+      await Isolate.spawn(_workerEntry, [receivePort.sendPort, index]);
+      _workerPorts[index] = await receivePort.first as SendPort;
+    } catch (e) {
+      debugPrint('[WebP-Worker] Failed to initialize worker $index: $e');
+    } finally {
+      _isInitializing[index] = false;
     }
   }
 
-  /// 发送 decode 请求并等待结果。
-  Future<List<Object?>?> sendRequest(int ctxAddr, int gen) async {
-    await _ensureInit();
-    final reqId = _nextReqId++;
-    final completer = Completer<List<Object?>?>();
-    _pending[reqId] = completer;
-    _workers[_workerIndex(ctxAddr)].send(<Object?>[reqId, ctxAddr, gen]);
-    return completer.future;
+  /// Worker Isolate 入口：批量解码，帧数据从原生缓冲池获取
+  /// 消息格式：[replyPort, decoderAddress, count, targetW, targetH, generation]
+  /// 回复格式：[addr1, dur1, addr2, dur2, ...]  (所有帧批量返回)
+  static void _workerEntry(List args) {
+    final mainPort = args[0] as SendPort;
+    final workerIndex = args[1] as int;
+    final receivePort = ReceivePort();
+    mainPort.send(receivePort.sendPort);
+
+    _WebPBindings? bindings;
+    try {
+      bindings = _WebPBindings(_loadLibrary());
+    } catch (e) {
+      debugPrint('[WebP-Worker] w$workerIndex lib load FAILED: $e');
+    }
+
+    final durationMsPtr = calloc<Int32>();
+
+    receivePort.listen((message) {
+      final data = message as List;
+      final replyPort = data[0] as SendPort;
+      final decoderAddress = data[1] as int;
+      final count = data[2] as int;
+      // data[3]=targetW, data[4]=targetH, data[5]=generation (reserved)
+
+      if (bindings == null) {
+        replyPort.send('Error: Library not loaded');
+        return;
+      }
+
+      final List<int> results = [];
+
+      try {
+        if (decoderAddress == 0) {
+          replyPort.send('Error: Null decoder');
+          return;
+        }
+
+        final ctx = Pointer<Void>.fromAddress(decoderAddress);
+        for (int i = 0; i < count; i++) {
+          final rgbaPtr = bindings.animGetFrame(ctx, durationMsPtr);
+          if (rgbaPtr == Pointer.fromAddress(0)) break;
+          results.add(rgbaPtr.address);
+          results.add(durationMsPtr.value);
+        }
+        replyPort.send(results);
+      } catch (e, stack) {
+        debugPrint('[WebP-Worker] w$workerIndex crash: $e\n$stack');
+        replyPort.send('Error: $e');
+      }
+    });
   }
 
-  /// 使指定 ctx 的所有在途消息失效。
-  void cancelCtx(int ctxAddress) {
-    if (!_init || _workers.isEmpty) return;
-    for (final w in _workers) {
-      w.send(<Object?>[null, ctxAddress, 0]);
+  void dispatch(DecodeJob job, DecodePriority priority) {
+    switch (priority) {
+      case DecodePriority.current:
+        _currentQueue.add(job);
+        break;
+      case DecodePriority.next:
+        _nextQueue.add(job);
+        break;
+      case DecodePriority.background:
+        _bgQueue.add(job);
+        break;
+    }
+    _scheduleNext();
+  }
+
+  void _scheduleNext() {
+    if (_isProcessing) return;
+    _isProcessing = true;
+    scheduleMicrotask(() async {
+      try {
+        await _ensureWorker(0);
+        await _ensureWorker(1);
+        await _processQueues();
+      } catch (e, stack) {
+        debugPrint('[WebP-Worker] ERROR: $e\n$stack');
+      } finally {
+        _isProcessing = false;
+      }
+    });
+  }
+
+  Future<void> _processQueues() async {
+    while (true) {
+      // 找一个空闲 worker
+      int? w;
+      if (!_workerBusy[0]) {
+        w = 0;
+      } else if (!_workerBusy[1]) {
+        w = 1;
+      } else {
+        break; // 两个 worker 都忙
+      }
+
+      // 从优先级队列取 job
+      DecodeJob? job;
+      DecodePriority? jobPri;
+      if (_currentQueue.isNotEmpty) {
+        job = _currentQueue.removeFirst();
+        jobPri = DecodePriority.current;
+      } else if (_nextQueue.isNotEmpty) {
+        job = _nextQueue.removeFirst();
+        jobPri = DecodePriority.next;
+      } else if (_bgQueue.isNotEmpty) {
+        job = _bgQueue.removeFirst();
+        jobPri = DecodePriority.background;
+      } else {
+        break; // 无任务
+      }
+
+      if (job.generation != _currentGeneration) {
+        // 过期任务：释放深拷贝缓冲区（由 onComplete 处理，这里传空列表）
+        job.onComplete([]);
+        continue;
+      }
+
+      // CURRENT 优先用 Worker 0
+      final targetWorker = (jobPri == DecodePriority.current && !_workerBusy[0]) ? 0 : w;
+      _runJob(job, targetWorker);
+    }
+  }
+
+  /// 派发单个 job 到指定 worker，等待批量回复后调用 onComplete
+  void _runJob(DecodeJob job, int workerIndex) async {
+    final port = _workerPorts[workerIndex];
+    if (port == null) {
+      job.onComplete([]);
+      return;
+    }
+
+    _workerBusy[workerIndex] = true;
+    final t0 = DateTime.now().microsecondsSinceEpoch;
+    try {
+      final replyPort = ReceivePort();
+      port.send([replyPort.sendPort, job.decoderAddress, job.framesToDecode,
+                 job.targetW, job.targetH, job.generation]);
+
+      final result = await replyPort.first;
+      replyPort.close();
+      final dt = (DateTime.now().microsecondsSinceEpoch - t0) ~/ 1000;
+
+      if (result is List<int>) {
+        final n = result.length ~/ 2;
+        if (job.generation == _currentGeneration) {
+          final List<WebPAnimFrameAddress> frames = [];
+          for (int i = 0; i < result.length; i += 2) {
+            frames.add(WebPAnimFrameAddress(
+              address: result[i],
+              durationMs: result[i + 1],
+            ));
+          }
+          debugPrint('[WebP-Worker] w$workerIndex +$n frames ${dt}ms gen=${job.generation}');
+          job.onComplete(frames);
+        } else {
+          // 过期：归还原生缓冲池中的帧缓冲区
+          for (int i = 0; i < result.length; i += 2) {
+            nativePoolRelease(result[i]);
+          }
+          job.onComplete([]);
+        }
+      } else {
+        debugPrint('[WebP-Worker] w$workerIndex error: $result');
+        job.onComplete([]);
+      }
+    } catch (e) {
+      debugPrint('[WebP-Worker] w$workerIndex exception: $e');
+      job.onComplete([]);
+    } finally {
+      _workerBusy[workerIndex] = false;
+      _scheduleNext();
     }
   }
 }
-final _workerPool = _WorkerPool();
 
 class WebPAnimDecoder {
   final _WebPBindings _bindings;
@@ -565,14 +713,22 @@ class WebPAnimDecoder {
         _ctx = ctx,
         _nativeData = nativeData;
 
+  int get address => _ctx.address;
+
   /// 当前是否仍有帧可获取（委托 C 层判断）
   bool get hasMoreFrames {
     _checkNotDisposed();
     return _bindings.animHasMore(_ctx) != 0;
   }
 
+  /// 动态设置解码线程限制 (0/1=单线程, 2/3=多线程)
+  void setThreadLimit(int useThreads) {
+    _checkNotDisposed();
+    _bindings.animSetThreadLimit(_ctx, useThreads);
+  }
+
   /// 获取下一帧（目标尺寸 RGBA，deep copy 到 dart heap）。
-  /// 注意：热路径走 [getNextFrameAsync]（零拷贝），此方法仅用于离线批量解码。
+  /// 仅用于离线批量解码或同步场景。
   WebPAnimFrame? getNextFrame() {
     _checkNotDisposed();
     if (!hasMoreFrames) return null;
@@ -591,18 +747,6 @@ class WebPAnimDecoder {
     }
   }
 
-  final int _workerGen = _WorkerPool.nextGen();
-
-  /// 通过 Isolate Worker 池获取下一帧（零拷贝，返回 C buffer 地址）。
-  /// 消息携带 generation 计数器，Worker 校验通过后才执行 decode，
-  /// 防止 dispose 后 Worker 仍访问已释放的 ctx。
-  Future<WebPAnimFrameAddress?> getNextFrameAsync() async {
-    _checkNotDisposed();
-    final result = await _workerPool.sendRequest(_ctx.address, _workerGen);
-    if (result == null) return null;
-    return WebPAnimFrameAddress(address: result[1] as int, durationMs: result[2] as int);
-  }
-
   /// 重置到第一帧
   void reset() {
     _checkNotDisposed();
@@ -613,12 +757,9 @@ class WebPAnimDecoder {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    // 通知 Worker 取消该 ctx 的所有在途消息
-    _workerPool.cancelCtx(_ctx.address);
-    final ctxAddr = _ctx.address.toRadixString(16);
     _bindings.animDelete(_ctx);
     final alive = _bindings.animAliveCount();
-    debugPrint('[WebP-DECODER] DISPOSE ctx=$ctxAddr remaining=$alive');
+    debugPrint('[WebP] -decoder ($alive remain)');
     _nativeData._free();
   }
 

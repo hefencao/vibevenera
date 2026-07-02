@@ -1,8 +1,9 @@
 /**
  * webp_decoder.c — Venera WebP 解码封装层
  *
- * 核心修复与优化：
- * 1. 彻底解决画面撕裂：使用 8 级输出环形缓冲区，隔离 C 层合成与 Dart 层读取。
+ * 核心架构：
+ * 1. 原生缓冲池（Native Buffer Pool）：替代静态环形缓冲区，实现零拷贝管线。
+ *    解码帧从池中获取缓冲区，Dart 层 GPU 上传完成后归还。
  * 2. 消除 Premul 往返转换：MODE_rgbA 直接输出 Premul，删除 straight_to_premul。
  * 3. 完美对齐：采用 (floor(x2*s) - floor(x1*s)) 计算宽度，确保子区域缩放后无缝拼接且无重叠。
  * 4. 状态原子性：帧迭代器推进放在解码成功之后，避免解码失败导致的状态不一致。
@@ -16,6 +17,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <sys/time.h>
 #include <android/log.h>
 
@@ -28,13 +30,91 @@
 #include "src/webp/demux.h"
 #include "src/webp/mux_types.h"
 
-#define OUTPUT_BUFFER_COUNT 3
+#define POOL_MAX_SIZE 12
 
 /* ─── 微秒级计时 ─── */
 static int64_t now_us() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000000 + (int64_t)tv.tv_usec;
+}
+
+/* ================================================================
+ * 原生缓冲池（Zero-Copy 管线核心）
+ * ================================================================ */
+
+typedef struct {
+    uint8_t* ptr;
+    size_t capacity;
+    int in_use;
+} NativeBuffer;
+
+static NativeBuffer g_buffer_pool[POOL_MAX_SIZE] = {0};
+static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+uint8_t* webp_native_pool_acquire(size_t size) {
+    pthread_mutex_lock(&g_pool_mutex);
+
+    // 1. 寻找池中未在使用、容量足够的 buffer
+    for (int i = 0; i < POOL_MAX_SIZE; i++) {
+        if (!g_buffer_pool[i].in_use && g_buffer_pool[i].ptr != NULL) {
+            if (g_buffer_pool[i].capacity >= size) {
+                g_buffer_pool[i].in_use = 1;
+                pthread_mutex_unlock(&g_pool_mutex);
+                return g_buffer_pool[i].ptr;
+            }
+            free(g_buffer_pool[i].ptr);
+            g_buffer_pool[i].ptr = (uint8_t*)malloc(size);
+            g_buffer_pool[i].capacity = size;
+            g_buffer_pool[i].in_use = 1;
+            pthread_mutex_unlock(&g_pool_mutex);
+            return g_buffer_pool[i].ptr;
+        }
+    }
+
+    // 2. 寻找空槽初始化
+    for (int i = 0; i < POOL_MAX_SIZE; i++) {
+        if (g_buffer_pool[i].ptr == NULL) {
+            g_buffer_pool[i].ptr = (uint8_t*)malloc(size);
+            g_buffer_pool[i].capacity = size;
+            g_buffer_pool[i].in_use = 1;
+            pthread_mutex_unlock(&g_pool_mutex);
+            return g_buffer_pool[i].ptr;
+        }
+    }
+
+    // 3. 槽位全满，直接 malloc（不入池，release 时直接 free）
+    pthread_mutex_unlock(&g_pool_mutex);
+    LOGD("[POOL] All %d slots busy, fallback malloc(%zu)", POOL_MAX_SIZE, size);
+    return (uint8_t*)malloc(size);
+}
+
+void webp_native_pool_release(uint8_t* ptr) {
+    if (!ptr) return;
+    pthread_mutex_lock(&g_pool_mutex);
+    for (int i = 0; i < POOL_MAX_SIZE; i++) {
+        if (g_buffer_pool[i].ptr == ptr) {
+            g_buffer_pool[i].in_use = 0;
+            pthread_mutex_unlock(&g_pool_mutex);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&g_pool_mutex);
+    // 非池中管理的 buffer，直接释放
+    free(ptr);
+}
+
+void webp_native_pool_destroy(void) {
+    pthread_mutex_lock(&g_pool_mutex);
+    for (int i = 0; i < POOL_MAX_SIZE; i++) {
+        if (g_buffer_pool[i].ptr != NULL) {
+            free(g_buffer_pool[i].ptr);
+            g_buffer_pool[i].ptr = NULL;
+            g_buffer_pool[i].capacity = 0;
+            g_buffer_pool[i].in_use = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_pool_mutex);
 }
 
 /* ================================================================
@@ -61,16 +141,14 @@ struct WebPAnimContext {
     uint8_t* composite_canvas;
     int canvas_stride;
 
-    /* 输出环形缓冲区 (Premultiplied Alpha) */
-    uint8_t* output_buf[OUTPUT_BUFFER_COUNT];
-    int output_idx;
-
     /* 复用帧解码缓冲 */
     uint8_t* frame_buf;
     size_t frame_buf_size;
 
     WebPIterator iter;
     int has_frame;
+
+    int use_threads; /* libwebp 线程数 (0/1=单线程, 2/3=多线程) */
 };
 
 /* ================================================================
@@ -188,6 +266,7 @@ WebPAnimContext* webp_anim_decoder_new(const uint8_t* data, size_t size, int tar
     int t_w, t_h;
     compute_scaled_dimensions(orig_w, orig_h, target_width, target_height, &t_w, &t_h);
     WebPAnimContext* ctx = (WebPAnimContext*)calloc(1, sizeof(WebPAnimContext));
+    if (!ctx) { WebPDemuxDelete(demux); return NULL; }
     ctx->demux = demux; ctx->orig_canvas_w = orig_w; ctx->orig_canvas_h = orig_h;
     ctx->target_w = t_w; ctx->target_h = t_h; ctx->scale_x = (double)t_w / orig_w; ctx->scale_y = (double)t_h / orig_h;
     ctx->frame_count = WebPDemuxGetI(demux, WEBP_FF_FRAME_COUNT);
@@ -195,7 +274,7 @@ WebPAnimContext* webp_anim_decoder_new(const uint8_t* data, size_t size, int tar
     ctx->canvas_stride = t_w * 4;
     size_t canvas_bytes = (size_t)t_w * t_h * 4;
     ctx->composite_canvas = (uint8_t*)calloc(1, canvas_bytes);
-    for (int i = 0; i < OUTPUT_BUFFER_COUNT; i++) ctx->output_buf[i] = (uint8_t*)calloc(1, canvas_bytes);
+    if (!ctx->composite_canvas) { WebPDemuxDelete(demux); free(ctx); return NULL; }
     g_alive_contexts++;
     LOGI("[LIFECYCLE] NEW  ctx=%p total_alive=%d frames=%d canvas=%dx%d target=%dx%d",
          (void*)ctx, g_alive_contexts, ctx->frame_count, orig_w, orig_h, t_w, t_h);
@@ -206,6 +285,7 @@ WebPAnimContext* webp_anim_decoder_new(const uint8_t* data, size_t size, int tar
 }
 
 uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
+    if (!ctx) return NULL;
     /* ── 1. 循环边界处理 ── */
     if (ctx->has_frame && ctx->total_frames_decoded >= ctx->frame_count) {
         if (ctx->loop_count > 0 && ctx->current_loop + 1 >= ctx->loop_count) return NULL;
@@ -229,6 +309,7 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     }
     /* 帧计数器在此处推进，确保即使后续解码失败，计数器与迭代器保持同步 */
     ctx->total_frames_decoded++;
+    // LOGD("Decode frame %d/%d (loop %d)", ctx->current_frame_num, ctx->frame_count, ctx->current_loop);
 
     /* ── 4. 计算缩放后的帧参数 ── */
     int f_x = (int)floor(ctx->iter.x_offset * ctx->scale_x);
@@ -236,6 +317,8 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     int f_w = (int)floor((ctx->iter.x_offset + ctx->iter.width) * ctx->scale_x) - f_x;
     int f_h = (int)floor((ctx->iter.y_offset + ctx->iter.height) * ctx->scale_y) - f_y;
     if (f_w <= 0) f_w = 1; if (f_h <= 0) f_h = 1;
+
+    LOGD("Frame %d/%d scaled: %dx%d @ (%d,%d)", ctx->current_frame_num, ctx->frame_count, f_w, f_h, f_x, f_y);
 
     /* ── 5. 准备解码缓冲区（+4096 安全边距用于 SIMD 对齐） ── */
     size_t needed = (size_t)f_w * f_h * 4 + 4096;
@@ -249,6 +332,7 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     /* ── 6. 解码帧碎片（MODE_rgbA 直接输出 Premul，省去 straight_to_premul） ── */
     WebPDecoderConfig cfg; WebPInitDecoderConfig(&cfg);
     cfg.options.use_scaling = 1; cfg.options.scaled_width = f_w; cfg.options.scaled_height = f_h;
+    cfg.options.use_threads = (ctx->use_threads > 1 ? 1 : 0);
     cfg.output.colorspace = MODE_rgbA; /* Premultiplied Alpha，直接用于合成 */
     cfg.output.u.RGBA.rgba = ctx->frame_buf;
     cfg.output.u.RGBA.stride = f_w * 4;
@@ -277,19 +361,18 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     ctx->prev_w = dec_w; ctx->prev_h = dec_h;
     ctx->prev_dispose = ctx->iter.dispose_method;
 
-    /* ── 11. 输出到环形缓冲区（Premultiplied Alpha） ── */
-    int out_idx = ctx->output_idx;
-    ctx->output_idx = (ctx->output_idx + 1) % OUTPUT_BUFFER_COUNT;
-    memcpy(ctx->output_buf[out_idx], ctx->composite_canvas,
-           (size_t)ctx->target_w * ctx->target_h * 4);
+    /* ── 11. 从原生缓冲池获取输出缓冲区，拷贝合成画布（Premultiplied Alpha） ── */
+    size_t canvas_bytes = (size_t)ctx->target_w * ctx->target_h * 4;
+    uint8_t* out = webp_native_pool_acquire(canvas_bytes);
+    memcpy(out, ctx->composite_canvas, canvas_bytes);
 
-    /* ── 11. 设置帧时长 ── */
+    /* ── 12. 设置帧时长 ── */
     if (duration_ms) {
         int d = ctx->iter.duration;
         if (d <= 10) d = 100;
         *duration_ms = d;
     }
-    return ctx->output_buf[out_idx];
+    return out;
 }
 
 int webp_anim_decoder_has_more(WebPAnimContext* ctx) {
@@ -307,14 +390,19 @@ void webp_anim_decoder_reset(WebPAnimContext* ctx) {
 
 void webp_anim_decoder_delete(WebPAnimContext* ctx) {
     if (!ctx) return;
+    LOGI("[LIFECYCLE] DEL START ctx=%p", (void*)ctx);
     if (ctx->has_frame) WebPDemuxReleaseIterator(&ctx->iter);
     if (ctx->demux) WebPDemuxDelete(ctx->demux);
     free(ctx->composite_canvas);
-    for (int i = 0; i < OUTPUT_BUFFER_COUNT; i++) free(ctx->output_buf[i]);
     free(ctx->frame_buf);
     g_alive_contexts--;
-    LOGI("[LIFECYCLE] DEL  ctx=%p total_alive=%d", (void*)ctx, g_alive_contexts);
+    LOGI("[LIFECYCLE] DEL DONE ctx=%p total_alive=%d", (void*)ctx, g_alive_contexts);
     free(ctx);
+}
+
+void webp_anim_decoder_set_thread_limit(WebPAnimContext* ctx, int use_threads) {
+    if (!ctx) return;
+    ctx->use_threads = use_threads;
 }
 
 int webp_anim_decoder_alive_count(void) {

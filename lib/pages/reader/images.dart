@@ -212,6 +212,10 @@ class _GalleryModeState extends State<_GalleryMode>
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
     });
+    Future.delayed(
+      const Duration(milliseconds: 100),
+      () => _updateWebPState(reader.page, context),
+    );
     super.initState();
   }
 
@@ -284,13 +288,7 @@ class _GalleryModeState extends State<_GalleryMode>
     if (isChapterCommentsPage(page)) return;
     var (startIndex, endIndex) = getPageImagesRange(page);
     for (int i = startIndex; i < endIndex; i++) {
-      if (webpFrameCount != null) {
-        _precacheImage(i + 1, context, frameCount: webpFrameCount);
-      } else if (shouldPreCache) {
-        _precacheImage(i + 1, context);
-      } else {
-        _preDownloadImage(i + 1, context);
-      }
+      _preDownloadImage(i + 1, context);
     }
   }
 
@@ -351,8 +349,6 @@ class _GalleryModeState extends State<_GalleryMode>
               startIndex,
               endIndex,
             );
-
-            cache(index);
 
             photoViewControllers[index] ??= PhotoViewController();
 
@@ -417,8 +413,7 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
-            debugPrint('[WebP-PAGE] Page:$i');
-            WebPImageProvider.onPageChanged(i);
+            _updateWebPState(i, context);
             context.readerScaffold.update();
             // Auto close toolbar when entering chapter comments page
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
@@ -760,7 +755,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     cached = List.filled(reader.maxPage + 2, false);
     Future.delayed(
       const Duration(milliseconds: 100),
-      () => cacheImages(reader.page),
+      () => _updateWebPState(reader.page, context),
     );
     super.initState();
   }
@@ -779,6 +774,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     page = page.clamp(1, reader.maxPage);
     if (page != reader.page) {
       reader.setPage(page);
+      _updateWebPState(page, context);
       context.readerScaffold.update();
     }
     cacheImages(page);
@@ -1330,36 +1326,49 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
   return _createImageProviderFromKey(imageKey, context, page);
 }
 
-/// [_precacheImage] is used to precache the image for the given page.
-/// [frameCount] for WebP: number of frames to pre-decode + upload to GPU.
-void _precacheImage(int page, BuildContext context, {int frameCount = 4}) {
-  if (page <= 0 || page > context.reader.images!.length) {
-    return;
+String _getWebPFullKey(String imageKey, BuildContext context) {
+  final size = MediaQuery.of(context).size;
+  final dpr = MediaQuery.of(context).devicePixelRatio;
+  var targetWidth = (size.width * dpr).round();
+  var targetHeight = (size.height * dpr).round();
+  if (targetWidth > 1920) targetWidth = 1920;
+  if (targetHeight > 2560) targetHeight = 2560;
+  return '$imageKey@${targetWidth}x$targetHeight';
+}
+
+int _lastWebPPage = 0;
+
+void _updateWebPState(int page, BuildContext context) {
+  final reader = context.reader;
+  final images = reader.images;
+  if (images == null) return;
+
+  final goForward = _lastWebPPage == 0 || page >= _lastWebPPage;
+  _lastWebPPage = page;
+
+  String getKey(int index) {
+    if (index < 0 || index >= images.length) return '';
+    return _getWebPFullKey(images[index], context);
   }
-  final imageKey = context.reader.images![page - 1];
-  if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
-    final reader = context.reader;
-    final size = MediaQuery.of(context).size;
-    final dpr = MediaQuery.of(context).devicePixelRatio;
-    final targetW = (size.width * dpr).round().clamp(0, 1920);
-    final targetH = (size.height * dpr).round().clamp(0, 2560);
-    final ctrl = reader._imageViewController;
-    final cache = ctrl is _GalleryModeState ? ctrl.webpCache : null;
-    WebPImageProvider.precreateDecoder(
-      imageKey: imageKey,
-      l2Cache: cache,
-      sourceKey: reader.type.comicSource?.key,
-      cid: reader.cid,
-      eid: reader.eid,
-      targetWidth: targetW,
-      targetHeight: targetH,
-      frameCount: frameCount,
-      scale: 1.0 / dpr,
-      page: page,
+
+  if (goForward) {
+    debugPrint('[WebP-PAGE] Page:$page ->');
+    WebPImageProvider.onPageChanged(
+      current: getKey(page - 1),
+      next: [getKey(page), getKey(page + 1)],
+      last: [getKey(page - 2)],
+      precache: [getKey(page + 2), getKey(page + 3)],
     );
-    return;
+  } else {
+    // 向后滚动：交换 next/last 方向
+    debugPrint('[WebP-PAGE] Page:$page <-');
+    WebPImageProvider.onPageChanged(
+      current: getKey(page - 1),
+      next: [getKey(page - 2), getKey(page - 3)],
+      last: [getKey(page)],
+      precache: [getKey(page - 4), getKey(page - 5)],
+    );
   }
-  precacheImage(_createImageProvider(page, context), context);
 }
 
 /// [_preDownloadImage] is used to download the image for the given page.
