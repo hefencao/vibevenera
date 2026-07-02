@@ -418,6 +418,7 @@ class _GalleryModeState extends State<_GalleryMode>
           } else {
             reader.setPage(i);
             debugPrint('[WebP-PAGE] Page:$i');
+            WebPImageProvider.onPageChanged(i);
             context.readerScaffold.update();
             // Auto close toolbar when entering chapter comments page
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {

@@ -49,6 +49,14 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     return name;
   }
 
+  /// 页面切换时调用：暂停非当前页，恢复当前页
+  static void onPageChanged(int page) {
+    _WebPImageStreamCompleter._currentPage = page;
+    _WebPImageStreamCompleter._reapDistant();
+    _WebPImageStreamCompleter._resumeCurrent();
+    _WebPImageStreamCompleter._logActive();
+  }
+
   static void _addActiveKey(String key) {
     _activeKeys[key] = (_activeKeys[key] ?? 0) + 1;
   }
@@ -424,34 +432,49 @@ const List<double> webpSpeedPresets = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 class _WebPImageStreamCompleter extends ImageStreamCompleter {
   final WebPImageProvider _provider;
   bool _disposed = false;
+  bool _paused = false;
   int _loadStartMs = 0;
 
-  /// 活跃动画追踪（仅用于页面距离收割，不做数量限制驱逐）
+  /// 活跃动画追踪
   static final List<_WebPImageStreamCompleter> _active = [];
   static int _currentPage = 0;
-  static const int _maxPageDistance = 5;
+  static const int _pauseDistance = 0;   // 非当前页 → 暂停解码
+  static const int _disposeDistance = 10; // 远离页面 → 销毁 decoder
 
   static void _logActive() {
-    final pages = _active.map((c) => c._provider.page).toList()..sort();
+    final pages = _active.map((c) => '${c._provider.page}${c._paused ? "p" : ""}').toList()..sort();
     debugPrint('[WebP-ANIM] active:$pages');
   }
 
-  /// 收割离当前页太远的活跃动画
+  /// 暂停/收割：非当前页暂停解码，远离页销毁 decoder
   static void _reapDistant() {
-    // 从后向前遍历，避免 removeAt 导致索引偏移
     for (int i = _active.length - 1; i >= 0; i--) {
       final c = _active[i];
       final dist = (c._provider.page - _currentPage).abs();
-      if (dist > _maxPageDistance) {
+      if (dist > _disposeDistance) {
         _active.removeAt(i);
         c._disposed = true;
         PaintingBinding.instance.imageCache.evict(c._provider);
         c._disposeDecoder?.call();
+      } else if (dist > _pauseDistance) {
+        c._paused = true;
+      }
+    }
+  }
+
+  /// 恢复当前页的解码
+  static void _resumeCurrent() {
+    for (final c in _active) {
+      if (c._provider.page == _currentPage && c._paused) {
+        debugPrint('[WebP-ANIM] resume page=${c._provider.page} (from pause, zero-cost)');
+        c._paused = false;
+        c._resumeAction?.call();
       }
     }
   }
 
   void Function()? _disposeDecoder;
+  void Function()? _resumeAction;
 
   _WebPImageStreamCompleter(Future<_ImageResult> future, this._provider) {
     future.then(_onResult, onError: _onError);
@@ -520,7 +543,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       WebPImageProvider._addActiveKey(poolKey);
     }
     _active.add(this);
-    _currentPage = _provider.page;
+    if (_currentPage == 0) _currentPage = _provider.page; // 首次进入 reader，onPageChanged 未触发
     _reapDistant();
     _logActive();
     var isActive = true;
@@ -593,6 +616,9 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
     Future<void> playNext() async {
       if (!isActive || _disposed) { stopAnimation(); return; }
 
+      // 非当前页暂停解码，等待 onPageChanged 回调恢复
+      if (_paused) return;
+
       // 无监听者 → 低功耗挂起，200ms 后重检
       if (!hasListeners) {
         await Future.delayed(const Duration(milliseconds: 200));
@@ -629,14 +655,16 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           Future.delayed(Duration(milliseconds: delay), playNext);
         });
     }
+    _resumeAction = playNext;
 
     if (preUploaded != null && preUploaded.isNotEmpty && preDurations != null) {
       // 预上传帧已在 GPU，直接展示无延迟
       final frames = preUploaded;
       final durs = preDurations;
       void playPreUploaded() {
+        if (_paused) return;
         if (!isActive || _disposed || preIndex + 1 >= frames.length) {
-          if (isActive && !_disposed) fetchNext().then((_) { Future.microtask(playNext); });
+          if (isActive && !_disposed) { _resumeAction = playNext; fetchNext().then((_) { Future.microtask(playNext); }); }
           return;
         }
         preIndex++;
@@ -651,14 +679,17 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           Future.delayed(Duration(milliseconds: d.clamp(8, d)), playPreUploaded);
         } else {
           // 等 pipeline 帧解码完成再调度 playNext，消除过渡停顿
+          _resumeAction = playNext;
           fetchNext().then((_) {
             final lastDur = durs.isNotEmpty ? durs.last : 33;
             Future.delayed(Duration(milliseconds: lastDur.clamp(8, lastDur)), playNext);
           });
         }
       }
+      _resumeAction = playPreUploaded;
       playPreUploaded();
     } else {
+      _resumeAction = playNext;
       fetchNext().then((_) { Future.microtask(playNext); });
     }
   }
