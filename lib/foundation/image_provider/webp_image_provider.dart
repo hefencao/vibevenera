@@ -149,18 +149,25 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       // 3. 异步预解码 + 上传前 frameCount 帧到 GPU
       final gpuFrames = <ImageInfo>[];
       final durations = <int>[];
+      final tPre = Stopwatch()..start();
       for (int i = 0; i < frameCount; i++) {
+        final tF = Stopwatch()..start();
         final addr = await decoder.getNextFrameAsync();
         if (addr == null) break;
         final len = decoder.targetWidth * decoder.targetHeight * 4;
         final rgba = Pointer<Uint8>.fromAddress(addr.address).asTypedList(len);
         final c = Completer<ImageInfo>();
+        final tGpu = Stopwatch()..start();
         ui.decodeImageFromPixels(rgba, decoder.targetWidth, decoder.targetHeight,
-            ui.PixelFormat.rgba8888, (img) => c.complete(ImageInfo(image: img, scale: scale)));
+            ui.PixelFormat.rgba8888, (img) {
+              debugPrint('[WebP-TIME] ${_short(key)} precache-f${i} decode+upload ${tF.elapsedMilliseconds}ms gpu:${tGpu.elapsedMilliseconds}ms');
+              c.complete(ImageInfo(image: img, scale: scale));
+            });
         final info = await c.future;
         gpuFrames.add(info);
         durations.add(addr.durationMs <= 10 ? 33 : addr.durationMs);
       }
+      debugPrint('[WebP-TIME] ${_short(key)} precache ${gpuFrames.length}f total ${tPre.elapsedMilliseconds}ms');
       if (gpuFrames.isEmpty) { decoder.dispose(); _poolCreating.remove(key); return; }
       if (_generation != gen) {
         for (final f in gpuFrames) { f.image.dispose(); }
@@ -259,7 +266,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     if (precached != null) {
       preUploadedFrames = precached.gpuFrames;
       preUploadedDurations = precached.durations;
-      debugPrint('[WebP-E2E] pool hit: ${sw.elapsedMilliseconds}ms');
+      debugPrint('[WebP-TIME] ${_short(imageKey)} pool-hit ${sw.elapsedMilliseconds}ms');
       return _ImageResult.animated(precached.decoder);
     }
 
@@ -273,10 +280,13 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
     // ── 3. L2 缓存 → 获取原始字节（pool miss 时才需要） ──
     Uint8List rawBytes;
+    final tIO = Stopwatch()..start();
     if (cache != null && cache!.hasL2(imageKey)) {
       rawBytes = cache!.getL2(imageKey)!;
+      debugPrint('[WebP-TIME] ${_short(imageKey)} L2 ${tIO.elapsedMilliseconds}ms ${rawBytes.length}B');
     } else {
       rawBytes = await _fetchBytes();
+      debugPrint('[WebP-TIME] ${_short(imageKey)} file ${tIO.elapsedMilliseconds}ms ${rawBytes.length}B');
       if (cache != null && webp.isWebP(rawBytes)) {
         cache!.putL2(imageKey, rawBytes);
       }
@@ -333,6 +343,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         targetWidth: targetWidth, targetHeight: targetHeight);
     if (decoder == null) return _ImageResult.error('Failed to create anim decoder');
     debugPrint('[WebP] createAnimDecoder: ${sw.elapsedMilliseconds}ms, ${decoder.frameCount}frames, target=${decoder.targetWidth}x${decoder.targetHeight}');
+    debugPrint('[WebP-TIME] ${_short(imageKey)} decoder ${sw.elapsedMilliseconds}ms ${decoder.frameCount}fr ${decoder.targetWidth}x${decoder.targetHeight}');
     return _ImageResult.animated(decoder);
   }
 
@@ -557,9 +568,11 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       fetching = true;
       _currentFetch = () async {
         try {
+          final tFetch = Stopwatch()..start();
           if (!decoder.hasMoreFrames) decoder.reset();
           final result = await decoder.getNextFrameAsync();
           if (result != null) {
+            debugPrint('[WebP-TIME] ${WebPImageProvider._short(_provider.imageKey)} worker ${tFetch.elapsedMilliseconds}ms');
             pendingFrame = result;
             consecutiveNullFrames = 0;
           } else {
@@ -608,6 +621,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           if (!isActive || _disposed) { image.dispose(); stopAnimation(); return; }
           setImage(ImageInfo(image: image, scale: _provider.scale));
           final int elapsed = DateTime.now().millisecondsSinceEpoch - t0;
+          debugPrint('[WebP-TIME] ${WebPImageProvider._short(_provider.imageKey)} gpu ${elapsed}ms');
           final int delay = (duration - elapsed).clamp(8, duration);
           frameIndex++;
           // GPU 已完成读取 C buffer，现在安全启动下一帧解码
