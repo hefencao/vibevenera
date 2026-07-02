@@ -16,9 +16,10 @@
 5. [Coil 集成解码](#5-coil-集成解码)
 6. [缓存机制](#6-缓存机制)
 7. [画廊渲染层](#7-画廊渲染层)
-8. [页面加载管线](#8-页面加载管线)
-9. [动图 WebP 处理要点](#9-动图-webp-处理要点)
-10. [Venera 对比与迁移建议](#10-venera-对比与迁移建议)
+8. [图片分辨率处理](#8-图片分辨率处理)
+9. [页面加载管线](#9-页面加载管线)
+10. [动图 WebP 处理要点](#10-动图-webp-处理要点)
+11. [Venera 对比与迁移建议](#11-venera-对比与迁移建议)
 
 ---
 
@@ -626,9 +627,420 @@ pageBackground = background  // 在 onImageLoaded 时设置
 
 ---
 
-## 8. 页面加载管线
+## 8. 图片分辨率处理
 
-### 8.1 PageLoader 抽象
+### 8.1 分辨率体系全景
+
+Mihon 的图片分辨率处理涉及三个层面的协调：
+
+```
+图片原始分辨率 (e.g. 1200×1800)
+    │
+    ├── 解码阶段 ──→ Coil 目标尺寸 + sampleSize 降采样
+    │                  ↓
+    │              解码后的 Bitmap (可能已缩小)
+    │
+    ├── SSIV 渲染阶段 ──→ setMinimumScaleType + setMinimumDpi + setMaxTileSize
+    │                       ↓
+    │                   实际显示尺寸 (由 SSIV 内部计算)
+    │
+    └── 设备适配 ──→ DisplayMetrics + GL 纹理限制 + DPI
+                         ↓
+                      HardwareBitmap 阈值 + 长图分割
+```
+
+### 8.2 解码阶段分辨率控制
+
+#### 8.2.1 Coil 的 Size / Scale 系统
+
+当 Coil 发起图片请求时，目标尺寸通过 `ImageRequest.Builder.size()` 设定，最终实际值取决于：
+
+```kotlin
+// TachiyomiImageDecoder.kt — 解码分辨率计算
+val srcWidth = decoder.width      // 图片原始宽度 (native 解码器读出)
+val srcHeight = decoder.height    // 图片原始高度
+
+val dstWidth = options.size.widthPx(options.scale) { srcWidth }
+val dstHeight = options.size.heightPx(options.scale) { srcHeight }
+
+val sampleSize = DecodeUtils.calculateInSampleSize(
+    srcWidth = srcWidth,
+    srcHeight = srcHeight,
+    dstWidth = dstWidth,
+    dstHeight = dstHeight,
+    scale = options.scale,
+)
+
+var bitmap = decoder.decode(sampleSize = sampleSize)
+```
+
+**Coil 的 Size 决定机制**（取决于 ImageRequest 的配置）：
+
+| Size 策略 | 含义 | 解码分辨率 | 典型使用场景 |
+|-----------|------|-----------|-------------|
+| `ViewSizeResolver` | 等于 View 实际尺寸 | View 的宽×高 | 画廊页面加载 |
+| `DisplaySizeResolver` | 等于屏幕尺寸 | screenW × screenH | 预加载/后台加载 |
+| `OriginalSize` | 不缩放 | 原始图片尺寸 | 需要全分辨率时 |
+
+**Scale 参数**控制 Size 如何映射到解码尺寸：
+
+| Scale 值 | 行为 |
+|----------|------|
+| `Scale.FILL` | 拉伸填满目标尺寸（可能变形） |
+| `Scale.FIT` | 保持比例，完全容纳在目标尺寸内 |
+
+**自定义 Size 扩展**（`Utils.kt`）：
+
+```kotlin
+// 将 Coil 的 Size/Scale 系统映射到实际像素值
+internal inline fun Size.widthPx(scale: Scale, original: () -> Int): Int {
+    return if (isOriginal) original() else width.toPx(scale)
+}
+
+internal fun Dimension.toPx(scale: Scale): Int = pxOrElse {
+    when (scale) {
+        Scale.FILL -> Int.MIN_VALUE   // 拉伸 → 最小可能值
+        Scale.FIT -> Int.MAX_VALUE    // 比例适配 → 最大可能值
+    }
+}
+```
+
+#### 8.2.2 sampleSize 降采样计算
+
+`DecodeUtils.calculateInSampleSize` 是 Coil 3 的工具函数，计算逻辑：
+
+```
+输入: srcWidth, srcHeight, dstWidth, dstHeight, scale
+输出: sampleSize (2 的幂: 1, 2, 4, 8, 16...)
+
+算法:
+  1. 计算两个维度上的缩放比
+     ratioW = srcWidth / dstWidth
+     ratioH = srcHeight / dstHeight
+  2. 取较大比值（保证较小边也不超出目标）
+     ratio = max(ratioW, ratioH)
+  3. 向下取整到最近的 2 的幂
+     sampleSize = 2^floor(log2(ratio))
+  4. 保证 >= 1
+```
+
+**示例**：
+
+| 图片原始尺寸 | 屏幕/View 尺寸 | sampleSize | 解码后尺寸 | 内存节省 |
+|-------------|---------------|-----------|-----------|---------|
+| 1200×1800 | 1080×1920 | 1 | 1200×1800（不变） | 0% |
+| 2400×3600 | 1080×1920 | 2 | 1200×1800（1/2） | 75% |
+| 4800×7200 | 1080×1920 | 4 | 1200×1800（1/4） | 93.75% |
+| 8000×12000 | 1080×1920 | 8 | 1000×1500（1/8） | 98.4% |
+
+> 注意：Mihon 中画廊加载走的是 SSIV 直接读 `InputStream`，**不经过 Coil 的 sampleSize 降采样**（见下文 8.3）。
+> 自定义解码器的 sampleSize 主要用于 Webtoon 长条图和封面等走 Coil 完整管线的情况。
+
+### 8.3 渲染阶段分辨率控制
+
+#### 8.3.1 SSIV（SubsamplingScaleImageView）的渲染模型
+
+对于 **静态图片**（含静态 WebP），Mihon 使用 `SubsamplingScaleImageView` 库渲染。SSIV 使用了完全不同的分辨率模型：
+
+```
+输入: InputStream (原始图片字节流)
+  │
+  ├── 1. BitmapRegionDecoder 读取图片宽高（inJustDecodeBounds=true）
+  │
+  ├── 2. 根据 View 尺寸 + minimumScaleType 计算初始 scale
+  │      scale = min(viewWidth / imageWidth, viewHeight / imageHeight)  // CENTER_INSIDE
+  │               viewWidth / imageWidth                                // FIT_WIDTH
+  │               viewHeight / imageHeight                              // FIT_HEIGHT
+  │               ...
+  │
+  ├── 3. 分块加载: 只解码屏幕可见区域的 tile
+  │      每个 tile 大小 ≤ setMaxTileSize (默认 2048px)
+  │      渲染时对每个 tile 实时 Region 解码
+  │
+  └── 4. 缩放时: 动态切换 tile 的采样率
+       放大 → 加载更精细的 tile (sampleSize 减小)
+       缩小 → 加载更粗糙的 tile (sampleSize 增大)
+```
+
+**SSIV 的 4 个关键分辨率参数**：
+
+| 参数 | 设置值 | 作用 |
+|------|--------|------|
+| `setMinimumScaleType(int)` | `config.imageScaleType` (1-6) | 初始缩放策略 |
+| `setMinimumDpi(1)` | 固定 1 | 使极小图片也能适应屏幕（不强制放大阈值） |
+| `setMinimumTileDpi(180)` | 固定 180 | 控制 tile 加载精度，180 是中高质量 |
+| `setMaxTileSize(2048)` | `hardwareBitmapThreshold` | 每个 tile 的最大像素尺寸 |
+
+#### 8.3.2 六种缩放策略（imageScaleType）
+
+`ReaderPreferences.ImageScaleType` 定义了 6 种缩放策略，从偏好 1-6 直接传入 SSIV 的 `setMinimumScaleType`：
+
+| 值 | 名称 | 行为 | SSIV 内部实现 |
+|----|------|------|--------------|
+| **1** | **Fit Screen**（默认） | 保持宽高比，完全显示在屏幕内 | `SCALE_TYPE_CENTER_INSIDE` |
+| **2** | Stretch | 不保持宽高比，填满屏幕 | `SCALE_TYPE_CUSTOM` + 变形 |
+| **3** | Fit Width | 宽度填满屏幕，高度可滚动 | `SCALE_TYPE_START` + 宽度优先 |
+| **4** | Fit Height | 高度填满屏幕，宽度可平移 | `SCALE_TYPE_CENTER_INSIDE` + 高度优先 |
+| **5** | Original Size | 1:1 原始像素，可缩放 | `SCALE_TYPE_CUSTOM` + scale=1 |
+| **6** | Smart Fit | 根据宽高比自动选择 Fit Width/Fit Height | 动态切换策略 |
+
+**云台横屏模式下的自动缩放**（`landscapeZoom`）：
+
+```kotlin
+// ReaderPageImageView.kt — landscapeZoom
+// 当图片宽 > 高 且 scale 为初始值时，自动缩放并定位到起点
+if (config.landscapeZoom && config.minimumScaleType == SCALE_TYPE_CENTER_INSIDE 
+    && sWidth > sHeight && scale == minScale) {
+    val targetScale = height.toFloat() / sHeight.toFloat()  // 按高度填满
+    animateScaleAndCenter(targetScale, startPoint)
+}
+```
+
+#### 8.3.3 Webtoon 模式的分辨率特化
+
+```kotlin
+// WebtoonPageHolder.kt
+minimumScaleType = SubsamplingScaleImageView.SCALE_TYPE_FIT_WIDTH  // 强制宽度适配
+```
+
+Webtoon 模式：
+- **固定** `SCALE_TYPE_FIT_WIDTH`，忽略用户设置
+- 图片宽度填满屏幕，高度自然延伸（RecyclerView 可垂直滚动）
+- 不启用 landscapeZoom（滚动模式无需）
+
+### 8.4 设备适配分辨率
+
+#### 8.4.1 显示尺寸获取
+
+```kotlin
+// ImageUtil.kt — 末尾
+val getDisplayMaxHeightInPx: Int
+    get() = Resources.getSystem().displayMetrics.let { max(it.heightPixels, it.widthPixels) }
+```
+
+- 取屏幕宽高中的较大值（自适应横竖屏）
+- 用于计算 `optimalImageHeight = getDisplayMaxHeightInPx * 2`
+- `optimalImageHeight` 用于长图分割判定（见下文）
+
+#### 8.4.2 GL 纹理限制检测
+
+```kotlin
+// GLUtil.kt
+object GLUtil {
+    val DEVICE_TEXTURE_LIMIT: Int by lazy {
+        // 通过 EGL API 查询 GPU 最大纹理尺寸
+        val egl = EGLContext.getEGL() as EGL10
+        val display = egl.eglGetDisplay(EGL10.EGL_DEFAULT_DISPLAY)
+        egl.eglInitialize(display, version)
+        // ...遍历所有 EGL config 找出 MAX_PBUFFER_WIDTH 的最大值
+        max(maximumTextureSize, SAFE_TEXTURE_LIMIT)
+    }
+
+    const val SAFE_TEXTURE_LIMIT: Int = 2048  // 安全兜底值
+}
+```
+
+- 通过 EGL 10 API 查询 GPU 硬件支持的**最大纹理尺寸**
+- 遍历所有 EGL config，取 `EGL_MAX_PBUFFER_WIDTH` 的最大值
+- 最低保证 2048px（`SAFE_TEXTURE_LIMIT`）
+
+**纹理限制选项**（用户可设置）：
+
+```kotlin
+val CUSTOM_TEXTURE_LIMIT_OPTIONS: List<Int> by lazy {
+    val steps = DEVICE_TEXTURE_LIMIT / MULTIPLIER  // MULTIPLIER = 1024
+    buildList(steps) {
+        add(DEVICE_TEXTURE_LIMIT)          // 第一个：设备最大值
+        for (step in steps downTo 2) {     // 之后：从大到小按 1024 递减
+            val value = step * MULTIPLIER
+            add(value)
+        }
+    }
+}
+```
+
+生成如 `[4096, 3072, 2048]` 的选项列表供用户选择。
+
+#### 8.4.3 Hardware Bitmap 阈值
+
+```kotlin
+// ImageUtil.kt
+var hardwareBitmapThreshold: Int = GLUtil.SAFE_TEXTURE_LIMIT  // 默认 2048
+
+private fun canUseHardwareBitmap(width: Int, height: Int): Boolean {
+    if (HARDWARE_BITMAP_UNSUPPORTED) return false  // 黑名单设备
+    return maxOf(width, height) <= hardwareBitmapThreshold
+}
+```
+
+- 用户可通过**高级设置**调整 `hardwareBitmapThreshold`
+- 默认 2048，可选范围从 `[SAFE_TEXTURE_LIMIT .. DEVICE_TEXTURE_LIMIT]`
+- 初始化时从偏好读取并监听变化：
+
+```kotlin
+// App.kt
+basePreferences.hardwareBitmapThreshold.let { preference ->
+    ImageUtil.hardwareBitmapThreshold = if (preference.get() <= 0) {
+        GLUtil.DEVICE_TEXTURE_LIMIT       // 0 或负数 → 用设备上限
+    } else {
+        preference.get()
+    }
+}
+basePreferences.hardwareBitmapThreshold.changes()
+    .onEach { ImageUtil.hardwareBitmapThreshold = it }
+```
+
+**SSIV 使用此值**：
+
+```kotlin
+// ReaderPageImageView.kt — prepareNonAnimatedImageView()
+setMaxTileSize(ImageUtil.hardwareBitmapThreshold)  // 限制每个 tile 的解码尺寸
+```
+
+这意味着：
+- 如果图片宽高 ≤ 2048 → 可以用 HARDWARE Bitmap（GPU 内存）
+- 如果图片宽高 > 2048 → 用 SOFTWARE Bitmap（heap 内存），SSIV 分块加载
+
+#### 8.4.4 长图分割策略
+
+对于**超长图片**（如卷轴漫画一页），Mihon 在磁盘上将图片物理分割，而非在渲染时动态处理：
+
+```kotlin
+// ImageUtil.kt
+private val optimalImageHeight = getDisplayMaxHeightInPx * 2
+
+// 判定条件: 高度 > 宽度×3 且 高度 > optimalImageHeight
+private fun isTallImage(imageSource: BufferedSource): Boolean {
+    val options = extractImageOptions(imageSource)
+    return TallImageSplitCalculator.shouldSplit(
+        imageWidth = options.outWidth,
+        imageHeight = options.outHeight,
+        optimalImageHeight = optimalImageHeight,
+    )
+}
+
+// TallImageSplitCalculator.kt
+fun shouldSplit(imageWidth, imageHeight, optimalImageHeight): Boolean {
+    return imageHeight > imageWidth * 3 &&     // 宽高比 > 3:1
+        calculatePartCount(imageHeight, optimalImageHeight) > 1  // 需要分段
+}
+
+fun calculatePartCount(imageHeight, optimalImageHeight): Int {
+    // -1 使得 imageHeight == optimalImageHeight 时不分段
+    return (imageHeight - 1) / optimalImageHeight + 1
+}
+```
+
+**分割过程**（`splitTallImage`）：
+1. 使用 `BitmapRegionDecoder` 逐区域解码
+2. 每个分段高度 = `optimalImageHeight`（屏幕高度 × 2）
+3. 最后一段包含剩余像素
+4. 输出为 **JPEG 文件**（压缩率 100），以 `filenamePrefix__001.jpg` 命名
+5. 成功后删除原始图片
+
+**示例**：
+
+| 屏幕高度 | optimalImageHeight | 图片高度 | 分割段数 | 每段高度 |
+|----------|-------------------|---------|---------|---------|
+| 1920px | 3840px | 6000px | 2 | 3840 + 2160 |
+| 1080px | 2160px | 8000px | 4 | 2160 × 3 + 1520 |
+| 1440px | 2880px | 3000px | 2 | 2880 + 120 |
+| 1440px | 2880px | 2500px | 1（不分割） | — |
+
+### 8.5 动图分辨率处理
+
+动图 WebP 的分辨率处理逻辑与静态完全不同：
+
+```kotlin
+// ReaderPageImageView.kt — setAnimatedImage()
+// 动图走 PhotoView/AppCompatImageView，不经过 SSIV
+val request = ImageRequest.Builder(context)
+    .data(data)
+    .memoryCachePolicy(CachePolicy.DISABLED)
+    .diskCachePolicy(CachePolicy.DISABLED)
+    .target(onSuccess = { result ->
+        val drawable = result.asDrawable(context.resources)
+        setImageDrawable(drawable)
+        (drawable as? Animatable)?.start()
+    })
+    .build()
+context.imageLoader.enqueue(request)
+```
+
+| 方面 | 静态图片 | 动图 |
+|------|---------|------|
+| 渲染控件 | SSIV（支持 Region 解码） | PhotoView / AppCompatImageView |
+| 解码方式 | SSIV 内部 BitmapRegionDecoder | Coil 原生 AnimatedDrawable |
+| 分辨率控制 | SSIV tile 分块 + sampleSize | Coil 内部管理，全帧解码 |
+| 内存优化 | tile 懒加载、Hardware Bitmap | 禁用缓存、无额外帧缓冲 |
+| 缩放 | 6 种策略 + 云台模式 | PhotoView 双级缩放（1x/2x） |
+
+### 8.6 完整分辨率处理流程图
+
+```
+┌─── 图片原始数据 ──────────────────────────────────────────────────┐
+│  1200×1800 WebP (2.1MB)  或  4000×6000 WebP (15MB)               │
+└────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─── 1. 格式检测 ───────────────────────────────────────────────────┐
+│  ImageDecoder.findType(bytes) → Format.Webp                       │
+│  ImageUtil.isAnimatedAndSupported() → isAnimated: Boolean         │
+└────────────────────────────────────────────────────────────────────┘
+         │
+         ├── [动图] ──────────────────────────────────────────────────┐
+         │  跳过分辨率优化，Coil 全帧解码                              │
+         │  PhotoView 显示，双级缩放                                   │
+         │                                                            │
+         └── [静态] ──────────────────────────────────────────────────┐
+              │                                                       │
+              ▼                                                       │
+    ┌─── 2. 长图检测 ───┐                                            │
+    │ height > width×3  │──是──→ splitTallImage()                    │
+    │ height > screenH×2│       BitmapRegionDecoder 分割             │
+    └───────────────────┘       输出为 JPEG 分段文件                 │
+              │ 否                                                    │
+              ▼                                                       │
+    ┌─── 3. SSIV 渲染 ───────────────────────────────────────────┐   │
+    │  setMinimumScaleType(imageScaleType)  → 初始缩放策略        │   │
+    │  setMinimumDpi(1)                    → 极小图适配           │   │
+    │  setMinimumTileDpi(180)             → tile 精度控制        │   │
+    │  setMaxTileSize(hardwareBitmapThreshold) → tile 最大尺寸    │   │
+    │                                                             │   │
+    │  SSIV 内部:                                                 │   │
+    │  ├── BitmapRegionDecoder 读取图片宽高                       │   │
+    │  ├── 按 View 尺寸计算初始 scale                              │   │
+    │  ├── 分块: 只解码可见区域 tile                               │   │
+    │  │    ├── tile 边长 ≤ 2048 (默认 hardwareBitmapThreshold)   │   │
+    │  │    └── 采样率动态调整 (缩放时更精细 / 缩小时更粗糙)      │   │
+    │  └── 缩放时: animateScaleAndCenter()                        │   │
+    │       ├── landscapeZoom: 横屏自动缩放至 height=屏幕高       │   │
+    │       └── 双击: scale * 2 (或 1)                           │   │
+    └─────────────────────────────────────────────────────────────┘   │
+                                                                      │
+    ┌─── 4. Hardware Bitmap 优化 ─────────────────────────────────┐   │
+    │  if (max(width, height) ≤ hardwareBitmapThreshold           │   │
+    │      && !HARDWARE_BITMAP_UNSUPPORTED)                       │   │
+    │      → 转为 HARDWARE Config (GPU 内存)                      │   │
+    │  else                                                       │   │
+    │      → 保持 SOFTWARE Config (heap 内存)                     │   │
+    └─────────────────────────────────────────────────────────────┘   │
+
+### 8.7 关键设计决策总结
+
+| 决策 | 原因 | 效果 |
+|------|------|------|
+| **SSIV 而非 Coil 缩放** | SSIV 支持超大图 Region 分块解码，内存恒定 | 4000×6000 图片也只解码可见区域 |
+| **setMinimumDpi(1)** | 极小图片（如 200×300）也能占满屏幕 | 避免漫画小图模糊放大 |
+| **setMinimumTileDpi(180)** | 平衡 tile 加载质量和内存 | 中等质量，肉眼可接受 |
+| **hardwareBitmapThreshold=2048** | 大多数 GPU 安全纹理上限 | 小图 GPU 加速，大图 Heap 安全 |
+| **optimalImageHeight=screenH×2** | 分割后每段高度约为 2 屏 | 减少分段数量同时保证单段内存合理 |
+| **长图预分割为 JPEG** | 避免运行时分块 Region 解码开销 | 分割后各段可独立 Hardware Bitmap |
+| **动图不和分辨率优化耦合** | 动图帧率高，分块/降采样复杂度高 | 动图简单全帧解码，不优化 |
+
+## 9. 页面加载管线
+
+### 9.1 PageLoader 抽象
 
 ```kotlin
 // ui/reader/loader/PageLoader.kt
@@ -641,7 +1053,7 @@ abstract class PageLoader {
 }
 ```
 
-### 8.2 四种 PageLoader 实现
+### 9.2 四种 PageLoader 实现
 
 | Loader | 来源 | isLocal | 特征 |
 |--------|------|---------|------|
@@ -650,7 +1062,7 @@ abstract class PageLoader {
 | **ArchivePageLoader** | CBZ/CBR/EPUB 存档 | true | 读压缩包内文件流 |
 | **DirectoryPageLoader** | 本地目录 | true | 直接读取文件 |
 
-### 8.3 HttpPageLoader — 网络页面加载
+### 9.3 HttpPageLoader — 网络页面加载
 
 ```kotlin
 // ui/reader/loader/HttpPageLoader.kt
@@ -695,7 +1107,7 @@ DEFAULT = 1   // 当前需要显示的页
 ADJACENT = 0  // 预加载的相邻页 → 最低优先级
 ```
 
-### 8.4 PagerPageHolder — 页面加载与渲染桥接
+### 9.4 PagerPageHolder — 页面加载与渲染桥接
 
 ```kotlin
 // 生命周期: init → loadPageAndProcessStatus → setImage → recycle
@@ -735,7 +1147,7 @@ private suspend fun setImage() {
 }
 ```
 
-### 8.5 完整数据流
+### 9.5 完整数据流
 
 ```
 用户滑动到第 N 页
@@ -773,9 +1185,9 @@ private suspend fun setImage() {
 
 ---
 
-## 9. 动图 WebP 处理要点
+## 10. 动图 WebP 处理要点
 
-### 9.1 关键差异：静态 vs 动图
+### 10.1 关键差异：静态 vs 动图
 
 | 方面 | 静态 WebP | 动图 WebP |
 |------|-----------|-----------|
@@ -788,7 +1200,7 @@ private suspend fun setImage() {
 | 预加载 | 4 页预先下载字节流 | 同左 |
 | 动画控制 | — | Coil 内部帧调度 + Animatable.start() |
 
-### 9.2 与 Venera 当前方案的对比
+### 10.2 与 Venera 当前方案的对比
 
 | 对比维度 | Mihon (参考) | Venera (当前) | 说明 |
 |----------|-------------|---------------|------|
@@ -804,7 +1216,7 @@ private suspend fun setImage() {
 | **色彩管理** | displayProfile 支持 | 无 | Mihon 支持 ICC profile |
 | **白边裁剪** | cropBorders 选项 | 无 | Mihon native 层支持 |
 
-### 9.3 从 Mihon 可借鉴的原则
+### 10.3 从 Mihon 可借鉴的原则
 
 1. **不做全局播放数限制** — 页面生命周期天然控制并发数
 2. **不用 pause/resume** — 页面离开直接销毁，回来重建（~50ms 可接受）
@@ -814,11 +1226,125 @@ private suspend fun setImage() {
 6. **单页生命周期** — 每个页面的加载/解码/渲染有明确的作用域和清理点
 7. **无用户态帧队列** — 委托给平台/Coil 管理帧调度，减少复杂度和 bug
 
+### 10.4 为什么"动图简单全帧解码，不优化"仍能保持良好性能？
+
+> 这是理解两个项目架构差异最核心的问题。表面上 Mihon 对动图"不做优化"，
+> 实际上它的优势恰恰来自**剔除了所有不必要的优化**。
+
+#### 10.4.1 "不优化"的真实含义
+
+"动图简单全帧解码，不优化"指的是 Mihon **不在用户空间做额外管理**——没有自定义帧缓冲池、没有全局播放数限制、没有 pause/resume 逻辑、没有预上传 GPU 纹理。它把帧调度完全委托给 **Coil 3 的 AnimatedDrawable**。
+
+但这不意味着"不优化"。Coil 3 的底层实现已经包含了大量平台级优化：
+
+```
+Mihon 的"不优化" = 不自己造轮子
+  ├── 帧调度 → 委托给 Coil (Android Choreographer)
+  ├── 内存管理 → 委托给 Coil + Android GC
+  ├── 生命周期 → 委托给 View/Activity 生命周期
+  └── 并发控制 → 委托给 ViewPager 的 offscreenPageLimit
+
+Venera 的"过度优化" = 自己造了太多轮子
+  ├── 帧调度 → 自定义输出环缓冲 (8帧)
+  ├── 并发控制 → 全局 _maxPlaying=6 上限
+  ├── 生命周期 → pause/resume + hasListeners 轮询
+  ├── 预加载 → GPU 帧预上传 + 预解码池
+  └── 跨 completer 协调 → pendingDispose + 状态标记
+```
+
+#### 10.4.2 性能对比：Mihon vs Venera 的动图路径
+
+```
+Mihon (Coil AnimatedDrawable)              Venera (自定义 FFI + 帧调度)
+──────────────────────────────              ──────────────────────────────
+                                          ┌─ Isolate: getNextFrameAsync()
+                                          │    串行化 buffer → 发送到 isolate
+                                          │    native 解码 → 返回 buffer
+                                          │    反串行化 → ui.Image 创建
+Page 可见 ──→ Coil.enqueue()              │    上传到 GPU
+  │                                        ├─ 输出环缓冲 (8帧): 存储管理
+  ├─ Coil 内部:                             ├─ 全局 _maxPlaying: 跨 completer 协调
+  │  ├─ fetcher: IO thread 下载            ├─ pause/resume: 1s 轮询 hasListeners
+  │  ├─ decoder: decode 首帧               ├─ GPU 预上传: precacheImage
+  │  └─ AnimatedDrawable:                  └─ pendingDispose: 跨 Isolate 防护
+  │     ├─ Choreographer 帧回调
+  │     ├─ 按需解码后续帧                  结果: 每页额外开销
+  │     └─ 帧间延迟精确控制                    ├─ 1 个 Isolate 往返 (2-5ms)
+Page 离开 ──→ dispose()                      ├─ 1 次 GPU 纹理上传 (1-3ms)
+  │                                          ├─ 环缓冲管理 (0.5ms)
+  └─ Coil 自动清理                          ├─ 跨 completer 锁协调
+     ├─ 取消 ImageRequest                    └─ hasListeners 轮询 (每 1s)
+     └─ 释放 AnimatedDrawable
+```
+
+#### 10.4.3 为什么 Venera 的"优化"反而导致高功耗
+
+| Venera 的"优化" | 实际代价 | 类比 |
+|-----------------|---------|------|
+| **输出环缓冲 (8帧)** | 每帧额外 memcpy + 管理开销；8×8MB = 64MB 常驻 C heap | 为了省 10ms 解码时间，多花了 64MB 内存+CPU搬运 |
+| **Isolate 解码** | 每帧数据串行化/反串行化开销；Isolate 启动延迟 | 为了不阻塞主线程，额外花了 2-5ms 做数据搬运 |
+| **GPU 预上传** | 预上传的帧可能永远不显示；GPU 纹理内存浪费 | 为"瞬间显示"预花了 GPU 带宽和内存 |
+| **全局 _maxPlaying=6** | completer 间协调开销；翻页后动画意外暂停 | 为"控制并发"引入了状态同步复杂度 |
+| **pause/resume 轮询** | 每 1 秒扫描所有 completer 的 hasListeners | 为"省电"反而制造了周期性 CPU 唤醒 |
+| **pendingDispose 防护** | 状态标记 + 条件判断的复杂度 | 为"防崩溃"引入了处理崩溃的逻辑本身 |
+
+**总功耗画像**（假设 10 页画廊，其中 3 页是动图 WebP）：
+
+```
+Mihon:                                      Venera:
+  Active decoders: 1 (当前可见页)              Active decoders: ≤6 (全局上限)
+  额外线程: 0                                  额外线程: 3 Isolate + 1 轮询定时器
+  帧管理: Coil 内部 (无用户态开销)              帧管理: 8×3=24 帧环缓冲 + GPU 纹理
+  生命周期: 直接销毁                            生命周期: pause/resume 状态机
+  CPU: 只解码当前页可见帧                        CPU: 预解码相邻页帧 + 轮询检查
+  内存峰值: ~20MB (1 个动图)                    内存峰值: ~200MB (解码器+环缓冲+GPU)
+```
+
+#### 10.4.4 核心矛盾：Venera 的"优化"堆叠效应
+
+Venera 的问题不是某个单一优化不好，而是**多个优化叠加后的互锁效应**：
+
+```
+问题 1: precacheImage 监听了但从不释放
+    ↓
+问题 2: 不得不引入 pause/resume 来"省电"
+    ↓
+问题 3: pause/resume 不够可靠 → 引入全局 _maxPlaying 来兜底
+    ↓
+问题 4: 全局 cap 跨 completer 销毁 decoder → use-after-free
+    ↓
+问题 5: 引入 pendingDispose 防护 → 状态机复杂度飙升
+    ↓
+结果: 每个"优化"都是为了修补上一个优化引入的问题
+```
+
+Mihon 的做法正好相反：**不为不存在的问题做优化**。
+
+| Mihon 不做什么 | 为什么不必要 | 如果做了会怎样 |
+|---------------|------------|--------------|
+| 不缓存动图帧 | 动图 WebP 解码 ~50ms，远低于用户感知阈值 | 多花 64MB 内存和 CPU 搬运时间 |
+| 不做 pause/resume | 页面滑动回来重建 ~50ms，用户不会察觉 | 引入 1s 轮询开销和状态复杂度 |
+| 不做全局 cap | ViewPager offscreenPageLimit=1，天然只有 1 页活跃 | 跨 completer 协调和 use-after-free |
+| 不用 Isolate | Coil 的 IO dispatcher 已足够 | 数据串行化开销 > 收益 |
+| 不预上传 GPU | SSIV 分块加载，首次渲染快 | GPU 纹理内存浪费和预解码 CPU 开销 |
+
+#### 10.4.5 对 Venera 的启示
+
+**不要优化不存在的问题。** 在决定"优化"之前，先问：
+
+1. **这个优化解决什么问题？** → 是否存在可测量的性能瓶颈？
+2. **优化的代价是什么？** → 额外内存？复杂度？新 bug 来源？
+3. **平台能否帮我做？** → Flutter 的 `ImageCache` + `AnimatedImage` 是否已足够？
+4. **去掉这个优化会怎样？** → 是否真的会卡顿？还是只是"感觉上"需要？
+
+Venera 的动图 WebP 性能问题的根因不是解码慢，而是**为解码写了太多管理代码**。
+Mihon 证明了：当去掉所有不必要的管理后，简单的"可见→解码→播放→销毁"循环就已经足够高效。
+
 ---
 
-## 10. Venera 对比与迁移建议
+## 11. Venera 对比与迁移建议
 
-### 10.1 架构差异映射
+### 11.1 架构差异映射
 
 ```
 Android (Mihon)                      Flutter (Venera)
@@ -835,7 +1361,7 @@ page.statusFlow (StateFlow)           page.completer (Completer)
 ImageUtil.isAnimatedAndSupported()    文件头检测 (FFI / Dart)
 ```
 
-### 10.2 建议优先采纳的点
+### 11.2 建议优先采纳的点
 
 | 优先级 | 改动 | 来源参考 | 预期收益 |
 |--------|------|----------|----------|
@@ -846,7 +1372,7 @@ ImageUtil.isAnimatedAndSupported()    文件头检测 (FFI / Dart)
 | **P2** | 预加载改为原始字节预下载 | HttpPageLoader.preloadSize | 降低 GPU 帧预上传复杂度 |
 | **P2** | 合并 Completer 与 Widget 生命周期 | PagerPageHolder scoped job | 消除 completer 泄漏 |
 
-### 10.3 保持 Venera 的优势
+### 11.3 保持 Venera 的优势
 
 | 优势 | 说明 |
 |------|------|

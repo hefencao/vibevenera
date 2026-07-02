@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:typed_data';
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
@@ -342,9 +341,6 @@ WebPStaticFrame? decodeStatic(Uint8List data,
   }
 }
 
-/// 帧缓存最大数量（防止内存爆炸导致系统节流）
-const int _kMaxCachedFrames = 20;
-
 /// 创建动画 WebP 解码器。
 ///
 /// 每次调用创建独立解码器实例。调用者通过 [WebPAnimDecoder.dispose] 释放资源。
@@ -417,17 +413,18 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 /// 帧解码直接得到目标尺寸的 RGBA（C 层已完成 composite + downscale）。
 ///
 /// **第一次循环时缓存所有帧 RGBA，后续循环直接从缓存读取，不再调用 C。**
-/// Isolate Worker 池：N 个持久化 Worker，匹配活跃动画数。
-/// 消除 Isolate.run() 创建/销毁开销，同时保持 N 路并发避免串行瓶颈。
+/// Isolate Worker 池：N 个持久化 Worker。
+/// 消息协议：[replyTo, ctxAddr, gen] — 3 元素为 decode 请求，2 元素为控制消息。
 class _WorkerPool {
   final List<SendPort> _workers = [];
-  int _next = 0;
   bool _init = false;
+  static int _nextGen = 1;
+
+  static int nextGen() => _nextGen++;
 
   Future<void> _ensureInit() async {
     if (_init) return;
     _init = true;
-    // 匹配 _maxActive=3，创建 3 个 worker
     for (int i = 0; i < 3; i++) {
       final r = ReceivePort();
       await Isolate.spawn((SendPort mainPort) {
@@ -435,15 +432,31 @@ class _WorkerPool {
         mainPort.send(workerR.sendPort);
         final lib = DynamicLibrary.open('libvenera_webp.so');
         final animGetFrame = lib.lookupFunction<_WebPAnimDecoderGetFrameNative, _WebPAnimDecoderGetFrameDart>('webp_anim_decoder_get_frame');
+        // 每个 ctx 的当前有效 generation
+        final Map<int, int> validGens = {};
         workerR.listen((msg) {
           final list = msg as List<Object?>;
-          final replyTo = list[0] as SendPort;
+          final replyTo = list[0];
           final ctxAddr = list[1] as int;
+          if (replyTo == null) {
+            // 控制消息：gen=0 表示移除该 ctx 的 generation 记录
+            if (list[2] as int == 0) {
+              validGens.remove(ctxAddr);
+            }
+            return;
+          }
+          // Decode 消息：[replyTo, ctxAddr, gen]
+          final gen = list[2] as int;
+          if (validGens.containsKey(ctxAddr) && validGens[ctxAddr] != gen) {
+            (replyTo as SendPort).send(null); // generation 不匹配，丢弃
+            return;
+          }
+          validGens[ctxAddr] = gen; // 首次使用或匹配成功
           final durationMs = calloc<Int32>();
           try {
             final ctx = Pointer<Void>.fromAddress(ctxAddr);
             final rgbaPtr = animGetFrame(ctx, durationMs);
-            replyTo.send(rgbaPtr != Pointer.fromAddress(0) ? [rgbaPtr.address, durationMs.value] : null);
+            (replyTo as SendPort).send(rgbaPtr != Pointer.fromAddress(0) ? [rgbaPtr.address, durationMs.value] : null);
           } finally {
             calloc.free(durationMs);
           }
@@ -454,9 +467,22 @@ class _WorkerPool {
     }
   }
 
-  Future<SendPort> acquire() async {
+  Future<SendPort> acquire(int ctxAddress) async {
     await _ensureInit();
-    return _workers[_next++ % _workers.length]; // 轮询分配
+    // 按 ctx 地址哈希分配到固定 worker，确保同一 ctx 的所有调用
+    // 都路由到同一个 worker → 顺序处理，避免并发访问非线程安全的 C 状态。
+    final hash = ctxAddress.hashCode;
+    return _workers[(hash & 0x7FFFFFFF) % _workers.length];
+  }
+
+  /// 使指定 ctx 的所有在途消息失效。
+  /// gen=0 表示 remove：worker 删除该 ctx 的 generation 记录。
+  /// 由于 _workerGen 全局唯一，新 decoder 不会复用旧 generation，remove 安全。
+  void cancelCtx(int ctxAddress) {
+    if (!_init || _workers.isEmpty) return;
+    for (final w in _workers) {
+      w.send(<Object?>[null, ctxAddress, 0]);
+    }
   }
 }
 final _workerPool = _WorkerPool();
@@ -481,16 +507,6 @@ class WebPAnimDecoder {
   /// 循环次数（0=无限循环）
   final int loopCount;
 
-  /// 当前解码到的帧序号（0-based，缓存遍历）
-  int _cacheIndex = -1;
-
-  /// 帧 RGBA 缓存 + 时间戳（第一轮解码时填充）
-  final List<Uint8List?> _cachedFrames = [];
-  final List<int> _cachedTimestamps = [];
-
-  /// 缓存是否已填满
-  bool get _cacheFull => _cachedFrames.length >= frameCount;
-
   WebPAnimDecoder._({
     required _WebPBindings bindings,
     required Pointer<Void> ctx,
@@ -505,82 +521,25 @@ class WebPAnimDecoder {
         _ctx = ctx,
         _nativeData = nativeData;
 
-  /// 当前是否仍有帧可获取
+  /// 当前是否仍有帧可获取（委托 C 层判断）
   bool get hasMoreFrames {
     _checkNotDisposed();
-    if (_cacheFull) {
-      // 缓存已满：从缓存遍历，缓存仅存前 _kMaxCachedFrames 帧
-      // 超出缓存范围的帧不再重复解码（直接返回 false 表示本轮结束）
-      if (_cacheIndex + 1 >= frameCount) return false;
-      // 超过缓存范围的帧不重复解码，继续消耗缓存
-      return true;
-    }
-    // 由 C 层控制（它也处理循环逻辑）
     return _bindings.animHasMore(_ctx) != 0;
   }
 
-  /// 已返回的帧数（从0开始）
-  int get currentIndex => _cacheIndex;
-
-  /// 获取下一帧（目标尺寸 RGBA）
-  ///
-  /// 返回 [WebPAnimFrame] 或 null（已到末尾）。
+  /// 获取下一帧（目标尺寸 RGBA，deep copy 到 dart heap）。
+  /// 注意：热路径走 [getNextFrameAsync]（零拷贝），此方法仅用于离线批量解码。
   WebPAnimFrame? getNextFrame() {
     _checkNotDisposed();
-    return _getNextFrameInternal();
-  }
-
-  /// 通过 Isolate Worker 池获取下一帧（3 个持久化 Worker，轮询分配）
-  Future<WebPAnimFrameAddress?> getNextFrameAsync({bool pool = false}) async {
-    _checkNotDisposed();
-    final sp = await _workerPool.acquire();
-    final reply = ReceivePort();
-    sp.send([reply.sendPort, _ctx.address]);
-    final result = await reply.first;
-    reply.close();
-    if (result == null) return null;
-    final list = result as List<Object?>;
-    return WebPAnimFrameAddress(address: list[0] as int, durationMs: list[1] as int);
-  }
-
-  WebPAnimFrame? _getNextFrameInternal() {
     if (!hasMoreFrames) return null;
-
-    _cacheIndex++;
-
-    // 缓存命中：直接返回
-    if (_cacheFull && _cacheIndex < _cachedFrames.length) {
-      final cached = _cachedFrames[_cacheIndex];
-      if (cached != null) {
-        return WebPAnimFrame(
-          rgba: cached,
-          durationMs: _cachedTimestamps[_cacheIndex],
-        );
-      }
-    }
-
-    // 缓存未命中：从 C 解码
     final durationMs = calloc<Int32>();
-
     try {
       final rgbaPtr = _bindings.animGetFrame(_ctx, durationMs);
-      if (rgbaPtr == Pointer.fromAddress(0)) {
-        _cacheIndex--;
-        return null;
-      }
-
+      if (rgbaPtr == Pointer.fromAddress(0)) return null;
       final length = targetWidth * targetHeight * 4;
       final rgba = rgbaPtr.asTypedList(length);
-      final dartRgba = Uint8List.fromList(rgba);
-
-      // 限制缓存大小
-      if (_cachedFrames.length < _kMaxCachedFrames) {
-        _cachedFrames.add(dartRgba);
-        _cachedTimestamps.add(durationMs.value);
-      }
-
       return WebPAnimFrame(
-        rgba: dartRgba,
+        rgba: Uint8List.fromList(rgba),
         durationMs: durationMs.value,
       );
     } finally {
@@ -588,33 +547,43 @@ class WebPAnimDecoder {
     }
   }
 
-  /// 重置到第一帧（不清除缓存，后续循环走缓存）
+  final int _workerGen = _WorkerPool.nextGen();
+
+  /// 通过 Isolate Worker 池获取下一帧（零拷贝，返回 C buffer 地址）。
+  /// 消息携带 generation 计数器，Worker 校验通过后才执行 decode，
+  /// 防止 dispose 后 Worker 仍访问已释放的 ctx。
+  Future<WebPAnimFrameAddress?> getNextFrameAsync() async {
+    _checkNotDisposed();
+    final sp = await _workerPool.acquire(_ctx.address);
+    final reply = ReceivePort();
+    try {
+      sp.send([reply.sendPort, _ctx.address, _workerGen]);
+      final result = await reply.first;
+      if (result == null) return null;
+      final list = result as List<Object?>;
+      return WebPAnimFrameAddress(address: list[0] as int, durationMs: list[1] as int);
+    } finally {
+      reply.close();
+    }
+  }
+
+  /// 重置到第一帧
   void reset() {
     _checkNotDisposed();
-
-    if (_cacheFull) {
-      // 缓存已满：不调 C，直接重置游标
-      _cacheIndex = -1;
-      debugPrint('[WebP] anim reset (cached, skip C)');
-      return;
-    }
-
-    // 缓存未满：调 C 重置
     _bindings.animReset(_ctx);
-    _cacheIndex = -1;
   }
 
   /// 释放所有原生资源
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    // 通知 Worker 取消该 ctx 的所有在途消息
+    _workerPool.cancelCtx(_ctx.address);
     final ctxAddr = _ctx.address.toRadixString(16);
     _bindings.animDelete(_ctx);
     final alive = _bindings.animAliveCount();
     debugPrint('[WebP-DECODER] DISPOSE ctx=$ctxAddr remaining=$alive');
     _nativeData._free();
-    _cachedFrames.clear();
-    _cachedTimestamps.clear();
   }
 
   void _checkNotDisposed() {

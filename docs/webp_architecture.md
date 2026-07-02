@@ -174,9 +174,14 @@ void _startAnimation(WebPAnimDecoder decoder) {
 
 ## Methodology: Analyze Root Cause, Don't Mask with Defensive Code
 
-**Anti-pattern**: When a symptom appears (crash, pause), add a timeout/retry/null-check without identifying WHY the symptom occurs. This buries the root cause under defensive layers, and the original bug persists.
+**禁止防御性编程**：遇到 crash/pause/空数据时，禁止添加 timeout/retry/null-check/fallback。
+必须通过日志定位根本原因，从源头解决。
 
-**Example from this project**:
+**反例**：
+- `File.readAsBytes()` 返回 0 字节 → ❌ 加 retry + delay → ❌ 加 fallback download
+- 正确做法：日志显示并发 `readAsBytes()` 冲突 → ✅ 序列化文件读 (`_fileReadLock`)
+
+**正例 (from this project)**:
 - Symptom: "first frame pause + crash on re-entry"
 - Wrong fix: Added 5s Isolate timeout, removed loadingBuilder, enabled gaplessPlayback
 - Root cause: `onDisposed` → `_disposeDecoder()` → `doDispose()` → `decoder.dispose()` WITHOUT checking `fetching`. When Isolate was still running (first frame hadn't completed), `decoder.dispose()` freed C memory, causing use-after-free.

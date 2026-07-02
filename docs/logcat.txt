@@ -1,0 +1,62 @@
+loadImage called for 19.webp
+NEW  ctx=0xb4000070cb472e70 total_alive=1
+CREATE #1 ctx=-4bffff8f34b8d190
+createAnimDecoder: 11ms, 186frames, target=1080x806
+_startAnimation called (pre=0)
+NEW  ctx=0xb4000070cb46e550 total_alive=2
+CREATE #2 ctx=-4bffff8f34b91ab0
+NEW  ctx=0xb4000070cb475930 total_alive=3
+CREATE #3 ctx=-4bffff8f34b8a6d0
+precached 5 frames for 18.webp (pool=1 est=33MB)
+precached 7 frames for 20.webp (pool=2 est=73MB)
+loadImage called for 05.webp
+NEW  ctx=0xb4000070cb46db30 total_alive=4
+CREATE #4 ctx=-4bffff8f34b924d0
+createAnimDecoder: 10ms, 186frames, target=1080x798
+_startAnimation called (pre=0)
+NEW  ctx=0xb4000070cb47e4b0 total_alive=5
+CREATE #5 ctx=-4bffff8f34b81b50
+NEW  ctx=0xb4000070cb46e430 total_alive=6
+CREATE #6 ctx=-4bffff8f34b91bd0
+precached 5 frames for 06.webp (pool=3 est=106MB)
+precached 7 frames for 04.webp (pool=4 est=146MB)
+loadImage called for 04.webp
+hit 7 frames for 04.webp (pool=3)
+pool hit: 0ms
+_startAnimation called (pre=7)
+load-to-first-frame(preupload)=4ms
+NEW  ctx=0xb4000070cb4744f0 total_alive=7
+CREATE #7 ctx=-4bffff8f34b8bb10
+precached 7 frames for 03.webp (pool=4 est=146MB)
+loadImage called for 10.webp
+NEW  ctx=0xb4000070cb46f630 total_alive=8
+CREATE #8 ctx=-4bffff8f34b909d0
+createAnimDecoder: 2ms, 93frames, target=1080x806
+_startAnimation called (pre=0)
+NEW  ctx=0xb4000070cb472450 total_alive=9
+CREATE #9 ctx=-4bffff8f34b8dbb0
+NEW  ctx=0xb4000070cb4743d0 total_alive=10
+CREATE #10 ctx=-4bffff8f34b8bc30
+precached 7 frames for 11.webp (pool=5 est=186MB)
+precached 5 frames for 09.webp (pool=6 est=219MB)
+loadImage called for 06.webp
+hit 5 frames for 06.webp (pool=5)
+pool hit: 0ms
+_startAnimation called (pre=5)
+load-to-first-frame(preupload)=1ms
+NEW  ctx=0xb4000070cb482dd0 total_alive=11
+CREATE #11 ctx=-4bffff8f34b7d230
+precached 7 frames for 07.webp (pool=6 est=225MB)
+loadImage called for 07.webp
+hit 7 frames for 07.webp (pool=5)
+pool hit: 0ms
+_startAnimation called (pre=7)
+load-to-first-frame(preupload)=1ms
+NEW  ctx=0xb4000070cb478870 total_alive=12
+CREATE #12 ctx=-4bffff8f34b87790
+precached 7 frames for 08.webp (pool=6 est=225MB)
+loadImage called for 08.webp
+hit 7 frames for 08.webp (pool=5)
+pool hit: 0ms
+_startAnimation called (pre=7)
+load-to-first-frame(preupload)=1ms

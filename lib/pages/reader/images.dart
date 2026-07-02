@@ -255,38 +255,29 @@ class _GalleryModeState extends State<_GalleryMode>
     return (startIndex, endIndex);
   }
 
+  int _lastPage = 0;
+
   void cache(int startPage) {
+    final goForward = startPage >= _lastPage;
+    _lastPage = startPage;
+    final first = goForward ? startPage + 1 : startPage - 1;
+    final second = goForward ? startPage - 1 : startPage + 1;
+
+    if (first > 0 && first <= totalPages && !isChapterCommentsPage(first)) {
+      _cachePage(first, true, 7);
+    }
+    if (second > 0 && second <= totalPages && !isChapterCommentsPage(second)) {
+      _cachePage(second, true, 5);
+    }
+
     for (int i = startPage - 1; i <= startPage + preCacheCount; i++) {
-      if (i == startPage ||
-          i <= 0 ||
-          i > totalPages ||
+      if (i == startPage || i == first || i == second ||
+          i <= 0 || i > totalPages ||
           isChapterCommentsPage(i)) {
         continue;
       }
-      // 计算帧数：前一张4帧，后一张5帧，后二张4帧
-      int? frameCount;
-      final bool isWebPPage = _isWebPPage(i);
-      if (isWebPPage) {
-        if (i == startPage - 1) {
-          frameCount = 4; // prev
-        } else if (i == startPage + 1) {
-          frameCount = 5; // next
-        } else if (i == startPage + 2) {
-          frameCount = 4; // next+1
-        }
-      }
-      if (frameCount != null) {
-        _cachePage(i, true, frameCount);
-      } else {
-        _cachePage(i, i == startPage + 1 || i == startPage - 1);
-      }
+      _cachePage(i, false);
     }
-  }
-
-  bool _isWebPPage(int page) {
-    if (page <= 0 || page > (reader.images?.length ?? 0)) return false;
-    final key = reader.images![page - 1];
-    return key.endsWith('.webp') || _isLikelyWebP(key);
   }
 
   void _cachePage(int page, bool shouldPreCache, [int? webpFrameCount]) {
@@ -393,8 +384,27 @@ class _GalleryModeState extends State<_GalleryMode>
         },
         pageController: controller,
         loadingBuilder: (context, event) {
-          // 不显示转圈动画：gaplessPlayback 保持上一张可见，预缓存池确保新图就绪
-          return const SizedBox.shrink();
+          return PhotoView.customChild(
+            childSize: MediaQuery.of(context).size,
+            initialScale: PhotoViewComputedScale.contained,
+            minScale: PhotoViewComputedScale.contained * 1.0,
+            maxScale: PhotoViewComputedScale.covered * 10.0,
+            backgroundDecoration: BoxDecoration(
+              color: context.colorScheme.surface,
+            ),
+            child: Center(
+              child: SizedBox(
+                width: 20.0,
+                height: 20.0,
+                child: CircularProgressIndicator(
+                  backgroundColor: context.colorScheme.surfaceContainerHigh,
+                  value: event == null || event.expectedTotalBytes == null
+                      ? null
+                      : event.cumulativeBytesLoaded / event.expectedTotalBytes!,
+                ),
+              ),
+            ),
+          );
         },
         onPageChanged: (i) {
           if (i == 0) {
@@ -443,7 +453,6 @@ class _GalleryModeState extends State<_GalleryMode>
       imageWidgets = [
         Expanded(
           child: ComicImage(
-            gaplessPlayback: true,
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
@@ -461,7 +470,6 @@ class _GalleryModeState extends State<_GalleryMode>
         ),
         Expanded(
           child: ComicImage(
-            gaplessPlayback: true,
             width: double.infinity,
             height: double.infinity,
             image: _createImageProviderFromKey(
@@ -488,7 +496,6 @@ class _GalleryModeState extends State<_GalleryMode>
         );
         return Expanded(
           child: ComicImage(
-            gaplessPlayback: true,
             image: imageProvider,
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
@@ -506,7 +513,8 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   Future<void> animateToPage(int page) {
     if ((page - controller.page!.round()).abs() > 1) {
-      controller.jumpToPage(page > controller.page! ? page - 1 : page + 1);
+      controller.jumpToPage(page);
+      return Future.value();
     }
     return controller.animateToPage(
       page,
@@ -913,7 +921,6 @@ class _ContinuousModeState extends State<_ContinuousMode>
         return ColoredBox(
           color: context.colorScheme.surface,
           child: ComicImage(
-            gaplessPlayback: true,
             filterQuality: FilterQuality.medium,
             image: image,
             width: width,
@@ -1323,7 +1330,6 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
 
 /// [_precacheImage] is used to precache the image for the given page.
 /// [frameCount] for WebP: number of frames to pre-decode + upload to GPU.
-/// 前一张 4 帧，后一张 5 帧，后二张 4 帧。
 void _precacheImage(int page, BuildContext context, {int frameCount = 4}) {
   if (page <= 0 || page > context.reader.images!.length) {
     return;
@@ -1347,6 +1353,7 @@ void _precacheImage(int page, BuildContext context, {int frameCount = 4}) {
       targetHeight: targetH,
       frameCount: frameCount,
       scale: 1.0 / dpr,
+      page: page,
     );
     return;
   }
