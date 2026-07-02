@@ -32,9 +32,22 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   static final List<String> _poolOrder = [];
   static const int _maxPoolSize = 7;
   static const int _maxPoolMemoryMB = 300;
+  static const int _protectedPageRange = 3; // 视口±3页内的条目不驱逐
   static final Set<String> _poolCreating = {};
   static final Map<String, int> _activeKeys = {}; // key → refcount，支持同图多实例
   static int _generation = 0;
+
+  /// 从 "path/00000008.webp@1080x2340" 提取 "08.webp"
+  static String _short(String key) {
+    final name = key.split('@').first.split('/').last.split('\\').last;
+    final m = RegExp(r'^(\d+)').firstMatch(name);
+    if (m != null) {
+      final digits = m.group(1)!;
+      // 00000008 → 08
+      return '${digits.substring(digits.length - 2)}.webp';
+    }
+    return name;
+  }
 
   static void _addActiveKey(String key) {
     _activeKeys[key] = (_activeKeys[key] ?? 0) + 1;
@@ -105,7 +118,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       Uint8List bytes;
       if (l2Cache != null && l2Cache.hasL2(imageKey)) {
         bytes = l2Cache.getL2(imageKey)!;
-        debugPrint('[WebP-POOL] re-pooling $imageKey from L2 cache (${bytes.length}B)');
+        debugPrint('[WebP-POOL] re-pool ${_short(key)} from L2 (${bytes.length}B)');
       } else if (imageKey.startsWith('file://')) {
         final f = File(imageKey.substring(7));
         if (!await f.exists()) { _poolCreating.remove(key); return; }
@@ -160,19 +173,20 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       final entry = _PrecacheEntry(decoder: decoder, gpuFrames: gpuFrames, durations: durations, page: page);
       _precachePool[key] = entry;
       _poolOrder.add(key);
-      // LRU 驱逐：按数量或内存阈值，驱逐离当前页最远的条目
+      // LRU 驱逐：按数量或内存阈值，驱逐离当前页最远的未保护条目
       while (_poolOrder.length > _maxPoolSize ||
              (_poolOrder.length > 1 && _estimatePoolMemoryMB() > _maxPoolMemoryMB)) {
-        // 找到离 page 最远的 key
+        // 找到离 page 最远的 key（跳过视口保护范围内的条目）
         String? evictKey;
         int maxDist = -1;
         for (final k in _poolOrder) {
           final e = _precachePool[k];
           if (e == null) continue;
           final dist = (e.page - page).abs();
+          if (dist <= _protectedPageRange) continue; // 视口附近，不驱逐
           if (dist > maxDist) { maxDist = dist; evictKey = k; }
         }
-        if (evictKey == null) break;
+        if (evictKey == null) break; // 无可驱逐的未保护条目，容忍短暂超内存
         _poolOrder.remove(evictKey);
         final old = _precachePool.remove(evictKey);
         if (old != null) {
@@ -180,7 +194,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
           old.decoder.dispose();
         }
       }
-      debugPrint('[WebP-POOL] precached ${gpuFrames.length} frames for $key (pool=${_precachePool.length} est=${_estimatePoolMemoryMB().toStringAsFixed(0)}MB)');
+      debugPrint('[WebP-POOL] precached ${gpuFrames.length}f ${_short(key)} (pool=${_precachePool.length} est=${_estimatePoolMemoryMB().toStringAsFixed(0)}MB)');
     } catch (e) {
       debugPrint('[WebP-POOL] failed for $imageKey: $e');
     } finally {
@@ -195,26 +209,11 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     if (e != null) {
       _poolOrder.remove(key);
       _addActiveKey(key);
-      debugPrint('[WebP-POOL] hit ${e.gpuFrames.length} frames for $key (pool=${_precachePool.length})');
+      debugPrint('[WebP-POOL] hit ${e.gpuFrames.length}f ${_short(key)} (pool=${_precachePool.length})');
     }
     return e;
   }
 
-  /// 活跃解码器已释放，允许该 key 重新入池。
-  static void releaseActiveKey(String imageKey, int targetWidth, int targetHeight) {
-    _removeActiveKey('$imageKey@${targetWidth}x$targetHeight');
-  }
-
-  /// 强制释放指定 key 的活跃解码器（用于滑动窗口外的旧页面）。
-  static void disposeActiveKey(String imageKey, int targetWidth, int targetHeight) {
-    final key = '$imageKey@${targetWidth}x$targetHeight';
-    _removeActiveKey(key);
-    final old = _precachePool.remove(key);
-    if (old != null) {
-      for (final f in old.gpuFrames) { f.image.dispose(); }
-      old.decoder.dispose();
-    }
-  }
   WebPImageProvider(
     this.imageKey,
     this.sourceKey,
@@ -246,7 +245,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   ImageStreamCompleter loadImage(
       WebPImageProvider key, ImageDecoderCallback decode) {
     final t0 = DateTime.now().millisecondsSinceEpoch;
-    debugPrint('[WebP-LOAD] loadImage called for ${key.imageKey}');
+    debugPrint('[WebP-LOAD] loadImage ${_short(key.imageKey)}');
     final completer = _WebPImageStreamCompleter(_loadImageAsync(), key);
     completer._loadStartMs = t0;
     return completer;
@@ -416,6 +415,31 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
   bool _disposed = false;
   int _loadStartMs = 0;
 
+  /// 活跃动画追踪（仅用于页面距离收割，不做数量限制驱逐）
+  static final List<_WebPImageStreamCompleter> _active = [];
+  static int _currentPage = 0;
+  static const int _maxPageDistance = 5;
+
+  static void _logActive() {
+    final pages = _active.map((c) => c._provider.page).toList()..sort();
+    debugPrint('[WebP-ANIM] active:$pages');
+  }
+
+  /// 收割离当前页太远的活跃动画
+  static void _reapDistant() {
+    // 从后向前遍历，避免 removeAt 导致索引偏移
+    for (int i = _active.length - 1; i >= 0; i--) {
+      final c = _active[i];
+      final dist = (c._provider.page - _currentPage).abs();
+      if (dist > _maxPageDistance) {
+        _active.removeAt(i);
+        c._disposed = true;
+        PaintingBinding.instance.imageCache.evict(c._provider);
+        c._disposeDecoder?.call();
+      }
+    }
+  }
+
   void Function()? _disposeDecoder;
 
   _WebPImageStreamCompleter(Future<_ImageResult> future, this._provider) {
@@ -484,6 +508,10 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       final poolKey = '${_provider.imageKey}@${_provider.targetWidth}x${_provider.targetHeight}';
       WebPImageProvider._addActiveKey(poolKey);
     }
+    _active.add(this);
+    _currentPage = _provider.page;
+    _reapDistant();
+    _logActive();
     var isActive = true;
     webp.WebPAnimFrameAddress? pendingFrame;
     bool fetching = false;
@@ -498,6 +526,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       disposeDone = true;
       if (!isActive) return;
       isActive = false;
+      _active.remove(this);
       _disposeDecoder = null;
       final poolKey = '${_provider.imageKey}@${_provider.targetWidth}x${_provider.targetHeight}';
       WebPImageProvider._removeActiveKey(poolKey);

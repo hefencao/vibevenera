@@ -1,62 +1,166 @@
-loadImage called for 19.webp
-NEW  ctx=0xb4000070cb472e70 total_alive=1
-CREATE #1 ctx=-4bffff8f34b8d190
-createAnimDecoder: 11ms, 186frames, target=1080x806
+loadImage 03.webp
+NEW  ctx=0xb4000070cb4686d0 total_alive=1
+CREATE #1 ctx=-4bffff8f34b97930
+createAnimDecoder: 18ms, 186frames, target=1080x798
 _startAnimation called (pre=0)
-NEW  ctx=0xb4000070cb46e550 total_alive=2
-CREATE #2 ctx=-4bffff8f34b91ab0
-NEW  ctx=0xb4000070cb475930 total_alive=3
-CREATE #3 ctx=-4bffff8f34b8a6d0
-precached 5 frames for 18.webp (pool=1 est=33MB)
-precached 7 frames for 20.webp (pool=2 est=73MB)
-loadImage called for 05.webp
-NEW  ctx=0xb4000070cb46db30 total_alive=4
-CREATE #4 ctx=-4bffff8f34b924d0
-createAnimDecoder: 10ms, 186frames, target=1080x798
+active:[3]
+NEW  ctx=0xb4000070cb4801f0 total_alive=2
+CREATE #2 ctx=-4bffff8f34b7fe10
+NEW  ctx=0xb4000070cb482170 total_alive=3
+CREATE #3 ctx=-4bffff8f34b7de90
+precached 5f 02.webp (pool=1 est=66MB)
+precached 7f 04.webp (pool=2 est=145MB)
+Page:16
+loadImage 16.webp
+NEW  ctx=0xb4000070cb43c450 total_alive=4
+CREATE #4 ctx=-4bffff8f34bc3bb0
+createAnimDecoder: 19ms, 186frames, target=1080x806
 _startAnimation called (pre=0)
-NEW  ctx=0xb4000070cb47e4b0 total_alive=5
-CREATE #5 ctx=-4bffff8f34b81b50
-NEW  ctx=0xb4000070cb46e430 total_alive=6
-CREATE #6 ctx=-4bffff8f34b91bd0
-precached 5 frames for 06.webp (pool=3 est=106MB)
-precached 7 frames for 04.webp (pool=4 est=146MB)
-loadImage called for 04.webp
-hit 7 frames for 04.webp (pool=3)
+active:[16]
+NEW  ctx=0xb4000070cb483910 total_alive=5
+CREATE #5 ctx=-4bffff8f34b7c6f0
+NEW  ctx=0xb4000070cb463390 total_alive=6
+CREATE #6 ctx=-4bffff8f34b9cc70
+DEL  ctx=0xb4000070cb4686d0 total_alive=5
+DISPOSE ctx=-4bffff8f34b97930 remaining=5
+precached 5f 15.webp (pool=3 est=212MB)
+precached 7f 17.webp (pool=4 est=291MB)
+Page:4
+re-pool 03.webp from L2 (16361666B)
+NEW  ctx=0xb4000070cb483eb0 total_alive=6
+CREATE #6 ctx=-4bffff8f34b7c150
+loadImage 04.webp
+hit 7f 04.webp (pool=3)
 pool hit: 0ms
 _startAnimation called (pre=7)
-load-to-first-frame(preupload)=4ms
-NEW  ctx=0xb4000070cb4744f0 total_alive=7
-CREATE #7 ctx=-4bffff8f34b8bb10
-precached 7 frames for 03.webp (pool=4 est=146MB)
-loadImage called for 10.webp
-NEW  ctx=0xb4000070cb46f630 total_alive=8
-CREATE #8 ctx=-4bffff8f34b909d0
-createAnimDecoder: 2ms, 93frames, target=1080x806
+active:[4]
+load-to-first-frame(preupload)=5ms
+DEL  ctx=0xb4000070cb43c450 total_alive=5
+DISPOSE ctx=-4bffff8f34bc3bb0 remaining=5
+NEW  ctx=0xb4000070cb478750 total_alive=6
+CREATE #6 ctx=-4bffff8f34b878b0
+precached 7f 03.webp (pool=4 est=291MB)
+DEL  ctx=0xb4000070cb483910 total_alive=5
+DISPOSE ctx=-4bffff8f34b7c6f0 remaining=5
+precached 5f 05.webp (pool=4 est=277MB)
+Page:17
+re-pool 16.webp from L2 (18319682B)
+NEW  ctx=0xb4000070cb479a70 total_alive=6
+CREATE #6 ctx=-4bffff8f34b86590
+loadImage 17.webp
+NEW  ctx=0xb4000070cb483c70 total_alive=7
+CREATE #7 ctx=-4bffff8f34b7c390
+createAnimDecoder: 17ms, 186frames, target=1080x806
 _startAnimation called (pre=0)
-NEW  ctx=0xb4000070cb472450 total_alive=9
-CREATE #9 ctx=-4bffff8f34b8dbb0
-NEW  ctx=0xb4000070cb4743d0 total_alive=10
-CREATE #10 ctx=-4bffff8f34b8bc30
-precached 7 frames for 11.webp (pool=5 est=186MB)
-precached 5 frames for 09.webp (pool=6 est=219MB)
-loadImage called for 06.webp
-hit 5 frames for 06.webp (pool=5)
+active:[17]
+DEL  ctx=0xb4000070cb4801f0 total_alive=6
+DISPOSE ctx=-4bffff8f34b7fe10 remaining=6
+NEW  ctx=0xb4000070cb4783f0 total_alive=7
+CREATE #7 ctx=-4bffff8f34b87c10
+DEL  ctx=0xb4000070cb482170 total_alive=6
+DISPOSE ctx=-4bffff8f34b7de90 remaining=6
+precached 5f 16.webp (pool=4 est=277MB)
+Page:4
+loadImage 04.webp
+NEW  ctx=0xb4000070cb458530 total_alive=7
+CREATE #7 ctx=-4bffff8f34ba7ad0
+createAnimDecoder: 18ms, 186frames, target=1080x798
+_startAnimation called (pre=0)
+active:[4]
+DEL  ctx=0xb4000070cb483eb0 total_alive=6
+DISPOSE ctx=-4bffff8f34b7c150 remaining=6
+precached 7f 18.webp (pool=4 est=278MB)
+DEL  ctx=0xb4000070cb483c70 total_alive=5
+DISPOSE ctx=-4bffff8f34b7c390 remaining=5
+re-pool 03.webp from L2 (16361666B)
+NEW  ctx=0xb4000070cb483b50 total_alive=6
+CREATE #6 ctx=-4bffff8f34b7c4b0
+DEL  ctx=0xb4000070cb4783f0 total_alive=5
+DISPOSE ctx=-4bffff8f34b87c10 remaining=5
+precached 5f 03.webp (pool=4 est=264MB)
+re-pool 02.webp from L2 (20043476B)
+NEW  ctx=0xb4000070cb474bb0 total_alive=6
+CREATE #6 ctx=-4bffff8f34b8b450
+loadImage 03.webp
+hit 5f 03.webp (pool=3)
 pool hit: 0ms
 _startAnimation called (pre=5)
-load-to-first-frame(preupload)=1ms
-NEW  ctx=0xb4000070cb482dd0 total_alive=11
-CREATE #11 ctx=-4bffff8f34b7d230
-precached 7 frames for 07.webp (pool=6 est=225MB)
-loadImage called for 07.webp
-hit 7 frames for 07.webp (pool=5)
+active:[3, 4]
+load-to-first-frame(preupload)=2ms
+Page:3
+precached 7f 02.webp (pool=4 est=278MB)
+loadImage 02.webp
+hit 7f 02.webp (pool=3)
 pool hit: 0ms
 _startAnimation called (pre=7)
-load-to-first-frame(preupload)=1ms
-NEW  ctx=0xb4000070cb478870 total_alive=12
-CREATE #12 ctx=-4bffff8f34b87790
-precached 7 frames for 08.webp (pool=6 est=225MB)
-loadImage called for 08.webp
-hit 7 frames for 08.webp (pool=5)
+active:[2, 3, 4]
+load-to-first-frame(preupload)=2ms
+Page:2
+NEW  ctx=0xb4000070cb47e6f0 total_alive=7
+CREATE #7 ctx=-4bffff8f34b81910
+precached 7f 01.webp (pool=4 est=278MB)
+Page:3
+Page:4
+loadImage 05.webp
+hit 5f 05.webp (pool=3)
+pool hit: 0ms
+_startAnimation called (pre=5)
+active:[2, 3, 4, 5]
+load-to-first-frame(preupload)=2ms
+NEW  ctx=0xb4000070cb479710 total_alive=8
+CREATE #8 ctx=-4bffff8f34b868f0
+Page:5
+precached 7f 06.webp (pool=4 est=292MB)
+loadImage 06.webp
+hit 7f 06.webp (pool=3)
 pool hit: 0ms
 _startAnimation called (pre=7)
-load-to-first-frame(preupload)=1ms
+active:[2, 3, 4, 5, 6]
+load-to-first-frame(preupload)=4ms
+Page:6
+NEW  ctx=0xb4000070cb478f30 total_alive=9
+CREATE #9 ctx=-4bffff8f34b870d0
+precached 7f 07.webp (pool=4 est=292MB)
+loadImage 07.webp
+hit 7f 07.webp (pool=3)
+pool hit: 0ms
+_startAnimation called (pre=7)
+active:[2, 3, 4, 5, 6, 7]
+load-to-first-frame(preupload)=2ms
+Page:7
+NEW  ctx=0xb4000070cb47c770 total_alive=10
+CREATE #10 ctx=-4bffff8f34b83890
+precached 7f 08.webp (pool=4 est=292MB)
+loadImage 08.webp
+hit 7f 08.webp (pool=3)
+pool hit: 0ms
+_startAnimation called (pre=7)
+DEL  ctx=0xb4000070cb474bb0 total_alive=9
+DISPOSE ctx=-4bffff8f34b8b450 remaining=9
+active:[3, 4, 5, 6, 7, 8]
+load-to-first-frame(preupload)=21ms
+Page:8
+NEW  ctx=0xb4000070cb47b210 total_alive=10
+CREATE #10 ctx=-4bffff8f34b84df0
+precached 7f 09.webp (pool=4 est=292MB)
+Page:7
+Page:6
+Page:5
+Page:4
+Page:3
+NEW  ctx=0xb4000070cb480670 total_alive=11
+CREATE #11 ctx=-4bffff8f34b7f990
+DEL  ctx=0xb4000070cb479a70 total_alive=10
+DISPOSE ctx=-4bffff8f34b86590 remaining=10
+DEL  ctx=0xb4000070cb463390 total_alive=9
+DISPOSE ctx=-4bffff8f34b9cc70 remaining=9
+precached 7f 02.webp (pool=3 est=239MB)
+loadImage 02.webp
+hit 7f 02.webp (pool=2)
+pool hit: 0ms
+_startAnimation called (pre=7)
+DEL  ctx=0xb4000070cb47c770 total_alive=8
+DISPOSE ctx=-4bffff8f34b83890 remaining=8
+active:[2, 3, 4, 5, 6, 7]
+load-to-first-frame(preupload)=16ms
+Page:2

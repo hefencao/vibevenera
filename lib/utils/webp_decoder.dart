@@ -414,17 +414,50 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 ///
 /// **第一次循环时缓存所有帧 RGBA，后续循环直接从缓存读取，不再调用 C。**
 /// Isolate Worker 池：N 个持久化 Worker。
-/// 消息协议：[replyTo, ctxAddr, gen] — 3 元素为 decode 请求，2 元素为控制消息。
+///
+/// 消息协议：
+///   Main → Worker decode: [reqId, ctxAddr, gen]
+///   Main → Worker cancel: [null, ctxAddr, 0]
+///   Worker → Main reply:  [reqId, rgbaAddr, durationMs] or null on failure
+///
+/// 所有回复通过单一 ReceivePort 路由，按 reqId 匹配到对应 Completer，
+/// 消除每帧创建 ReceivePort 的开销。
 class _WorkerPool {
   final List<SendPort> _workers = [];
   bool _init = false;
   static int _nextGen = 1;
 
+  // ── Request tracking ──
+  final Map<int, Completer<List<Object?>?>> _pending = {};
+  int _nextReqId = 1;
+  late final ReceivePort _replyReceiver;
+
   static int nextGen() => _nextGen++;
+
+  int _workerIndex(int ctxAddr) =>
+      (ctxAddr.hashCode & 0x7FFFFFFF) % _workers.length;
 
   Future<void> _ensureInit() async {
     if (_init) return;
     _init = true;
+
+    // 创建全局回复端口，所有 worker 共用
+    _replyReceiver = ReceivePort();
+    _replyReceiver.listen((msg) {
+      final list = msg as List<Object?>?;
+      if (list == null || list.isEmpty) return;
+      final reqId = list[0] as int;
+      final completer = _pending.remove(reqId);
+      if (completer == null) return;
+      // list == [reqId] 表示失败(null)，list == [reqId, addr, dur] 表示成功
+      if (list.length < 3) {
+        completer.complete(null);
+      } else {
+        completer.complete(list);
+      }
+    });
+
+    final replySendPort = _replyReceiver.sendPort;
     for (int i = 0; i < 3; i++) {
       final r = ReceivePort();
       await Isolate.spawn((SendPort mainPort) {
@@ -432,52 +465,63 @@ class _WorkerPool {
         mainPort.send(workerR.sendPort);
         final lib = DynamicLibrary.open('libvenera_webp.so');
         final animGetFrame = lib.lookupFunction<_WebPAnimDecoderGetFrameNative, _WebPAnimDecoderGetFrameDart>('webp_anim_decoder_get_frame');
-        // 每个 ctx 的当前有效 generation
         final Map<int, int> validGens = {};
+        // 首条消息是 replySendPort，后续是 List 消息
+        late final SendPort replyPort;
+        bool gotReplyPort = false;
         workerR.listen((msg) {
-          final list = msg as List<Object?>;
-          final replyTo = list[0];
-          final ctxAddr = list[1] as int;
-          if (replyTo == null) {
-            // 控制消息：gen=0 表示移除该 ctx 的 generation 记录
-            if (list[2] as int == 0) {
-              validGens.remove(ctxAddr);
-            }
+          if (!gotReplyPort) {
+            replyPort = msg as SendPort;
+            gotReplyPort = true;
             return;
           }
-          // Decode 消息：[replyTo, ctxAddr, gen]
+          final list = msg as List<Object?>;
+          final reqId = list[0]; // int or null
+          final ctxAddr = list[1] as int;
+          if (reqId == null) {
+            // 控制消息：gen=0 移除 generation
+            if (list[2] as int == 0) validGens.remove(ctxAddr);
+            return;
+          }
           final gen = list[2] as int;
           if (validGens.containsKey(ctxAddr) && validGens[ctxAddr] != gen) {
-            (replyTo as SendPort).send(null); // generation 不匹配，丢弃
+            replyPort.send(<Object?>[reqId]); // gen 不匹配
             return;
           }
-          validGens[ctxAddr] = gen; // 首次使用或匹配成功
+          validGens[ctxAddr] = gen;
           final durationMs = calloc<Int32>();
           try {
             final ctx = Pointer<Void>.fromAddress(ctxAddr);
             final rgbaPtr = animGetFrame(ctx, durationMs);
-            (replyTo as SendPort).send(rgbaPtr != Pointer.fromAddress(0) ? [rgbaPtr.address, durationMs.value] : null);
+            if (rgbaPtr == Pointer.fromAddress(0)) {
+              replyPort.send(<Object?>[reqId]); // decode 失败
+            } else {
+              replyPort.send(<Object?>[reqId, rgbaPtr.address, durationMs.value]);
+            }
           } finally {
             calloc.free(durationMs);
           }
         });
       }, r.sendPort);
-      _workers.add(await r.first as SendPort);
+      // worker 先发来它的 SendPort，我们再把 reply port 发回去
+      final workerSendPort = await r.first as SendPort;
+      workerSendPort.send(replySendPort);
+      _workers.add(workerSendPort);
       r.close();
     }
   }
 
-  Future<SendPort> acquire(int ctxAddress) async {
+  /// 发送 decode 请求并等待结果。
+  Future<List<Object?>?> sendRequest(int ctxAddr, int gen) async {
     await _ensureInit();
-    // 按 ctx 地址哈希分配到固定 worker，确保同一 ctx 的所有调用
-    // 都路由到同一个 worker → 顺序处理，避免并发访问非线程安全的 C 状态。
-    final hash = ctxAddress.hashCode;
-    return _workers[(hash & 0x7FFFFFFF) % _workers.length];
+    final reqId = _nextReqId++;
+    final completer = Completer<List<Object?>?>();
+    _pending[reqId] = completer;
+    _workers[_workerIndex(ctxAddr)].send(<Object?>[reqId, ctxAddr, gen]);
+    return completer.future;
   }
 
   /// 使指定 ctx 的所有在途消息失效。
-  /// gen=0 表示 remove：worker 删除该 ctx 的 generation 记录。
-  /// 由于 _workerGen 全局唯一，新 decoder 不会复用旧 generation，remove 安全。
   void cancelCtx(int ctxAddress) {
     if (!_init || _workers.isEmpty) return;
     for (final w in _workers) {
@@ -554,17 +598,9 @@ class WebPAnimDecoder {
   /// 防止 dispose 后 Worker 仍访问已释放的 ctx。
   Future<WebPAnimFrameAddress?> getNextFrameAsync() async {
     _checkNotDisposed();
-    final sp = await _workerPool.acquire(_ctx.address);
-    final reply = ReceivePort();
-    try {
-      sp.send([reply.sendPort, _ctx.address, _workerGen]);
-      final result = await reply.first;
-      if (result == null) return null;
-      final list = result as List<Object?>;
-      return WebPAnimFrameAddress(address: list[0] as int, durationMs: list[1] as int);
-    } finally {
-      reply.close();
-    }
+    final result = await _workerPool.sendRequest(_ctx.address, _workerGen);
+    if (result == null) return null;
+    return WebPAnimFrameAddress(address: result[1] as int, durationMs: result[2] as int);
   }
 
   /// 重置到第一帧
