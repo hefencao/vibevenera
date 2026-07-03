@@ -460,7 +460,6 @@ class WorkerPoolScheduler {
     scheduleMicrotask(() async {
       await _ensureWorker(0);
       await _ensureWorker(1);
-      debugPrint('[WebP-Worker] 常驻 Isolate 预热完毕。');
     });
   }
 
@@ -475,8 +474,53 @@ class WorkerPoolScheduler {
   final List<bool> _isInitializing = [false, false];
   final List<bool> _workerBusy = [false, false];
 
+  // Round-robin counter for decoder creation (avoids worker 0 bottleneck)
+  int _nextDecoderWorker = 0; // ignore: unused_field
+
   void updateGeneration(int newGen) {
     _currentGeneration = newGen;
+  }
+
+  /// 在 Worker Isolate 中异步创建解码器，主线程零 C 堆开销。
+  /// 使用 round-robin 分配 worker，避免单个 worker 成为瓶颈。
+  Future<WebPAnimDecoder?> createDecoderAsync(Uint8List data, int tw, int th) async {
+    // 确保两个 worker 都已启动
+    await _ensureWorker(0);
+    await _ensureWorker(1);
+
+    // round-robin 选择 worker，与帧解码共享同一组 worker
+    final workerIndex = _nextDecoderWorker;
+    _nextDecoderWorker = (_nextDecoderWorker + 1) % 2;
+
+    final port = _workerPorts[workerIndex];
+    if (port == null) return null;
+
+    _workerBusy[workerIndex] = true;
+    try {
+      final replyPort = ReceivePort();
+      port.send(['new_decoder', replyPort.sendPort, data, tw, th]);
+
+      final result = await replyPort.first;
+      replyPort.close();
+
+      if (result is List && result[0] != 0) {
+        return WebPAnimDecoder._fromWorker(
+          bindings: _bind,
+          ctxAddress: result[0],
+          nativeDataAddress: result[1],
+          canvasWidth: result[2],
+          canvasHeight: result[3],
+          frameCount: result[4],
+          loopCount: result[5],
+          targetWidth: result[6],
+          targetHeight: result[7],
+        );
+      }
+      return null;
+    } finally {
+      _workerBusy[workerIndex] = false;
+      _scheduleNext(); // 唤醒可能等待中的帧解码任务
+    }
   }
 
   Future<void> _ensureWorker(int index) async {
@@ -511,14 +555,44 @@ class WorkerPoolScheduler {
 
     receivePort.listen((message) {
       final data = message as List;
+
+      if (bindings == null) {
+        (data[0] as SendPort).send('Error: Library not loaded');
+        return;
+      }
+
+      // 消息路由：'new_decoder' 创建解码器，否则为帧解码请求
+      if (data[0] is String && data[0] == 'new_decoder') {
+        final replyPort = data[1] as SendPort;
+        final Uint8List dartBytes = data[2];
+        final int tw = data[3];
+        final int th = data[4];
+
+        try {
+          final nativeData = dartBytes._asNative();
+          final cW = calloc<Int32>(), cH = calloc<Int32>();
+          final fC = calloc<Int32>(), lC = calloc<Int32>();
+          final aW = calloc<Int32>(), aH = calloc<Int32>();
+
+          final ctx = bindings.animNew(nativeData, dartBytes.length, tw, th, cW, cH, fC, lC, aW, aH);
+          if (ctx == Pointer.fromAddress(0)) {
+            nativeData._free();
+            replyPort.send(null);
+          } else {
+            replyPort.send([ctx.address, nativeData.address, cW.value, cH.value, fC.value, lC.value, aW.value, aH.value]);
+          }
+          calloc.free(cW); calloc.free(cH); calloc.free(fC);
+          calloc.free(lC); calloc.free(aW); calloc.free(aH);
+        } catch (e) {
+          replyPort.send(null);
+        }
+        return;
+      }
+
+      // 帧解码请求
       final replyPort = data[0] as SendPort;
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
-
-      if (bindings == null) {
-        replyPort.send('Error: Library not loaded');
-        return;
-      }
 
       try {
         if (decoderAddress == 0) {
@@ -527,8 +601,6 @@ class WorkerPoolScheduler {
         }
 
         final ctx = Pointer<Void>.fromAddress(decoderAddress);
-        
-        // 性能优化（通信扁平化）：利用 Int64List 承载地址与时长，减少 Isolate 跨界对象包装（Boxing）开销
         final results = Int64List(count * 2);
         int writeIdx = 0;
 
@@ -538,7 +610,7 @@ class WorkerPoolScheduler {
           results[writeIdx++] = rgbaPtr.address;
           results[writeIdx++] = durationMsPtr.value;
         }
-        
+
         if (writeIdx < results.length) {
           replyPort.send(results.sublist(0, writeIdx));
         } else {
@@ -583,38 +655,68 @@ class WorkerPoolScheduler {
   }
 
   Future<void> _processQueues() async {
+    // ctx-hash affinity: each decoder pinned to a specific worker
+    // to prevent concurrent access to non-thread-safe C decoder state.
     while (true) {
-      int? w;
-      if (!_workerBusy[0]) {
-        w = 0;
-      } else if (!_workerBusy[1]) {
-        w = 1;
-      } else {
-        break; 
+      // Find a free worker and a job whose ctx-hash matches it
+      int? assignedWorker;
+      DecodeJob? job;
+      Queue<DecodeJob>? sourceQueue;
+
+      for (final w in [0, 1]) {
+        if (_workerBusy[w]) continue;
+
+        // Scan queues in priority order for a job matching worker w
+        final queues = [
+          (_currentQueue, DecodePriority.current),
+          (_nextQueue, DecodePriority.next),
+          (_bgQueue, DecodePriority.background),
+        ];
+
+        for (final (queue, _) in queues) {
+          if (queue.isEmpty) continue;
+          // Find first job in this queue whose decoder hashes to worker w
+          for (final j in queue) {
+            if (j.decoderAddress % 2 == w) {
+              job = j;
+              assignedWorker = w;
+              sourceQueue = queue;
+              break;
+            }
+          }
+          if (job != null) break;
+        }
+
+        // Fallback: if no job hashes to worker w, take any job
+        if (job == null) {
+          if (_currentQueue.isNotEmpty) {
+            job = _currentQueue.first;
+            assignedWorker = w;
+            sourceQueue = _currentQueue;
+          } else if (_nextQueue.isNotEmpty) {
+            job = _nextQueue.first;
+            assignedWorker = w;
+            sourceQueue = _nextQueue;
+          } else if (_bgQueue.isNotEmpty) {
+            job = _bgQueue.first;
+            assignedWorker = w;
+            sourceQueue = _bgQueue;
+          }
+        }
+
+        if (job != null) break; // found work for this worker
       }
 
-      DecodeJob? job;
-      DecodePriority? jobPri;
-      if (_currentQueue.isNotEmpty) {
-        job = _currentQueue.removeFirst();
-        jobPri = DecodePriority.current;
-      } else if (_nextQueue.isNotEmpty) {
-        job = _nextQueue.removeFirst();
-        jobPri = DecodePriority.next;
-      } else if (_bgQueue.isNotEmpty) {
-        job = _bgQueue.removeFirst();
-        jobPri = DecodePriority.background;
-      } else {
-        break; 
-      }
+      if (job == null) break; // no work can be dispatched
+
+      sourceQueue!.remove(job);
 
       if (job.generation != _currentGeneration) {
         job.onComplete([]);
         continue;
       }
 
-      final targetWorker = (jobPri == DecodePriority.current && !_workerBusy[0]) ? 0 : w;
-      _runJob(job, targetWorker);
+      _runJob(job, assignedWorker!);
     }
   }
 
@@ -694,6 +796,21 @@ class WebPAnimDecoder {
   })  : _bindings = bindings,
         _ctx = ctx,
         _nativeData = nativeData;
+
+  /// 从 Worker Isolate 返回的原始地址重建解码器（主线程零 C 堆分配）
+  WebPAnimDecoder._fromWorker({
+    required _WebPBindings bindings,
+    required int ctxAddress,
+    required int nativeDataAddress,
+    required this.canvasWidth,
+    required this.canvasHeight,
+    required this.frameCount,
+    required this.loopCount,
+    required this.targetWidth,
+    required this.targetHeight,
+  })  : _bindings = bindings,
+        _ctx = Pointer.fromAddress(ctxAddress),
+        _nativeData = Pointer.fromAddress(nativeDataAddress);
 
   int get address => _ctx.address;
 

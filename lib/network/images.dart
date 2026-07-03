@@ -133,6 +133,7 @@ abstract class ImageDownloader {
         totalBytes: data.length,
         imageBytes: data,
       );
+      return; // 缓存命中后立即返回，禁止继续走网络下载逻辑
     }
 
     Future<Map<String, dynamic>?> Function()? onLoadFailed;

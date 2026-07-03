@@ -6,7 +6,8 @@
       "PowerShell(adb shell monkey -p com.github.wgh136.venera -c android.intent.category.LAUNCHER 1 2>&1)",
       "Bash(adb logcat *)",
       "PowerShell(adb logcat -c 2>&1)",
-      "Bash(adb shell *)"
+      "Bash(adb shell *)",
+      "PowerShell(flutter analyze 2>&1)"
     ],
     "additionalDirectories": [
       "\\tmp"

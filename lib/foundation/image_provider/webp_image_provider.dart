@@ -681,7 +681,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       final info = webp.getInfo(bytes);
       if (info == null || !info.isAnimated) { completer.complete(null); return null; }
 
-      final decoder = webp.createAnimDecoder(bytes, targetWidth: targetWidth, targetHeight: targetHeight);
+      final decoder = await webp.WorkerPoolScheduler.instance.createDecoderAsync(bytes, targetWidth, targetHeight);
       if (decoder == null) { completer.complete(null); return null; }
 
       final holder = DecoderManager.instance.getOrCreateHolder(fullKey, decoder, decoder.targetWidth, decoder.targetHeight, scale);
