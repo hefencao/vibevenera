@@ -9,9 +9,7 @@ class _ReaderImages extends StatefulWidget {
 
 class _ReaderImagesState extends State<_ReaderImages> {
   String? error;
-
   bool inProgress = false;
-
   late _ReaderState reader;
 
   @override
@@ -154,11 +152,8 @@ class _GalleryMode extends StatefulWidget {
 class _GalleryModeState extends State<_GalleryMode>
     implements _ImageViewController {
   late PageController controller;
-
   int get preCacheCount => appdata.settings["preloadImageCount"];
-
-  var photoViewControllers = <int, PhotoViewController>{};
-
+  final Map<int, PhotoViewController> photoViewControllers = {};
   late _ReaderState reader;
 
   bool get showChapterCommentsAtEnd {
@@ -196,9 +191,7 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   var imageStates = <State<ComicImage>>{};
-
   bool isLongPressing = false;
-
   int fingers = 0;
 
   /// WebP 三级缓存（生命周期绑定本 State）
@@ -225,7 +218,6 @@ class _GalleryModeState extends State<_GalleryMode>
     super.dispose();
   }
 
-  /// Get the range of images for the given page. [page] is 1-based.
   (int start, int end) getPageImagesRange(int page) {
     var imagesPerPage = reader.imagesPerPage;
     if (reader.showSingleImageOnFirstPage()) {
@@ -249,47 +241,12 @@ class _GalleryModeState extends State<_GalleryMode>
     }
   }
 
-  /// Get the image indices for current page. Returns null if no images.
-  /// Returns a single index if only one image, or a range if multiple images.
   (int, int)? getCurrentPageImageRange() {
     if (reader.images == null || reader.images!.isEmpty) {
       return null;
     }
     var (startIndex, endIndex) = getPageImagesRange(reader.page);
     return (startIndex, endIndex);
-  }
-
-  int _lastPage = 0;
-
-  void cache(int startPage) {
-    final goForward = startPage >= _lastPage;
-    _lastPage = startPage;
-    final first = goForward ? startPage + 1 : startPage - 1;
-    final second = goForward ? startPage - 1 : startPage + 1;
-
-    if (first > 0 && first <= totalPages && !isChapterCommentsPage(first)) {
-      _cachePage(first, true, 7);
-    }
-    if (second > 0 && second <= totalPages && !isChapterCommentsPage(second)) {
-      _cachePage(second, true, 5);
-    }
-
-    for (int i = startPage - 1; i <= startPage + preCacheCount; i++) {
-      if (i == startPage || i == first || i == second ||
-          i <= 0 || i > totalPages ||
-          isChapterCommentsPage(i)) {
-        continue;
-      }
-      _cachePage(i, false);
-    }
-  }
-
-  void _cachePage(int page, bool shouldPreCache, [int? webpFrameCount]) {
-    if (isChapterCommentsPage(page)) return;
-    var (startIndex, endIndex) = getPageImagesRange(page);
-    for (int i = startIndex; i < endIndex; i++) {
-      _preDownloadImage(i + 1, context);
-    }
   }
 
   Widget _buildChapterCommentsPage() {
@@ -309,22 +266,14 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   Widget build(BuildContext context) {
     return Listener(
-      onPointerDown: (event) {
-        fingers++;
-      },
-      onPointerUp: (event) {
-        fingers--;
-      },
-      onPointerCancel: (event) {
-        fingers--;
-      },
+      onPointerDown: (event) { fingers++; },
+      onPointerUp: (event) { fingers--; },
+      onPointerCancel: (event) { fingers--; },
       onPointerMove: (event) {
         if (isLongPressing) {
           var controller = photoViewControllers[reader.page]!;
           Offset value = event.delta;
-          if (isLongPressing) {
-            controller.updateMultiple(position: controller.position + value);
-          }
+          controller.updateMultiple(position: controller.position + value);
         }
       },
       child: PhotoViewGallery.builder(
@@ -336,19 +285,12 @@ class _GalleryModeState extends State<_GalleryMode>
         itemCount: totalPages + 2,
         builder: (BuildContext context, int index) {
           if (index == 0 || index == totalPages + 1) {
-            return PhotoViewGalleryPageOptions.customChild(
-              child: const SizedBox(),
-            );
+            return PhotoViewGalleryPageOptions.customChild(child: const SizedBox());
           } else if (isChapterCommentsPage(index)) {
-            return PhotoViewGalleryPageOptions.customChild(
-              child: _buildChapterCommentsPage(),
-            );
+            return PhotoViewGalleryPageOptions.customChild(child: _buildChapterCommentsPage());
           } else {
             var (startIndex, endIndex) = getPageImagesRange(index);
-            List<String> pageImages = reader.images!.sublist(
-              startIndex,
-              endIndex,
-            );
+            List<String> pageImages = reader.images!.sublist(startIndex, endIndex);
 
             photoViewControllers[index] ??= PhotoViewController();
 
@@ -356,11 +298,7 @@ class _GalleryModeState extends State<_GalleryMode>
               return PhotoViewGalleryPageOptions(
                 filterQuality: FilterQuality.medium,
                 controller: photoViewControllers[index],
-                imageProvider: _createImageProviderFromKey(
-                  pageImages[0],
-                  context,
-                  startIndex + 1,
-                ),
+                imageProvider: _createImageProviderFromKey(pageImages[0], context, startIndex + 1),
                 fit: BoxFit.contain,
                 errorBuilder: (_, error, s, retry) {
                   return NetworkError(message: error.toString(), retry: retry);
@@ -385,9 +323,7 @@ class _GalleryModeState extends State<_GalleryMode>
             initialScale: PhotoViewComputedScale.contained,
             minScale: PhotoViewComputedScale.contained * 1.0,
             maxScale: PhotoViewComputedScale.covered * 10.0,
-            backgroundDecoration: BoxDecoration(
-              color: context.colorScheme.surface,
-            ),
+            backgroundDecoration: BoxDecoration(color: context.colorScheme.surface),
             child: Center(
               child: SizedBox(
                 width: 20.0,
@@ -415,69 +351,43 @@ class _GalleryModeState extends State<_GalleryMode>
             reader.setPage(i);
             _updateWebPState(i, context);
             context.readerScaffold.update();
-            // Auto close toolbar when entering chapter comments page
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
             }
           }
-          // Remove other pages' controllers to reset their state.
           var keys = photoViewControllers.keys.toList();
           for (var key in keys) {
-            if (key != i) {
-              photoViewControllers.remove(key);
-            }
+            if (key != i) photoViewControllers.remove(key);
           }
-          // 更新 WebP 缓存活跃页面
-          _updateWebPCacheActivePages();
         },
       ),
     );
   }
 
   Widget buildPageImages(List<String> images, int startIndex) {
-    Axis axis = (reader.mode == ReaderMode.galleryTopToBottom)
-        ? Axis.vertical
-        : Axis.horizontal;
-
+    Axis axis = (reader.mode == ReaderMode.galleryTopToBottom) ? Axis.vertical : Axis.horizontal;
     bool reverse = reader.mode == ReaderMode.galleryRightToLeft;
-    if (reverse) {
-      images = images.reversed.toList();
-    }
+    if (reverse) images = images.reversed.toList();
 
     List<Widget> imageWidgets;
-
     if (images.length == 2) {
       imageWidgets = [
         Expanded(
           child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
-            image: _createImageProviderFromKey(
-              images[0],
-              context,
-              startIndex + 1,
-            ),
+            width: double.infinity, height: double.infinity,
+            image: _createImageProviderFromKey(images[0], context, startIndex + 1),
             fit: BoxFit.contain,
-            alignment: axis == Axis.vertical
-                ? Alignment.bottomCenter
-                : Alignment.centerRight,
+            alignment: axis == Axis.vertical ? Alignment.bottomCenter : Alignment.centerRight,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
           ),
         ),
         Expanded(
           child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
-            image: _createImageProviderFromKey(
-              images[1],
-              context,
-              startIndex + 2,
-            ),
+            width: double.infinity, height: double.infinity,
+            image: _createImageProviderFromKey(images[1], context, startIndex + 2),
             fit: BoxFit.contain,
-            alignment: axis == Axis.vertical
-                ? Alignment.topCenter
-                : Alignment.centerLeft,
+            alignment: axis == Axis.vertical ? Alignment.topCenter : Alignment.centerLeft,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
           ),
@@ -486,14 +396,9 @@ class _GalleryModeState extends State<_GalleryMode>
     } else {
       imageWidgets = images.map((imageKey) {
         startIndex++;
-        ImageProvider imageProvider = _createImageProviderFromKey(
-          imageKey,
-          context,
-          startIndex,
-        );
         return Expanded(
           child: ComicImage(
-            image: imageProvider,
+            image: _createImageProviderFromKey(imageKey, context, startIndex),
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
@@ -502,9 +407,7 @@ class _GalleryModeState extends State<_GalleryMode>
       }).toList();
     }
 
-    return axis == Axis.vertical
-        ? Column(children: imageWidgets)
-        : Row(children: imageWidgets);
+    return axis == Axis.vertical ? Column(children: imageWidgets) : Row(children: imageWidgets);
   }
 
   @override
@@ -513,11 +416,7 @@ class _GalleryModeState extends State<_GalleryMode>
       controller.jumpToPage(page);
       return Future.value();
     }
-    return controller.animateToPage(
-      page,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.ease,
-    );
+    return controller.animateToPage(page, duration: const Duration(milliseconds: 200), curve: Curves.ease);
   }
 
   @override
@@ -537,30 +436,20 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   void handleLongPressDown(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || fingers != 1) {
-      return;
-    }
+    if (!appdata.settings['enableLongPressToZoom'] || fingers != 1) return;
     var photoViewController = photoViewControllers[reader.page]!;
     double target = photoViewController.getInitialScale!.call()! * 1.75;
     var size = reader.size;
-    Offset zoomPosition;
-    if (appdata.settings['longPressZoomPosition'] != 'center') {
-      zoomPosition = Offset(
-        size.width / 2 - location.dx,
-        size.height / 2 - location.dy,
-      );
-    } else {
-      zoomPosition = Offset(0, 0);
-    }
+    Offset zoomPosition = appdata.settings['longPressZoomPosition'] != 'center'
+        ? Offset(size.width / 2 - location.dx, size.height / 2 - location.dy)
+        : Offset.zero;
     photoViewController.animateScale?.call(target, zoomPosition);
     isLongPressing = true;
   }
 
   @override
   void handleLongPressUp(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || !isLongPressing) {
-      return;
-    }
+    if (!appdata.settings['enableLongPressToZoom'] || !isLongPressing) return;
     var photoViewController = photoViewControllers[reader.page]!;
     double target = photoViewController.getInitialScale!.call()!;
     photoViewController.animateScale?.call(target);
@@ -572,30 +461,22 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void handleKeyEvent(KeyEvent event) {
     bool? forward;
-    if (reader.mode == ReaderMode.galleryLeftToRight &&
-        event.logicalKey == LogicalKeyboardKey.arrowRight) {
+    if (reader.mode == ReaderMode.galleryLeftToRight && event.logicalKey == LogicalKeyboardKey.arrowRight) {
       forward = true;
-    } else if (reader.mode == ReaderMode.galleryRightToLeft &&
-        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+    } else if (reader.mode == ReaderMode.galleryRightToLeft && event.logicalKey == LogicalKeyboardKey.arrowLeft) {
       forward = true;
-    } else if (reader.mode == ReaderMode.galleryTopToBottom &&
-        event.logicalKey == LogicalKeyboardKey.arrowDown) {
+    } else if (reader.mode == ReaderMode.galleryTopToBottom && event.logicalKey == LogicalKeyboardKey.arrowDown) {
       forward = true;
-    } else if (reader.mode == ReaderMode.galleryTopToBottom &&
-        event.logicalKey == LogicalKeyboardKey.arrowUp) {
+    } else if (reader.mode == ReaderMode.galleryTopToBottom && event.logicalKey == LogicalKeyboardKey.arrowUp) {
       forward = false;
-    } else if (reader.mode == ReaderMode.galleryLeftToRight &&
-        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+    } else if (reader.mode == ReaderMode.galleryLeftToRight && event.logicalKey == LogicalKeyboardKey.arrowLeft) {
       forward = false;
-    } else if (reader.mode == ReaderMode.galleryRightToLeft &&
-        event.logicalKey == LogicalKeyboardKey.arrowRight) {
+    } else if (reader.mode == ReaderMode.galleryRightToLeft && event.logicalKey == LogicalKeyboardKey.arrowRight) {
       forward = false;
     }
     if (event is KeyDownEvent) {
-      if (keyRepeatTimer != null) {
-        keyRepeatTimer!.cancel();
-        keyRepeatTimer = null;
-      }
+      keyRepeatTimer?.cancel();
+      keyRepeatTimer = null;
       if (forward == true) {
         reader.toPage(reader.page + 1);
       } else if (forward == false) {
@@ -610,7 +491,6 @@ class _GalleryModeState extends State<_GalleryMode>
         (timer) {
           if (!mounted) {
             timer.cancel();
-            return;
           } else if (forward == true) {
             reader.toPage(reader.page + 1);
           } else if (forward == false) {
@@ -619,23 +499,21 @@ class _GalleryModeState extends State<_GalleryMode>
         },
       );
     }
-    if (event is KeyUpEvent && keyRepeatTimer != null) {
-      keyRepeatTimer!.cancel();
+    if (event is KeyUpEvent) {
+      keyRepeatTimer?.cancel();
       keyRepeatTimer = null;
     }
   }
 
   @override
-  bool handleOnTap(Offset location) {
-    return false;
-  }
+  bool handleOnTap(Offset location) => false;
 
   @override
   Future<Uint8List?> getImageByOffset(Offset offset) async {
     var imageKey = getImageKeyByOffset(offset);
     if (imageKey == null) return null;
     if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
+      return await File(imageKey).readAsBytes();
     } else {
       return (await CacheManager().findCache(
         "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
@@ -666,25 +544,11 @@ class _GalleryModeState extends State<_GalleryMode>
         }
         if (imageKey != null) {
           int index = reader.images!.indexOf(imageKey);
-          if (index >= startIndex && index < endIndex) {
-            return imageKey;
-          }
+          if (index >= startIndex && index < endIndex) return imageKey;
         }
       }
     }
-
     return reader.images![startIndex];
-  }
-
-  /// 更新 WebP 缓存的活动页面列表，
-  /// 通知缓存驱逐离屏页的 L1/L3。
-  void _updateWebPCacheActivePages() {
-    var keys = <String>[];
-    var (start, end) = getCurrentPageImageRange() ?? (-1, -1);
-    for (int i = start; i < end && i < (reader.images?.length ?? 0); i++) {
-      keys.add(reader.images![i]);
-    }
-    webpCache.setActivePages(keys);
   }
 }
 
@@ -722,21 +586,12 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool disableScroll = false;
 
   late List<bool> cached;
-
   int get preCacheCount => appdata.settings["preloadImageCount"];
-
-  /// Whether the user was scrolling the page.
-  /// The gesture detector has a delay to detect tap event.
-  /// To handle the tap event, we need to know if the user was scrolling before the delay.
   bool delayedIsScrolling = false;
-
   var imageStates = <State<ComicImage>>{};
 
   void delayedSetIsScrolling(bool value) {
-    Future.delayed(
-      const Duration(milliseconds: 300),
-      () => delayedIsScrolling = value,
-    );
+    Future.delayed(const Duration(milliseconds: 300), () => delayedIsScrolling = value);
   }
 
   bool prepareToPrevChapter = false;
@@ -767,9 +622,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   void onPositionChanged() {
-    if (itemPositionsListener.itemPositions.value.isEmpty) {
-      return;
-    }
+    if (itemPositionsListener.itemPositions.value.isEmpty) return;
     var page = itemPositionsListener.itemPositions.value.first.index;
     page = page.clamp(1, reader.maxPage);
     if (page != reader.page) {
@@ -777,86 +630,41 @@ class _ContinuousModeState extends State<_ContinuousMode>
       _updateWebPState(page, context);
       context.readerScaffold.update();
     }
-    cacheImages(page);
   }
 
   double? _futurePosition;
 
   void smoothTo(double offset) {
-    if (HardwareKeyboard.instance.isShiftPressed) {
-      return;
-    }
+    if (HardwareKeyboard.instance.isShiftPressed) return;
     var currentLocation = scrollController.position.pixels;
     var old = _futurePosition;
-    _futurePosition ??= currentLocation;
-    double k = (_futurePosition! - currentLocation).abs() / 1600 + 1;
-    final customSpeed = appdata.settings.getReaderSetting(
-      context.reader.cid,
-      context.reader.type.sourceKey,
-      "readerScrollSpeed",
+    _futurePosition = old ?? currentLocation;
+    _futurePosition = _futurePosition! + offset;
+    
+
+    scrollController.animateTo(
+      _futurePosition!,
+      duration: const Duration(milliseconds: 150),
+      curve: Curves.easeOutCubic,
     );
-    if (customSpeed is num) {
-      k *= customSpeed;
-    }
-    _futurePosition = _futurePosition! + offset * k;
-    var beforeOffset = (_futurePosition! - currentLocation).abs();
-    _futurePosition = _futurePosition!.clamp(
-      scrollController.position.minScrollExtent,
-      scrollController.position.maxScrollExtent,
-    );
-    var afterOffset = (_futurePosition! - currentLocation).abs();
-    if (_futurePosition == old) return;
-    var target = _futurePosition!;
-    var duration = const Duration(milliseconds: 160);
-    if (afterOffset < beforeOffset) {
-      duration = duration * (afterOffset / beforeOffset);
-      if (duration < Duration(milliseconds: 10)) {
-        duration = Duration(milliseconds: 10);
-      }
-    }
-    scrollController
-        .animateTo(_futurePosition!, duration: duration, curve: Curves.linear)
-        .then((_) {
-          var current = scrollController.position.pixels;
-          if (current == target && current == _futurePosition) {
-            _futurePosition = null;
-          }
-        });
   }
 
   void onPointerSignal(PointerSignalEvent event) {
     if (event is PointerScrollEvent) {
       if (!_isMouseScrolling) {
-        setState(() {
-          _isMouseScrolling = true;
-        });
+        setState(() { _isMouseScrolling = true; });
       }
-      if (isCTRLPressed) {
-        return;
-      }
+      if (isCTRLPressed) return;
       smoothTo(event.scrollDelta.dy);
-    }
-  }
-
-  void cacheImages(int current) {
-    for (int i = current + 1; i <= current + preCacheCount; i++) {
-      if (i <= reader.maxPage && !cached[i]) {
-        _preDownloadImage(i, context);
-        cached[i] = true;
-      }
     }
   }
 
   void onScroll() {
     if (prepareToPrevChapter) {
       jumpToNextChapter = false;
-      jumpToPrevChapter =
-          scrollController.offset <
-          scrollController.position.minScrollExtent - _kChangeChapterOffset;
+      jumpToPrevChapter = scrollController.offset < scrollController.position.minScrollExtent - _kChangeChapterOffset;
     } else if (prepareToNextChapter) {
-      jumpToNextChapter =
-          scrollController.offset >
-          scrollController.position.maxScrollExtent + _kChangeChapterOffset;
+      jumpToNextChapter = scrollController.offset > scrollController.position.maxScrollExtent + _kChangeChapterOffset;
       jumpToPrevChapter = false;
     }
   }
@@ -871,9 +679,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     }
     var isZoomedIn = (scale ?? photoViewController.scale) != 1.0;
     if (isZoomedIn != this.isZoomedIn) {
-      setState(() {
-        this.isZoomedIn = isZoomedIn;
-      });
+      setState(() { this.isZoomedIn = isZoomedIn; });
     }
     return false;
   }
@@ -885,17 +691,13 @@ class _ContinuousModeState extends State<_ContinuousMode>
       itemScrollController: itemScrollController,
       itemPositionsListener: itemPositionsListener,
       scrollControllerCallback: (scrollController) {
-        if (_scrollController != null) {
-          _scrollController!.removeListener(onScroll);
-        }
+        _scrollController?.removeListener(onScroll);
         _scrollController = scrollController;
         _scrollController!.addListener(onScroll);
       },
       itemCount: reader.maxPage + 2,
       addSemanticIndexes: false,
-      scrollDirection: reader.mode == ReaderMode.continuousTopToBottom
-          ? Axis.vertical
-          : Axis.horizontal,
+      scrollDirection: reader.mode == ReaderMode.continuousTopToBottom ? Axis.vertical : Axis.horizontal,
       reverse: reader.mode == ReaderMode.continuousRightToLeft,
       physics: isCTRLPressed || _isMouseScrolling || disableScroll
           ? const NeverScrollableScrollPhysics()
@@ -903,36 +705,27 @@ class _ContinuousModeState extends State<_ContinuousMode>
           ? const ClampingScrollPhysics()
           : const BouncingScrollPhysics(),
       itemBuilder: (context, index) {
-        if (index == 0 || index == reader.maxPage + 1) {
-          return const SizedBox();
-        }
+        if (index == 0 || index == reader.maxPage + 1) return const SizedBox();
         double? width, height;
-        if (reader.mode == ReaderMode.continuousLeftToRight ||
-            reader.mode == ReaderMode.continuousRightToLeft) {
+        if (reader.mode == ReaderMode.continuousLeftToRight || reader.mode == ReaderMode.continuousRightToLeft) {
           height = double.infinity;
         } else {
           width = double.infinity;
         }
 
-        ImageProvider image = _createImageProvider(index, context);
-
         return ColoredBox(
           color: context.colorScheme.surface,
           child: ComicImage(
             filterQuality: FilterQuality.medium,
-            image: image,
-            width: width,
-            height: height,
+            image: _createImageProvider(index, context),
+            width: width, height: height,
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
           ),
         );
       },
-      scrollBehavior: const MaterialScrollBehavior().copyWith(
-        scrollbars: false,
-        dragDevices: _kTouchLikeDeviceTypes,
-      ),
+      scrollBehavior: const MaterialScrollBehavior().copyWith(scrollbars: false, dragDevices: _kTouchLikeDeviceTypes),
     );
 
     widget = Stack(
@@ -946,23 +739,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onPointerDown: (event) {
         fingers++;
         if (fingers > 1 && !disableScroll) {
-          setState(() {
-            disableScroll = true;
-          });
+          setState(() { disableScroll = true; });
         }
         _futurePosition = null;
         if (_isMouseScrolling) {
-          setState(() {
-            _isMouseScrolling = false;
-          });
+          setState(() { _isMouseScrolling = false; });
         }
       },
       onPointerUp: (event) {
         fingers--;
         if (fingers <= 1 && disableScroll) {
-          setState(() {
-            disableScroll = false;
-          });
+          setState(() { disableScroll = false; });
         }
         if (fingers == 0) {
           if (jumpToPrevChapter) {
@@ -977,39 +764,24 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onPointerCancel: (event) {
         fingers--;
         if (fingers <= 1 && disableScroll) {
-          setState(() {
-            disableScroll = false;
-          });
+          setState(() { disableScroll = false; });
         }
       },
       onPointerPanZoomUpdate: (event) {
-        if (event.scale == 1.0) {
-          smoothTo(0 - event.panDelta.dy);
-        }
+        if (event.scale == 1.0) smoothTo(0 - event.panDelta.dy);
       },
       onPointerMove: (event) {
         Offset value = event.delta;
-        if (photoViewController.scale == 1 || fingers != 1) {
-          return;
-        }
+        if (photoViewController.scale == 1 || fingers != 1) return;
         Offset offset;
         var sp = scrollController.position;
-        if (sp.pixels <= sp.minScrollExtent ||
-            sp.pixels >= sp.maxScrollExtent) {
+        if (sp.pixels <= sp.minScrollExtent || sp.pixels >= sp.maxScrollExtent) {
           offset = Offset(value.dx, value.dy);
         } else {
-          if (reader.mode == ReaderMode.continuousTopToBottom) {
-            offset = Offset(value.dx, 0);
-          } else {
-            offset = Offset(0, value.dy);
-          }
+          offset = (reader.mode == ReaderMode.continuousTopToBottom) ? Offset(value.dx, 0) : Offset(0, value.dy);
         }
-        if (isLongPressing) {
-          offset += value;
-        }
-        photoViewController.updateMultiple(
-          position: photoViewController.position + offset,
-        );
+        if (isLongPressing) offset += value;
+        photoViewController.updateMultiple(position: photoViewController.position + offset);
       },
       onPointerSignal: onPointerSignal,
       child: widget,
@@ -1024,31 +796,21 @@ class _ContinuousModeState extends State<_ContinuousMode>
         }
 
         var scale = photoViewController.scale ?? 1.0;
-
-        if (notification is ScrollUpdateNotification &&
-            (scale - 1).abs() < 0.05) {
+        if (notification is ScrollUpdateNotification && (scale - 1).abs() < 0.05) {
           if (!scrollController.hasClients) return false;
-          if (scrollController.position.pixels <=
-                  scrollController.position.minScrollExtent &&
-              !reader.isFirstChapterOfGroup) {
+          if (scrollController.position.pixels <= scrollController.position.minScrollExtent && !reader.isFirstChapterOfGroup) {
             if (!prepareToPrevChapter) {
               jumpToPrevChapter = false;
               jumpToNextChapter = false;
               context.readerScaffold.setFloatingButton(-1);
-              setState(() {
-                prepareToPrevChapter = true;
-              });
+              setState(() { prepareToPrevChapter = true; });
             }
-          } else if (scrollController.position.pixels >=
-                  scrollController.position.maxScrollExtent &&
-              !reader.isLastChapterOfGroup) {
+          } else if (scrollController.position.pixels >= scrollController.position.maxScrollExtent && !reader.isLastChapterOfGroup) {
             if (!prepareToNextChapter) {
               jumpToPrevChapter = false;
               jumpToNextChapter = false;
               context.readerScaffold.setFloatingButton(1);
-              setState(() {
-                prepareToNextChapter = true;
-              });
+              setState(() { prepareToNextChapter = true; });
             }
           } else {
             context.readerScaffold.setFloatingButton(0);
@@ -1062,16 +824,14 @@ class _ContinuousModeState extends State<_ContinuousMode>
             }
           }
         }
-
         return true;
       },
       child: widget,
     );
+    
     var width = reader.size.width;
     var height = reader.size.height;
-    if (appdata.settings['limitImageWidth'] &&
-        width / height > 0.7 &&
-        reader.mode == ReaderMode.continuousTopToBottom) {
+    if (appdata.settings['limitImageWidth'] && width / height > 0.7 && reader.mode == ReaderMode.continuousTopToBottom) {
       width = height * 0.7;
     }
 
@@ -1092,28 +852,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
       children: [
         SizedBox(height: context.padding.top + 16),
         if (prepareToPrevChapter)
-          _SwipeChangeChapterProgress(
-            controller: scrollController,
-            isPrev: true,
-          ),
+          _SwipeChangeChapterProgress(controller: scrollController, isPrev: true),
         const Spacer(),
         if (prepareToNextChapter)
-          _SwipeChangeChapterProgress(
-            controller: scrollController,
-            isPrev: false,
-          ),
-        SizedBox(height: 36),
+          _SwipeChangeChapterProgress(controller: scrollController, isPrev: false),
+        const SizedBox(height: 36),
       ],
     );
   }
 
   @override
   Future<void> animateToPage(int page) {
-    return itemScrollController.scrollTo(
-      index: page,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.ease,
-    );
+    return itemScrollController.scrollTo(index: page, duration: const Duration(milliseconds: 200), curve: Curves.ease);
   }
 
   @override
@@ -1122,37 +872,22 @@ class _ContinuousModeState extends State<_ContinuousMode>
       context.readerScaffold.addImageFavorite();
       return;
     }
-    double target;
-    if (photoViewController.scale !=
-        photoViewController.getInitialScale?.call()) {
-      target = photoViewController.getInitialScale!.call()!;
-    } else {
-      target = photoViewController.getInitialScale!.call()! * 1.75;
-    }
+    double target = (photoViewController.scale != photoViewController.getInitialScale?.call())
+        ? photoViewController.getInitialScale!.call()!
+        : photoViewController.getInitialScale!.call()! * 1.75;
     var size = MediaQuery.of(context).size;
-    photoViewController.animateScale?.call(
-      target,
-      Offset(size.width / 2 - location.dx, size.height / 2 - location.dy),
-    );
+    photoViewController.animateScale?.call(target, Offset(size.width / 2 - location.dx, size.height / 2 - location.dy));
     onScaleUpdate(target);
   }
 
   @override
   void handleLongPressDown(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || delayedIsScrolling) {
-      return;
-    }
+    if (!appdata.settings['enableLongPressToZoom'] || delayedIsScrolling) return;
     double target = photoViewController.getInitialScale!.call()! * 1.75;
     var size = reader.size;
-    Offset zoomPosition;
-    if (appdata.settings['longPressZoomPosition'] != 'center') {
-      zoomPosition = Offset(
-        size.width / 2 - location.dx,
-        size.height / 2 - location.dy,
-      );
-    } else {
-      zoomPosition = Offset(0, 0);
-    }
+    Offset zoomPosition = appdata.settings['longPressZoomPosition'] != 'center'
+        ? Offset(size.width / 2 - location.dx, size.height / 2 - location.dy)
+        : Offset.zero;
     photoViewController.animateScale?.call(target, zoomPosition);
     onScaleUpdate(target);
     isLongPressing = true;
@@ -1160,9 +895,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void handleLongPressUp(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom']) {
-      return;
-    }
+    if (!appdata.settings['enableLongPressToZoom']) return;
     double target = photoViewController.getInitialScale!.call()!;
     photoViewController.animateScale?.call(target);
     onScaleUpdate(target);
@@ -1177,8 +910,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void handleKeyEvent(KeyEvent event) {
-    if (event.logicalKey == LogicalKeyboardKey.controlLeft ||
-        event.logicalKey == LogicalKeyboardKey.controlRight) {
+    if (event.logicalKey == LogicalKeyboardKey.controlLeft || event.logicalKey == LogicalKeyboardKey.controlRight) {
       setState(() {
         if (event is KeyDownEvent) {
           isCTRLPressed = true;
@@ -1187,58 +919,37 @@ class _ContinuousModeState extends State<_ContinuousMode>
         }
       });
     }
-    if (event is KeyUpEvent) {
-      return;
-    }
+    if (event is KeyUpEvent) return;
     bool? forward;
-    if (reader.mode == ReaderMode.continuousLeftToRight &&
-        event.logicalKey == LogicalKeyboardKey.arrowRight) {
+    if (reader.mode == ReaderMode.continuousLeftToRight && event.logicalKey == LogicalKeyboardKey.arrowRight) {
       forward = true;
-    } else if (reader.mode == ReaderMode.continuousRightToLeft &&
-        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+    } else if (reader.mode == ReaderMode.continuousRightToLeft && event.logicalKey == LogicalKeyboardKey.arrowLeft) {
       forward = true;
-    } else if (reader.mode == ReaderMode.continuousTopToBottom &&
-        event.logicalKey == LogicalKeyboardKey.arrowDown) {
+    } else if (reader.mode == ReaderMode.continuousTopToBottom && event.logicalKey == LogicalKeyboardKey.arrowDown) {
       forward = true;
-    } else if (reader.mode == ReaderMode.continuousTopToBottom &&
-        event.logicalKey == LogicalKeyboardKey.arrowUp) {
+    } else if (reader.mode == ReaderMode.continuousTopToBottom && event.logicalKey == LogicalKeyboardKey.arrowUp) {
       forward = false;
-    } else if (reader.mode == ReaderMode.continuousLeftToRight &&
-        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+    } else if (reader.mode == ReaderMode.continuousLeftToRight && event.logicalKey == LogicalKeyboardKey.arrowLeft) {
       forward = false;
-    } else if (reader.mode == ReaderMode.continuousRightToLeft &&
-        event.logicalKey == LogicalKeyboardKey.arrowRight) {
+    } else if (reader.mode == ReaderMode.continuousRightToLeft && event.logicalKey == LogicalKeyboardKey.arrowRight) {
       forward = false;
     }
     if (forward == true) {
-      scrollController.animateTo(
-        scrollController.offset + context.height * 0.25,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.ease,
-      );
+      scrollController.animateTo(scrollController.offset + context.height * 0.25, duration: const Duration(milliseconds: 200), curve: Curves.ease);
     } else if (forward == false) {
-      scrollController.animateTo(
-        scrollController.offset - context.height * 0.25,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.ease,
-      );
+      scrollController.animateTo(scrollController.offset - context.height * 0.25, duration: const Duration(milliseconds: 200), curve: Curves.ease);
     }
   }
 
   @override
-  bool handleOnTap(Offset location) {
-    if (delayedIsScrolling) {
-      return true;
-    }
-    return false;
-  }
+  bool handleOnTap(Offset location) => delayedIsScrolling;
 
   @override
   Future<Uint8List?> getImageByOffset(Offset offset) async {
     var imageKey = getImageKeyByOffset(offset);
     if (imageKey == null) return null;
     if (imageKey.startsWith("file://")) {
-      return await File(imageKey.substring(7)).readAsBytes();
+      return await File(imageKey).readAsBytes();
     } else {
       return (await CacheManager().findCache(
         "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
@@ -1269,71 +980,28 @@ ImageProvider _createImageProviderFromKey(
   int page,
 ) {
   var reader = context.reader;
+  final size = WebPImageProvider.calculateTargetSize(context);
+  final double dpr = MediaQuery.of(context).devicePixelRatio;
+  var imageCtrl = reader._imageViewController;
+  DecodedImageCache? cache = imageCtrl is _GalleryModeState ? imageCtrl.webpCache : null;
 
-  // 检测是否为 WebP — 通过扩展名快速判断
-  if (imageKey.endsWith('.webp') || _isLikelyWebP(imageKey)) {
-    var size = MediaQuery.of(context).size;
-    var dpr = MediaQuery.of(context).devicePixelRatio;
-    var targetWidth = (size.width * dpr).round();
-    var targetHeight = (size.height * dpr).round();
-    // 最大尺寸限制避免极端情况
-    if (targetWidth > 1920) targetWidth = 1920;
-    if (targetHeight > 2560) targetHeight = 2560;
-
-    // Gallery 模式需要注入 DecodedImageCache
-    var imageCtrl = reader._imageViewController;
-    DecodedImageCache? cache;
-    if (imageCtrl is _GalleryModeState) {
-      cache = imageCtrl.webpCache;
-    }
-
-    return WebPImageProvider(
-      imageKey,
-      reader.type.comicSource?.key,
-      reader.cid,
-      reader.eid,
-      page, // 使用图片所在的实际页码，而非 reader.page（避免翻页时 key 变化触发重载）
-      cache: cache,
-      targetWidth: targetWidth,
-      targetHeight: targetHeight,
-      scale: 1.0 / dpr, // 使 1 图像像素 = 1 物理像素
-    );
-  }
-
-  return ReaderImageProvider(
+  return WebPImageProvider(
     imageKey,
     reader.type.comicSource?.key,
     reader.cid,
     reader.eid,
-    reader.page,
-    enableResize: reader.mode.isContinuous,
+    page,
+    cache: cache,
+    targetWidth: size.width.round(),
+    targetHeight: size.height.round(),
+    scale: 1.0 / dpr,
   );
-}
-
-/// 根据图片 key 的格式推断是否可能为 WebP。
-/// 对于不带扩展名的 key，只在原始字节层面检测。
-bool _isLikelyWebP(String imageKey) {
-  // 如果 key 看起来是个 URL 或路径，检查扩展名
-  var lower = imageKey.toLowerCase();
-  if (lower.contains('.webp')) return true;
-  // 无法确定的返回 false，由 WebPImageProvider 在加载后检测 magic bytes
-  return false;
 }
 
 ImageProvider _createImageProvider(int page, BuildContext context) {
   var reader = context.reader;
   var imageKey = reader.images![page - 1];
   return _createImageProviderFromKey(imageKey, context, page);
-}
-
-String _getWebPFullKey(String imageKey, BuildContext context) {
-  final size = MediaQuery.of(context).size;
-  final dpr = MediaQuery.of(context).devicePixelRatio;
-  var targetWidth = (size.width * dpr).round();
-  var targetHeight = (size.height * dpr).round();
-  if (targetWidth > 1920) targetWidth = 1920;
-  if (targetHeight > 2560) targetHeight = 2560;
-  return '$imageKey@${targetWidth}x$targetHeight';
 }
 
 int _lastWebPPage = 0;
@@ -1343,69 +1011,35 @@ void _updateWebPState(int page, BuildContext context) {
   final images = reader.images;
   if (images == null) return;
 
-  final goForward = _lastWebPPage == 0 || page >= _lastWebPPage;
   _lastWebPPage = page;
+  var imageCtrl = reader._imageViewController;
+  DecodedImageCache? cache = imageCtrl is _GalleryModeState ? imageCtrl.webpCache : null;
 
-  String getKey(int index) {
-    if (index < 0 || index >= images.length) return '';
-    return _getWebPFullKey(images[index], context);
-  }
-
-  if (goForward) {
-    debugPrint('[WebP-PAGE] Page:$page ->');
-    WebPImageProvider.onPageChanged(
-      current: getKey(page - 1),
-      next: [getKey(page), getKey(page + 1)],
-      last: [getKey(page - 2)],
-      precache: [getKey(page + 2), getKey(page + 3)],
-    );
-  } else {
-    // 向后滚动：交换 next/last 方向
-    debugPrint('[WebP-PAGE] Page:$page <-');
-    WebPImageProvider.onPageChanged(
-      current: getKey(page - 1),
-      next: [getKey(page - 2), getKey(page - 3)],
-      last: [getKey(page)],
-      precache: [getKey(page - 4), getKey(page - 5)],
-    );
-  }
-}
-
-/// [_preDownloadImage] is used to download the image for the given page.
-/// The image is downloaded using the [CacheManager] and saved to the local storage.
-void _preDownloadImage(int page, BuildContext context) {
-  if (page <= 0 || page > context.reader.images!.length) {
-    return;
-  }
-  var reader = context.reader;
-  var imageKey = reader.images![page - 1];
-  if (imageKey.startsWith("file://")) {
-    return;
-  }
-  var cid = reader.cid;
-  var eid = reader.eid;
-  var sourceKey = reader.type.comicSource?.key;
-  ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
+  // 关键优化：状态计算与自动预分配交由 FFI 引擎状态管理器，消除冗余计算
+  WebPImageProvider.onPageChanged(
+    currentPageIndex: page - 1,
+    images: images,
+    context: context,
+    cid: reader.cid,
+    eid: reader.eid,
+    sourceKey: reader.type.comicSource?.key,
+    cache: cache,
+  );
 }
 
 class _SwipeChangeChapterProgress extends StatefulWidget {
   const _SwipeChangeChapterProgress({this.controller, required this.isPrev});
 
   final ScrollController? controller;
-
   final bool isPrev;
 
   @override
-  State<_SwipeChangeChapterProgress> createState() =>
-      _SwipeChangeChapterProgressState();
+  State<_SwipeChangeChapterProgress> createState() => _SwipeChangeChapterProgressState();
 }
 
-class _SwipeChangeChapterProgressState
-    extends State<_SwipeChangeChapterProgress> {
+class _SwipeChangeChapterProgressState extends State<_SwipeChangeChapterProgress> {
   double value = 0;
-
   late final isPrev = widget.isPrev;
-
   ScrollController? controller;
 
   @override
@@ -1425,17 +1059,15 @@ class _SwipeChangeChapterProgressState
       controller = widget.controller;
       controller?.addListener(onScroll);
       if (value != 0) {
-        setState(() {
-          value = 0;
-        });
+        setState(() { value = 0; });
       }
     }
   }
 
   @override
   void dispose() {
-    super.dispose();
     controller?.removeListener(onScroll);
+    super.dispose();
   }
 
   void onScroll() {
@@ -1446,9 +1078,7 @@ class _SwipeChangeChapterProgressState
     var newValue = offset / _kChangeChapterOffset;
     newValue = newValue.clamp(0.0, 1.0);
     if (newValue != value) {
-      setState(() {
-        value = newValue;
-      });
+      setState(() { value = newValue; });
     }
   }
 
@@ -1467,11 +1097,7 @@ class _SwipeChangeChapterProgressState
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            widget.isPrev ? Icons.arrow_downward : Icons.arrow_upward,
-            color: context.colorScheme.onSurface,
-            size: 16,
-          ),
+          Icon(widget.isPrev ? Icons.arrow_downward : Icons.arrow_upward, color: context.colorScheme.onSurface, size: 16),
           const SizedBox(width: 4),
           Text(msg),
         ],
@@ -1482,9 +1108,7 @@ class _SwipeChangeChapterProgressState
 
 class _ProgressPainter extends CustomPainter {
   final double value;
-
   final Color backgroundColor;
-
   final Color color;
 
   const _ProgressPainter({
@@ -1498,22 +1122,10 @@ class _ProgressPainter extends CustomPainter {
     final paint = Paint()
       ..color = backgroundColor
       ..style = PaintingStyle.fill;
-    canvas.drawRRect(
-      RRect.fromLTRBR(0, 0, size.width, size.height, Radius.circular(16)),
-      paint,
-    );
+    canvas.drawRRect(RRect.fromLTRBR(0, 0, size.width, size.height, Radius.circular(16)), paint);
 
     paint.color = color;
-    canvas.drawRRect(
-      RRect.fromLTRBR(
-        0,
-        0,
-        size.width * value,
-        size.height,
-        Radius.circular(16),
-      ),
-      paint,
-    );
+    canvas.drawRRect(RRect.fromLTRBR(0, 0, size.width * value, size.height, Radius.circular(16)), paint);
   }
 
   @override

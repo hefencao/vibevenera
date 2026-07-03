@@ -162,13 +162,19 @@ abstract class ImageDownloader {
           };
         }
 
+        var requestUrl = (configs['url'] ?? imageKey) as String;
+        // 仅拦截裸文件名（无 scheme），file:///http:// 等放行
+        if (!requestUrl.contains('://')) {
+          throw Exception('Not a valid URL: "$requestUrl" (sourceKey=$sourceKey)');
+        }
+
         var dio = AppDio(BaseOptions(
           headers: configs['headers'],
           method: configs['method'] ?? 'GET',
           responseType: ResponseType.stream,
         ));
 
-        var req = await dio.request<ResponseBody>(configs['url'] ?? imageKey,
+        var req = await dio.request<ResponseBody>(requestUrl,
             data: configs['data']);
         var stream = req.data?.stream ?? (throw "Error: Empty response body.");
         int? expectedBytes = req.data!.contentLength;

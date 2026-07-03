@@ -37,7 +37,8 @@ class ReaderImageProvider
       } else {
         throw "Error: File not found.";
       }
-    } else {
+    } else if (imageKey.contains('://')) {
+      // HTTP/HTTPS URL → 网络下载
       await for (var event
         in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
         checkStop();
@@ -49,6 +50,14 @@ class ReaderImageProvider
           imageBytes = event.imageBytes;
           break;
         }
+      }
+    } else {
+      // 本地文件名/路径，尝试直接读取
+      var file = File(imageKey);
+      if (await file.exists()) {
+        imageBytes = await file.readAsBytes();
+      } else {
+        throw "Error: File not found: $imageKey";
       }
     }
     if (imageBytes == null) {

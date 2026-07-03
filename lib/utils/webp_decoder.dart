@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
@@ -78,20 +79,20 @@ typedef _WebPGetInfoDart = int Function(
   Pointer<Int32> isAnimated,
 );
 
-typedef _WebPDecodeScaledNative = Pointer<Uint8> Function(
-  Pointer<Uint8> data,
-  Uint64 size,
-  Int32 targetWidth,
-  Int32 targetHeight,
-  Pointer<Int32> outWidth,
-  Pointer<Int32> outHeight,
-);
-
 typedef _WebPDecodeScaledDart = Pointer<Uint8> Function(
   Pointer<Uint8> data,
   int size,
   int targetWidth,
   int targetHeight,
+  Pointer<Int32> outWidth,
+  Pointer<Int32> outHeight,
+);
+
+typedef _WebPDecodeScaledNative = Pointer<Uint8> Function(
+  Pointer<Uint8> data,
+  Uint64 size,
+  Int32 targetWidth,
+  Int32 targetHeight,
   Pointer<Int32> outWidth,
   Pointer<Int32> outHeight,
 );
@@ -194,12 +195,10 @@ typedef _WebPDecodeFragmentScaledDart = Pointer<Uint8> Function(
 // ═══════════════════════════════════════════════════════════════
 
 DynamicLibrary _loadLibrary() {
-  // Android
   try {
     return DynamicLibrary.open('libvenera_webp.so');
   } catch (_) {}
 
-  // Fallback (for testing on other platforms)
   try {
     return DynamicLibrary.open('libvenera_webp.dll');
   } catch (_) {}
@@ -275,10 +274,9 @@ _WebPBindings? _bindings;
 _WebPBindings get _bind => _bindings ??= _WebPBindings(_loadLibrary());
 
 // ═══════════════════════════════════════════════════════════════
-// WebP 格式检测（纯 Dart，无需 FFI）
+// WebP 格式检测
 // ═══════════════════════════════════════════════════════════════
 
-/// 检测是否为 WebP 格式
 bool isWebP(Uint8List data) {
   if (data.length < 12) return false;
   return data[0] == 0x52 && // R
@@ -295,15 +293,10 @@ bool isWebP(Uint8List data) {
 // 公共 API
 // ═══════════════════════════════════════════════════════════════
 
-/// 归还 Native Buffer Pool 中的缓冲区（零拷贝管线闭环）。
-///
-/// 必须在 decodeImageFromPixels 的完成回调中调用，
-/// 此时 GPU 已安全读取完像素数据。
 void nativePoolRelease(int address) {
   _bind.poolRelease(Pointer<Uint8>.fromAddress(address));
 }
 
-/// 获取 WebP 图片基本信息
 WebPImageInfo? getInfo(Uint8List data) {
   if (!isWebP(data)) return null;
 
@@ -334,7 +327,6 @@ WebPImageInfo? getInfo(Uint8List data) {
   }
 }
 
-/// 解码静态 WebP 到指定目标尺寸（保持宽高比）
 WebPStaticFrame? decodeStatic(Uint8List data,
     {required int targetWidth, required int targetHeight}) {
   if (!isWebP(data)) return null;
@@ -376,12 +368,6 @@ WebPStaticFrame? decodeStatic(Uint8List data,
   }
 }
 
-/// 创建动画 WebP 解码器。
-///
-/// 每次调用创建独立解码器实例。调用者通过 [WebPAnimDecoder.dispose] 释放资源。
-/// 注意：不再复用解码器以避免多 Completer 间共享 C 状态导致的竞态条件。
-///
-/// 返回 null 表示失败（nativeData 已释放）。
 WebPAnimDecoder? createAnimDecoder(Uint8List data,
     {required int targetWidth, required int targetHeight}) {
   if (!isWebP(data)) return null;
@@ -442,14 +428,12 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 // 高能效渲染引擎：调度器与解码器
 // ═══════════════════════════════════════════════════════════════
 
-/// 任务优先级（对应页面状态）
 enum DecodePriority {
   current,    // 最高：当前页，多线程
   next,       // 中等：预取页，单线程
   background  // 最低：远端预读，单线程
 }
 
-/// 解码任务
 class DecodeJob {
   final int generation;
   final int decoderAddress;
@@ -468,10 +452,17 @@ class DecodeJob {
   });
 }
 
-/// 全局工作池调度器
 class WorkerPoolScheduler {
   static final WorkerPoolScheduler instance = WorkerPoolScheduler._();
-  WorkerPoolScheduler._();
+  
+  WorkerPoolScheduler._() {
+    // 性能优化（线程预热）：启动时预加载并热身两个常驻后台解码 Isolate，消减首屏启动延迟
+    scheduleMicrotask(() async {
+      await _ensureWorker(0);
+      await _ensureWorker(1);
+      debugPrint('[WebP-Worker] 常驻 Isolate 预热完毕。');
+    });
+  }
 
   final Queue<DecodeJob> _currentQueue = Queue();
   final Queue<DecodeJob> _nextQueue = Queue();
@@ -480,7 +471,6 @@ class WorkerPoolScheduler {
   bool _isProcessing = false;
   int _currentGeneration = 0;
 
-  // 双工作线程：Worker 0 优先服务 CURRENT，Worker 1 处理 NEXT/BG 及溢出
   final List<SendPort?> _workerPorts = [null, null];
   final List<bool> _isInitializing = [false, false];
   final List<bool> _workerBusy = [false, false];
@@ -503,9 +493,7 @@ class WorkerPoolScheduler {
     }
   }
 
-  /// Worker Isolate 入口：批量解码，帧数据从原生缓冲池获取
-  /// 消息格式：[replyPort, decoderAddress, count, targetW, targetH, generation]
-  /// 回复格式：[addr1, dur1, addr2, dur2, ...]  (所有帧批量返回)
+  /// Worker Isolate 入口
   static void _workerEntry(List args) {
     final mainPort = args[0] as SendPort;
     final workerIndex = args[1] as int;
@@ -526,14 +514,11 @@ class WorkerPoolScheduler {
       final replyPort = data[0] as SendPort;
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
-      // data[3]=targetW, data[4]=targetH, data[5]=generation (reserved)
 
       if (bindings == null) {
         replyPort.send('Error: Library not loaded');
         return;
       }
-
-      final List<int> results = [];
 
       try {
         if (decoderAddress == 0) {
@@ -542,13 +527,23 @@ class WorkerPoolScheduler {
         }
 
         final ctx = Pointer<Void>.fromAddress(decoderAddress);
+        
+        // 性能优化（通信扁平化）：利用 Int64List 承载地址与时长，减少 Isolate 跨界对象包装（Boxing）开销
+        final results = Int64List(count * 2);
+        int writeIdx = 0;
+
         for (int i = 0; i < count; i++) {
           final rgbaPtr = bindings.animGetFrame(ctx, durationMsPtr);
           if (rgbaPtr == Pointer.fromAddress(0)) break;
-          results.add(rgbaPtr.address);
-          results.add(durationMsPtr.value);
+          results[writeIdx++] = rgbaPtr.address;
+          results[writeIdx++] = durationMsPtr.value;
         }
-        replyPort.send(results);
+        
+        if (writeIdx < results.length) {
+          replyPort.send(results.sublist(0, writeIdx));
+        } else {
+          replyPort.send(results);
+        }
       } catch (e, stack) {
         debugPrint('[WebP-Worker] w$workerIndex crash: $e\n$stack');
         replyPort.send('Error: $e');
@@ -589,17 +584,15 @@ class WorkerPoolScheduler {
 
   Future<void> _processQueues() async {
     while (true) {
-      // 找一个空闲 worker
       int? w;
       if (!_workerBusy[0]) {
         w = 0;
       } else if (!_workerBusy[1]) {
         w = 1;
       } else {
-        break; // 两个 worker 都忙
+        break; 
       }
 
-      // 从优先级队列取 job
       DecodeJob? job;
       DecodePriority? jobPri;
       if (_currentQueue.isNotEmpty) {
@@ -612,22 +605,19 @@ class WorkerPoolScheduler {
         job = _bgQueue.removeFirst();
         jobPri = DecodePriority.background;
       } else {
-        break; // 无任务
+        break; 
       }
 
       if (job.generation != _currentGeneration) {
-        // 过期任务：释放深拷贝缓冲区（由 onComplete 处理，这里传空列表）
         job.onComplete([]);
         continue;
       }
 
-      // CURRENT 优先用 Worker 0
       final targetWorker = (jobPri == DecodePriority.current && !_workerBusy[0]) ? 0 : w;
       _runJob(job, targetWorker);
     }
   }
 
-  /// 派发单个 job 到指定 worker，等待批量回复后调用 onComplete
   void _runJob(DecodeJob job, int workerIndex) async {
     final port = _workerPorts[workerIndex];
     if (port == null) {
@@ -646,7 +636,7 @@ class WorkerPoolScheduler {
       replyPort.close();
       final dt = (DateTime.now().microsecondsSinceEpoch - t0) ~/ 1000;
 
-      if (result is List<int>) {
+      if (result is Int64List) {
         final n = result.length ~/ 2;
         if (job.generation == _currentGeneration) {
           final List<WebPAnimFrameAddress> frames = [];
@@ -659,7 +649,6 @@ class WorkerPoolScheduler {
           debugPrint('[WebP-Worker] w$workerIndex +$n frames ${dt}ms gen=${job.generation}');
           job.onComplete(frames);
         } else {
-          // 过期：归还原生缓冲池中的帧缓冲区
           for (int i = 0; i < result.length; i += 2) {
             nativePoolRelease(result[i]);
           }
@@ -685,18 +674,11 @@ class WebPAnimDecoder {
   final Pointer<Uint8> _nativeData;
   bool _disposed = false;
 
-  /// 原始画布尺寸
   final int canvasWidth;
   final int canvasHeight;
-
-  /// 目标画布尺寸（保持宽高比后的实际尺寸）
   final int targetWidth;
   final int targetHeight;
-
-  /// 总帧数
   final int frameCount;
-
-  /// 循环次数（0=无限循环）
   final int loopCount;
 
   WebPAnimDecoder._({
@@ -715,20 +697,16 @@ class WebPAnimDecoder {
 
   int get address => _ctx.address;
 
-  /// 当前是否仍有帧可获取（委托 C 层判断）
   bool get hasMoreFrames {
     _checkNotDisposed();
     return _bindings.animHasMore(_ctx) != 0;
   }
 
-  /// 动态设置解码线程限制 (0/1=单线程, 2/3=多线程)
   void setThreadLimit(int useThreads) {
     _checkNotDisposed();
     _bindings.animSetThreadLimit(_ctx, useThreads);
   }
 
-  /// 获取下一帧（目标尺寸 RGBA，deep copy 到 dart heap）。
-  /// 仅用于离线批量解码或同步场景。
   WebPAnimFrame? getNextFrame() {
     _checkNotDisposed();
     if (!hasMoreFrames) return null;
@@ -747,13 +725,11 @@ class WebPAnimDecoder {
     }
   }
 
-  /// 重置到第一帧
   void reset() {
     _checkNotDisposed();
     _bindings.animReset(_ctx);
   }
 
-  /// 释放所有原生资源
   void dispose() {
     if (_disposed) return;
     _disposed = true;
@@ -773,7 +749,6 @@ class WebPAnimDecoder {
 // ═══════════════════════════════════════════════════════════════
 
 extension _Uint8ListNative on Uint8List {
-  /// 将 [Uint8List] 拷贝到原生堆，返回 Pointer，调用者负责 [free]。
   Pointer<Uint8> _asNative() {
     final ptr = calloc<Uint8>(length);
     ptr.asTypedList(length).setAll(0, this);
