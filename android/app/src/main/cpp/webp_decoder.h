@@ -77,6 +77,15 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx,
                                      int* duration_ms);
 
 /**
+ * 批量获取 N 帧，结果写入 out_results 数组。
+ * out_results 布局：[addr0, dur0, addr1, dur1, ...]，需预分配 count*2 个 int64_t。
+ * 返回实际解码的帧数（可能不足 count，表示动画结束）。
+ * 单次 FFI 调用替代 N 次 per-frame 调用，消除 FFI 往返开销。
+ */
+int webp_anim_decoder_get_frames(WebPAnimContext* ctx, int count,
+                                 int64_t* out_results);
+
+/**
  * 是否还有更多帧？
  */
 int webp_anim_decoder_has_more(WebPAnimContext* ctx);
@@ -173,6 +182,20 @@ void webp_native_pool_release(uint8_t* ptr);
  * 彻底销毁缓冲池，释放所有物理内存。
  */
 void webp_native_pool_destroy(void);
+
+/**
+ * 获取原生缓冲池使用统计（调试内存泄漏）。
+ * 返回写入 buf 的字节数，-1 表示错误。
+ */
+int webp_native_pool_stats(char* buf, int buf_size);
+
+/**
+ * 初始化持久化线程池。
+ * 必须在创建任何 WebPAnimDecoder 之前调用一次（幂等）。
+ * 注入自定义 WorkerInterface，用 8 个持久化 pthread 替代
+ * libwebp 默认的 per-call create/destroy。
+ */
+void webp_init_native(void);
 
 #ifdef __cplusplus
 }

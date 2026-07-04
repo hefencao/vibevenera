@@ -30,7 +30,195 @@
 #include "src/webp/demux.h"
 #include "src/webp/mux_types.h"
 
-#define POOL_MAX_SIZE 12
+/* libwebp worker interface: WebPWorker, WebPWorkerInterface, WebPSetWorkerInterface */
+#include "src/utils/thread_utils.h"
+
+/* ================================================================
+ * Persistent Thread Pool for libwebp Workers
+ *
+ * Problem: libwebp's default WebPWorkerInterface creates/destroys
+ * pthreads per WebPDecode() call. Over ~300 frames, cumulative
+ * thread create/destroy causes system-level degradation.
+ *
+ * Fix: Inject custom WebPWorkerInterface backed by a pool of 8
+ * persistent pthreads. Threads created once, reused across all
+ * WebPDecode calls. Safety: falls back to synchronous execution
+ * if pool exhausted.
+ * ================================================================ */
+
+#define POOL_THREAD_COUNT 8
+
+typedef struct {
+    pthread_t       thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond_start;
+    pthread_cond_t  cond_done;
+    WebPWorkerHook  hook;
+    void*           data1;
+    void*           data2;
+    int             has_work;
+    int             work_done;
+    int             in_use;
+    int             should_exit;
+} PoolThread;
+
+static PoolThread       g_pool[POOL_THREAD_COUNT];
+static pthread_mutex_t  g_pool_alloc_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int              g_pool_initialized  = 0;
+static int              g_use_persistent_pool = 0;
+
+static void* pool_thread_main(void* arg) {
+    PoolThread* pt = (PoolThread*)arg;
+    pthread_mutex_lock(&pt->mutex);
+    for (;;) {
+        while (!pt->has_work && !pt->should_exit) {
+            pthread_cond_wait(&pt->cond_start, &pt->mutex);
+        }
+        if (pt->should_exit) {
+            pthread_mutex_unlock(&pt->mutex);
+            return NULL;
+        }
+        if (pt->hook) {
+            pt->hook(pt->data1, pt->data2);
+        }
+        pt->has_work  = 0;
+        pt->work_done = 1;
+        pthread_cond_signal(&pt->cond_done);
+    }
+}
+
+static PoolThread* pool_acquire(void) {
+    pthread_mutex_lock(&g_pool_alloc_mutex);
+    for (int i = 0; i < POOL_THREAD_COUNT; i++) {
+        if (!g_pool[i].in_use) {
+            g_pool[i].in_use = 1;
+            pthread_mutex_unlock(&g_pool_alloc_mutex);
+            return &g_pool[i];
+        }
+    }
+    pthread_mutex_unlock(&g_pool_alloc_mutex);
+    return NULL;
+}
+
+static void pool_release(PoolThread* pt) {
+    pthread_mutex_lock(&g_pool_alloc_mutex);
+    pt->in_use = 0;
+    pthread_mutex_unlock(&g_pool_alloc_mutex);
+}
+
+/* ─── Custom WebPWorkerInterface backed by persistent pool ─── */
+
+static int pool_Sync(WebPWorker* const worker);
+
+static void pool_Init(WebPWorker* const worker) {
+    memset(worker, 0, sizeof(*worker));
+    worker->status = NOT_OK;
+}
+
+static int pool_Reset(WebPWorker* const worker) {
+    worker->had_error = 0;
+    if (worker->status < OK) {
+        PoolThread* pt = pool_acquire();
+        worker->impl = pt;
+        worker->status = OK;
+        return 1;  /* pt==NULL → synchronous fallback, still OK */
+    } else if (worker->status > OK) {
+        /* busy → wait */
+        return pool_Sync(worker);
+    }
+    return 1;
+}
+
+static int pool_Sync(WebPWorker* const worker) {
+    PoolThread* pt = (PoolThread*)worker->impl;
+    if (pt == NULL) return !worker->had_error;
+    pthread_mutex_lock(&pt->mutex);
+    while (pt->has_work && !pt->work_done) {
+        pthread_cond_wait(&pt->cond_done, &pt->mutex);
+    }
+    pt->work_done = 0;
+    pthread_mutex_unlock(&pt->mutex);
+    worker->status = OK;
+    return !worker->had_error;
+}
+
+static void pool_Launch(WebPWorker* const worker) {
+    PoolThread* pt = (PoolThread*)worker->impl;
+    if (pt == NULL) {
+        if (worker->hook) {
+            worker->had_error |= !worker->hook(worker->data1, worker->data2);
+        }
+        return;
+    }
+    pthread_mutex_lock(&pt->mutex);
+    pt->hook     = worker->hook;
+    pt->data1    = worker->data1;
+    pt->data2    = worker->data2;
+    pt->has_work  = 1;
+    pt->work_done = 0;
+    pthread_cond_signal(&pt->cond_start);
+    pthread_mutex_unlock(&pt->mutex);
+    worker->status = WORK;
+}
+
+static void pool_Execute(WebPWorker* const worker) {
+    if (worker->hook) {
+        worker->had_error |= !worker->hook(worker->data1, worker->data2);
+    }
+}
+
+static void pool_End(WebPWorker* const worker) {
+    PoolThread* pt = (PoolThread*)worker->impl;
+    if (pt != NULL) {
+        pool_Sync(worker);
+        pool_release(pt);
+        worker->impl = NULL;
+    }
+    worker->status = NOT_OK;
+}
+
+static const WebPWorkerInterface g_pool_worker_interface = {
+    pool_Init,
+    pool_Reset,
+    pool_Sync,
+    pool_Launch,
+    pool_Execute,
+    pool_End,
+};
+
+void webp_init_native(void) {
+    pthread_mutex_lock(&g_pool_alloc_mutex);
+    if (g_pool_initialized) {
+        pthread_mutex_unlock(&g_pool_alloc_mutex);
+        return;
+    }
+    for (int i = 0; i < POOL_THREAD_COUNT; i++) {
+        pthread_mutex_init(&g_pool[i].mutex, NULL);
+        pthread_cond_init(&g_pool[i].cond_start, NULL);
+        pthread_cond_init(&g_pool[i].cond_done, NULL);
+        g_pool[i].has_work    = 0;
+        g_pool[i].work_done   = 0;
+        g_pool[i].in_use      = 0;
+        g_pool[i].should_exit = 0;
+        g_pool[i].hook        = NULL;
+        pthread_create(&g_pool[i].thread, NULL, pool_thread_main, &g_pool[i]);
+    }
+    g_pool_initialized = 1;
+    pthread_mutex_unlock(&g_pool_alloc_mutex);
+
+    WebPSetWorkerInterface(&g_pool_worker_interface);
+
+    const WebPWorkerInterface* current = WebPGetWorkerInterface();
+    if (current == &g_pool_worker_interface) {
+        g_use_persistent_pool = 1;
+        LOGI("[POOL] Persistent thread pool activated: %d threads", POOL_THREAD_COUNT);
+    } else {
+        g_use_persistent_pool = 0;
+        LOGE("[POOL] WebPSetWorkerInterface FAILED, using single-threaded fallback");
+    }
+}
+
+#define POOL_MAX_SIZE 18
 
 /* ─── 微秒级计时 ─── */
 static int64_t now_us() {
@@ -51,6 +239,28 @@ typedef struct {
 
 static NativeBuffer g_buffer_pool[POOL_MAX_SIZE] = {0};
 static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_pool_acquire_count = 0;
+static int g_pool_release_count = 0;
+static int g_pool_malloc_fallback = 0;
+static int g_pool_reuse_hit = 0;
+
+int webp_native_pool_stats(char* buf, int buf_size) {
+    if (!buf || buf_size <= 0) return -1;
+    pthread_mutex_lock(&g_pool_mutex);
+    int in_use = 0;
+    for (int i = 0; i < POOL_MAX_SIZE; i++) {
+        if (g_buffer_pool[i].in_use) in_use++;
+    }
+    int n = snprintf(buf, buf_size,
+        "pool: %d/%d in_use, acquire=%d release=%d delta=%d "
+        "fallback_malloc=%d reuse_hit=%d",
+        in_use, POOL_MAX_SIZE,
+        g_pool_acquire_count, g_pool_release_count,
+        g_pool_acquire_count - g_pool_release_count,
+        g_pool_malloc_fallback, g_pool_reuse_hit);
+    pthread_mutex_unlock(&g_pool_mutex);
+    return n;
+}
 
 uint8_t* webp_native_pool_acquire(size_t size) {
     pthread_mutex_lock(&g_pool_mutex);
@@ -332,14 +542,18 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     /* ── 6. 解码帧碎片（MODE_rgbA 直接输出 Premul，省去 straight_to_premul） ── */
     WebPDecoderConfig cfg; WebPInitDecoderConfig(&cfg);
     cfg.options.use_scaling = 1; cfg.options.scaled_width = f_w; cfg.options.scaled_height = f_h;
-    cfg.options.use_threads = (ctx->use_threads > 1 ? 1 : 0);
+    cfg.options.use_threads = (g_use_persistent_pool && ctx->use_threads > 1) ? 1 : 0;
     cfg.output.colorspace = MODE_rgbA; /* Premultiplied Alpha，直接用于合成 */
     cfg.output.u.RGBA.rgba = ctx->frame_buf;
     cfg.output.u.RGBA.stride = f_w * 4;
     cfg.output.u.RGBA.size = ctx->frame_buf_size;
     cfg.output.is_external_memory = 1;
 
-    if (WebPDecode(ctx->iter.fragment.bytes, ctx->iter.fragment.size, &cfg) != VP8_STATUS_OK) {
+    int64_t t_dec = now_us();
+    VP8StatusCode dec_status = WebPDecode(ctx->iter.fragment.bytes, ctx->iter.fragment.size, &cfg);
+    int64_t dt_dec = now_us() - t_dec;
+
+    if (dec_status != VP8_STATUS_OK) {
         LOGE("WebPDecode failed for frame %d/%d (frame skipped)", ctx->current_frame_num, ctx->frame_count);
         return NULL; /* 帧计数器已推进，此帧被跳过；composite_canvas 保持不变 */
     }
@@ -363,8 +577,10 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
 
     /* ── 11. 从原生缓冲池获取输出缓冲区，拷贝合成画布（Premultiplied Alpha） ── */
     size_t canvas_bytes = (size_t)ctx->target_w * ctx->target_h * 4;
+    int64_t t_copy = now_us();
     uint8_t* out = webp_native_pool_acquire(canvas_bytes);
     memcpy(out, ctx->composite_canvas, canvas_bytes);
+    int64_t dt_copy = now_us() - t_copy;
 
     /* ── 12. 设置帧时长 ── */
     if (duration_ms) {
@@ -372,7 +588,26 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
         if (d <= 10) d = 100;
         *duration_ms = d;
     }
+
+    LOGD("[TIMING] f%d/%d dec=%lldus copy=%lldus size=%dx%d threads=%d",
+         ctx->current_frame_num, ctx->frame_count,
+         (long long)dt_dec, (long long)dt_copy,
+         dec_w, dec_h, ctx->use_threads);
+
     return out;
+}
+
+int webp_anim_decoder_get_frames(WebPAnimContext* ctx, int count,
+                                 int64_t* out_results) {
+    if (!ctx || !out_results || count <= 0) return 0;
+    for (int i = 0; i < count; i++) {
+        int duration = 0;
+        uint8_t* frame = webp_anim_decoder_get_frame(ctx, &duration);
+        if (!frame) return i; // 动画结束
+        out_results[i * 2]     = (int64_t)(uintptr_t)frame;
+        out_results[i * 2 + 1] = (int64_t)duration;
+    }
+    return count;
 }
 
 int webp_anim_decoder_has_more(WebPAnimContext* ctx) {

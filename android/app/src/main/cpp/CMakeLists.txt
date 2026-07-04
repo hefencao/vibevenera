@@ -37,6 +37,9 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
     endif()
 endif()
 
+# 启用 libwebp 多线程解码（pthread）
+add_definitions(-DWEBP_USE_THREAD)
+
 # 注：不使用 -fvisibility=hidden，因为 Dart FFI 需要符号可见
 
 # 包含路径

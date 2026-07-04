@@ -121,19 +121,31 @@ android {
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
             def abi = output.getFilter(com.android.build.OutputFile.ABI)
-            if (variant.buildType.name == "release") {
+            def buildType = variant.buildType.name
+
+            // 处理 release 和 profile：使用相同的 versionCode 重写规则
+            if (buildType == "release" || buildType == "profile") {
+                // 版本号重写（与 release 完全一致）
                 if (abi != null) {
-                    outputFileName = "venera-${variant.versionName}-${abi}.apk"
                     def abiVersionCode = project.ext.abiCodes.get(abi)
                     if (abiVersionCode != null) {
-                        versionCodeOverride = variant.versionCode * 10 + abiVersionCode
+                        //versionCodeOverride = variant.versionCode * 10 + abiVersionCode
+                        versionCodeOverride = variant.versionCode * 10
                     }
                 } else {
-                    outputFileName = "venera-${variant.versionName}.apk"
                     versionCodeOverride = variant.versionCode * 10
                 }
-            } else if (variant.buildType.name == "debug") {
-                versionCodeOverride = variant.versionCode * 10 + 4
+
+                // 输出文件名可根据类型区分（避免互相覆盖）
+                if (buildType == "release") {
+                    outputFileName = "venera-${variant.versionName}-${abi ?: 'universal'}.apk"
+                } else { // profile
+                    outputFileName = "venera-profile-${variant.versionName}-${abi ?: 'universal'}.apk"
+                }
+            } else if (buildType == "debug") {
+                // debug 保持原有逻辑
+                // versionCodeOverride = variant.versionCode * 10 + 4
+                versionCodeOverride = variant.versionCode * 10
             }
         }
     }

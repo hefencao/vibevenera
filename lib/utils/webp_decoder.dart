@@ -133,6 +133,11 @@ typedef _WebPAnimDecoderGetFrameDart = Pointer<Uint8> Function(
   Pointer<Int32> durationMs,
 );
 
+typedef _WebPAnimDecoderGetFramesNative = Int32 Function(
+  Pointer<Void> ctx, Int32 count, Pointer<Int64> outResults);
+typedef _WebPAnimDecoderGetFramesDart = int Function(
+  Pointer<Void> ctx, int count, Pointer<Int64> outResults);
+
 typedef _WebPAnimDecoderHasMoreNative = Int32 Function(Pointer<Void> ctx);
 typedef _WebPAnimDecoderHasMoreDart = int Function(Pointer<Void> ctx);
 
@@ -153,6 +158,9 @@ typedef _WebPAnimDecoderSetThreadLimitDart = void Function(
 
 typedef _WebPAnimDecoderAliveCountNative = Int32 Function();
 typedef _WebPAnimDecoderAliveCountDart = int Function();
+
+typedef _WebPInitNativeNative = Void Function();
+typedef _WebPInitNativeDart = void Function();
 
 typedef _WebPFreeBufferNative = Void Function(Pointer<Uint8> buf);
 typedef _WebPFreeBufferDart = void Function(Pointer<Uint8> buf);
@@ -224,6 +232,7 @@ class _WebPBindings {
   late final _WebPDecodeScaledDart decodeScaled;
   late final _WebPAnimDecoderNewDart animNew;
   late final _WebPAnimDecoderGetFrameDart animGetFrame;
+  late final _WebPAnimDecoderGetFramesDart animGetFrames;
   late final _WebPAnimDecoderHasMoreDart animHasMore;
   late final _WebPAnimDecoderResetDart animReset;
   late final _WebPAnimDecoderDeleteDart animDelete;
@@ -231,6 +240,7 @@ class _WebPBindings {
   late final _WebPAnimDecoderAliveCountDart animAliveCount;
   late final _WebPFreeBufferDart freeBuffer;
   late final _WebPNativePoolAcquireDart poolAcquire;
+  late final _WebPInitNativeDart initNative;
   late final _WebPNativePoolReleaseDart poolRelease;
   late final _WebPAnimExtractFramesDart animExtractFrames;
   late final _WebPFreeFrameListDart freeFrameList;
@@ -245,6 +255,8 @@ class _WebPBindings {
         _WebPAnimDecoderNewDart>('webp_anim_decoder_new');
     animGetFrame = _lib.lookupFunction<_WebPAnimDecoderGetFrameNative,
         _WebPAnimDecoderGetFrameDart>('webp_anim_decoder_get_frame');
+    animGetFrames = _lib.lookupFunction<_WebPAnimDecoderGetFramesNative,
+        _WebPAnimDecoderGetFramesDart>('webp_anim_decoder_get_frames');
     animHasMore = _lib.lookupFunction<_WebPAnimDecoderHasMoreNative,
         _WebPAnimDecoderHasMoreDart>('webp_anim_decoder_has_more');
     animReset = _lib.lookupFunction<_WebPAnimDecoderResetNative,
@@ -257,6 +269,8 @@ class _WebPBindings {
         _WebPAnimDecoderAliveCountDart>('webp_anim_decoder_alive_count');
     freeBuffer = _lib.lookupFunction<_WebPFreeBufferNative, _WebPFreeBufferDart>(
         'webp_free_buffer');
+    initNative = _lib.lookupFunction<_WebPInitNativeNative,
+        _WebPInitNativeDart>('webp_init_native');
     poolAcquire = _lib.lookupFunction<_WebPNativePoolAcquireNative,
         _WebPNativePoolAcquireDart>('webp_native_pool_acquire');
     poolRelease = _lib.lookupFunction<_WebPNativePoolReleaseNative,
@@ -441,6 +455,7 @@ class DecodeJob {
   final int targetW;
   final int targetH;
   final void Function(List<WebPAnimFrameAddress> frames) onComplete;
+  final int dispatchedAt; // us, for queue wait time measurement
 
   DecodeJob({
     required this.generation,
@@ -449,13 +464,27 @@ class DecodeJob {
     required this.targetW,
     required this.targetH,
     required this.onComplete,
-  });
+  }) : dispatchedAt = DateTime.now().microsecondsSinceEpoch;
 }
 
 class WorkerPoolScheduler {
   static final WorkerPoolScheduler instance = WorkerPoolScheduler._();
-  
+
+  static bool _nativeInitDone = false;
+
+  /// 初始化 C 层持久化线程池（幂等，首次调用生效）。
+  static void ensureNativeInit() {
+    if (_nativeInitDone) return;
+    _nativeInitDone = true;
+    try {
+      _bind.initNative();
+    } catch (_) {
+      // C 层会自动回退到单线程模式
+    }
+  }
+
   WorkerPoolScheduler._() {
+    ensureNativeInit();
     // 性能优化（线程预热）：启动时预加载并热身两个常驻后台解码 Isolate，消减首屏启动延迟
     scheduleMicrotask(() async {
       await _ensureWorker(0);
@@ -551,8 +580,6 @@ class WorkerPoolScheduler {
       debugPrint('[WebP-Worker] w$workerIndex lib load FAILED: $e');
     }
 
-    final durationMsPtr = calloc<Int32>();
-
     receivePort.listen((message) {
       final data = message as List;
 
@@ -593,6 +620,8 @@ class WorkerPoolScheduler {
       final replyPort = data[0] as SendPort;
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
+      final targetW = data.length > 3 ? data[3] as int : 0;
+      final targetH = data.length > 4 ? data[4] as int : 0;
 
       try {
         if (decoderAddress == 0) {
@@ -601,20 +630,21 @@ class WorkerPoolScheduler {
         }
 
         final ctx = Pointer<Void>.fromAddress(decoderAddress);
-        final results = Int64List(count * 2);
-        int writeIdx = 0;
+        // 单次 FFI 调用批量解码 N 帧，消除 per-frame FFI 往返开销
+        final cResults = calloc<Int64>(count * 2);
+        final tStart = DateTime.now().microsecondsSinceEpoch;
+        final n = bindings.animGetFrames(ctx, count, cResults);
+        final dtTotal = (DateTime.now().microsecondsSinceEpoch - tStart) ~/ 1000;
 
-        for (int i = 0; i < count; i++) {
-          final rgbaPtr = bindings.animGetFrame(ctx, durationMsPtr);
-          if (rgbaPtr == Pointer.fromAddress(0)) break;
-          results[writeIdx++] = rgbaPtr.address;
-          results[writeIdx++] = durationMsPtr.value;
-        }
-
-        if (writeIdx < results.length) {
-          replyPort.send(results.sublist(0, writeIdx));
-        } else {
+        if (n > 0) {
+          final results = Int64List.fromList(cResults.asTypedList(n * 2));
+          calloc.free(cResults);
           replyPort.send(results);
+          debugPrint('[WebP-T] w$workerIndex batch=$n/$count total=${dtTotal}ms avg=${n>0?dtTotal~/n:0}ms/f addr=${decoderAddress & 0xFFFF}');
+        } else {
+          calloc.free(cResults);
+          replyPort.send(Int64List(0));
+          debugPrint('[WebP-T] w$workerIndex batch=0/$count (eos) addr=${decoderAddress & 0xFFFF}');
         }
       } catch (e, stack) {
         debugPrint('[WebP-Worker] w$workerIndex crash: $e\n$stack');
@@ -711,7 +741,12 @@ class WorkerPoolScheduler {
 
       sourceQueue!.remove(job);
 
+      final queueWaitUs = DateTime.now().microsecondsSinceEpoch - job.dispatchedAt;
+      debugPrint('[WebP-T] w$assignedWorker dequeue wait=${queueWaitUs ~/ 1000}ms '
+          'n=${job.framesToDecode} addr=${job.decoderAddress & 0xFFFF} gen=${job.generation}');
+
       if (job.generation != _currentGeneration) {
+        debugPrint('[WebP-T] w$assignedWorker stale gen=${job.generation} curr=${_currentGeneration}');
         job.onComplete([]);
         continue;
       }
@@ -748,7 +783,8 @@ class WorkerPoolScheduler {
               durationMs: result[i + 1],
             ));
           }
-          debugPrint('[WebP-Worker] w$workerIndex +$n frames ${dt}ms gen=${job.generation}');
+          final avgPerFrame = n > 0 ? dt ~/ n : 0;
+          debugPrint('[WebP-T] w$workerIndex recv $n frames rtt=${dt}ms avg=$avgPerFrame ms/f gen=${job.generation}');
           job.onComplete(frames);
         } else {
           for (int i = 0; i < result.length; i += 2) {

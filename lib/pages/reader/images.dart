@@ -1012,6 +1012,7 @@ void _updateWebPState(int page, BuildContext context) {
   if (images == null) return;
 
   _lastWebPPage = page;
+  debugPrint('[WebP-PAGE] Page:$page');
   var imageCtrl = reader._imageViewController;
   DecodedImageCache? cache = imageCtrl is _GalleryModeState ? imageCtrl.webpCache : null;
 

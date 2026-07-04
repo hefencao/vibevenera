@@ -7,10 +7,15 @@
       "Bash(adb logcat *)",
       "PowerShell(adb logcat -c 2>&1)",
       "Bash(adb shell *)",
-      "PowerShell(flutter analyze 2>&1)"
+      "PowerShell(flutter analyze 2>&1)",
+      "Read(//d/work/Source/libwebp/src/utils/**)",
+      "Read(//d/work/Source/libwebp/src/dec/**)",
+      "Read(//d/work/Source/libwebp/src/demux/**)"
     ],
     "additionalDirectories": [
-      "\\tmp"
+      "\\tmp",
+      "d:\\work\\Source\\libwebp\\src\\utils",
+      "d:\\work\\Source\\libwebp\\src\\dec"
     ]
   }
 }
