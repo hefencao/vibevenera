@@ -26,6 +26,8 @@ class ComicImage extends StatefulWidget {
     int? cacheHeight,
     this.onInit,
     this.onDispose,
+    this.onImageInfo,
+    this.errorBuilder,
   })  : image = ResizeImage.resizeIfNeeded(cacheWidth, cacheHeight, image),
         assert(cacheWidth == null || cacheWidth > 0),
         assert(cacheHeight == null || cacheHeight > 0);
@@ -65,6 +67,8 @@ class ComicImage extends StatefulWidget {
   final void Function(State<ComicImage> state)? onInit;
 
   final void Function(State<ComicImage> state)? onDispose;
+  final void Function(int width, int height)? onImageInfo;
+  final Widget Function(BuildContext, Object, StackTrace?, VoidCallback)? errorBuilder;
 
   static void clear() => _ComicImageState.clear();
 
@@ -83,10 +87,41 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   late DisposableBuildContext<State<ComicImage>> _scrollAwareContext;
   Object? _lastException;
   ImageStreamCompleterHandle? _completerHandle;
+  ImageInfo? _pendingDispose; // 2-frame delay for GPU-safe disposal
+  Object? _sizeKey;           // ImageProvider.obtainKey() result
 
+  static const int _maxCacheEntries = 200;
   static final Map<int, Size> _cache = {};
+  static final List<int> _cacheLRU = [];
 
-  static clear() => _cache.clear();
+  static clear() {
+    _cache.clear();
+    _cacheLRU.clear();
+  }
+
+  static void _putCache(int key, Size size) {
+    if (_cache.containsKey(key)) {
+      _cache[key] = size;
+      _cacheLRU.remove(key);
+      _cacheLRU.add(key);
+      return;
+    }
+    if (_cache.length >= _maxCacheEntries) {
+      final oldest = _cacheLRU.removeAt(0);
+      _cache.remove(oldest);
+    }
+    _cache[key] = size;
+    _cacheLRU.add(key);
+  }
+
+  static Size? _getCache(int key) {
+    final size = _cache[key];
+    if (size != null) {
+      _cacheLRU.remove(key);
+      _cacheLRU.add(key);
+    }
+    return size;
+  }
 
   @override
   void initState() {
@@ -98,7 +133,6 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    assert(_imageStream != null);
     WidgetsBinding.instance.removeObserver(this);
     _stopListeningToStream();
     _completerHandle?.dispose();
@@ -126,7 +160,15 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   void didUpdateWidget(ComicImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.image != oldWidget.image) {
+      final bool isListening = _isListeningToStream;
+      if (isListening) {
+        _stopListeningToStream(keepStreamAlive: true);
+      }
+      _imageStreamListener = null; // 重置监听器缓存
       _resolveImage();
+      if (isListening) {
+        _listenToStream(); // 关键修正：若此前正在播放，新流就绪后立即自动启动，无需额外手势触发
+      }
     }
   }
 
@@ -170,6 +212,9 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           ? Size(widget.width!, widget.height!)
           : null,
     ));
+    widget.image.obtainKey(createLocalImageConfiguration(context)).then((key) {
+      _sizeKey = key;
+    });
     _updateSourceStream(newStream);
   }
 
@@ -209,10 +254,11 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   }
 
   void _replaceImage({required ImageInfo? info}) {
-    final ImageInfo? oldImageInfo = _imageInfo;
-    SchedulerBinding.instance
-        .addPostFrameCallback((_) => oldImageInfo?.dispose());
+    final old = _imageInfo;
     _imageInfo = info;
+    final pending=_pendingDispose;
+    _pendingDispose=old;
+    pending?.dispose();
   }
 
   // Updates _imageStream to newStream, and moves the stream listener
@@ -282,61 +328,22 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     if (_lastException != null) {
-      // 关键修复：图片加载失败时立即清理该图片的尺寸缓存。
-      // 避免因为之前的旧尺寸导致错误 UI 在全分辨率下渲染而出现比例失常。
-      _cache.remove(widget.image.hashCode);
+      final key = _sizeKey?.hashCode ?? widget.image.hashCode;
+      _cache.remove(key);
+      _cacheLRU.remove(key);
 
-      // display error and retry button on screen
-      return SizedBox(
-        height: widget.height == null ? 300 : null,
-        width: widget.width == null ? 300 : null,
-        child: Center(
-          child: SizedBox(
-            height: 300,
-            child: Column(
-              children: [
-                Expanded(
-                  child: Center(
-                    child: Text(
-                      _lastException.toString(),
-                      maxLines: 3,
-                    ),
-                  ),
-                ),
-                const SizedBox(
-                  height: 4,
-                ),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: Listener(
-                    onPointerDown: (details) {
-                      GlobalState.find<_ReaderGestureDetectorState>().ignoreNextTap();
-                      setState(() {
-                        _loadingProgress = null;
-                        _lastException = null;
-                      });
-                      _resolveImage();
-                    },
-                    child: SizedBox(
-                      width: 84,
-                      height: 36,
-                      child: Center(
-                        child: Text(
-                          "Retry".tl,
-                          style: TextStyle(color: Colors.blue),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(
-                  height: 16,
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
+      return widget.errorBuilder?.call(context, _lastException!, null, () {
+        if (_sizeKey != null) {
+          PaintingBinding.instance.imageCache.evict(_sizeKey!);
+        }
+        setState(() { _loadingProgress = null; _lastException = null; });
+        _resolveImage();
+      }) ??
+          SizedBox(
+            height: widget.height == null ? 300 : null,
+            width: widget.width == null ? 300 : null,
+            child: Center(child: Text(_lastException.toString(), maxLines: 3)),
+          );
     }
 
     return LayoutBuilder(builder: (context, constrains) {
@@ -344,12 +351,15 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
       var height = widget.height;
 
       if (_imageInfo != null) {
-        // Record the height and the width of the image
-        _cache[widget.image.hashCode] = Size(_imageInfo!.image.width.toDouble(),
-            _imageInfo!.image.height.toDouble());
+        final w = _imageInfo!.image.width;
+        final h = _imageInfo!.image.height;
+        final key = _sizeKey?.hashCode ?? widget.image.hashCode;
+        _putCache(key, Size(w.toDouble(), h.toDouble()));
+        widget.onImageInfo?.call(w, h);
       }
 
-      Size? cacheSize = _cache[widget.image.hashCode];
+      final int cacheKey = _sizeKey?.hashCode ?? widget.image.hashCode;
+      Size? cacheSize = _getCache(cacheKey);
       if (cacheSize != null) {
         if (width == double.infinity) {
           width = constrains.maxWidth;

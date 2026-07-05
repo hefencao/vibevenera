@@ -47,6 +47,11 @@ class CachedImageProvider
         var file = File(url.substring(7));
         return file.readAsBytes();
       }
+      // 本地直接路径文件检测（无 protocol 头）
+      final directFile = File(url);
+      if (await directFile.exists()) {
+        return directFile.readAsBytes();
+      }
       await for (var progress in ImageDownloader.loadThumbnail(url, sourceKey, cid)) {
         checkStop();
         chunkEvents.add(ImageChunkEvent(

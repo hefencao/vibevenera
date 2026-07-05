@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/pages/categories_page.dart';
 import 'package:venera/pages/search_page.dart';
+import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/settings/settings_page.dart';
 import 'package:venera/utils/translations.dart';
 
@@ -99,6 +100,14 @@ class _MainPageState extends State<MainPage> {
             label: "Search".tl,
             onTap: () {
               to(() => const SearchPage(), preventDuplicate: true);
+            },
+          ),
+        if(index == 2)
+          PaneActionEntry(
+            icon: Icons.add,
+            label: "Add Source".tl,
+            onTap: () {
+              to(() => const ComicSourcePage(), preventDuplicate: true);
             },
           ),
         PaneActionEntry(

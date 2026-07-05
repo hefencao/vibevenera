@@ -7,8 +7,8 @@ import 'dart:ffi';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'package:venera/foundation/appdata.dart'; // 引入以读取预取深度配置
-import 'package:venera/foundation/cache_manager.dart'; // 引入 CacheManager，实现网络 WebP 预取本地状态安全解算
+import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
@@ -35,7 +35,6 @@ String _short(String key) {
   final start = (slash > bslash ? slash : bslash) + 1;
   final name = s.substring(start);
   if (name.length >= 2 && name.codeUnitAt(0) >= 0x30 && name.codeUnitAt(0) <= 0x39) {
-    // 数字开头 → 取末两位
     final digits = name.split('.').first;
     return '${digits.substring(digits.length - 2)}.webp';
   }
@@ -44,10 +43,10 @@ String _short(String key) {
 
 /// 页面状态枚举（驱动解码策略与优先级）
 enum PageState {
-  current,  // 当前激活页：持续补充模式 (HIGH=7, LOW=3)，多线程
-  next,     // 预读页：单次填充至 5 帧，单线程
-  last,     // 上一页：停止 Refill，保留现有帧
-  precache  // 远端预读：单次填充至 5 帧，低优先级
+  current,
+  next,
+  last,
+  precache
 }
 
 /// 包装解码后的 GPU 帧及其时长
@@ -71,39 +70,9 @@ class DecoderHolder {
 
   int lastAccessTime = _nowMs();
 
-  // ── 动态水位 + 播放速度控制 ──
-  int _avgRttMs = 150;           // 指数平滑后的 refill round-trip 时间
-  int _avgFrameDurMs = 100;      // 指数平滑后的帧时长
-  static const _rttSmooth = 0.3; // 平滑系数
-
-  /// 根据实测 RTT 计算动态 buffer target
-  int _dynamicTarget() {
-    if (_avgRttMs <= 0 || _avgFrameDurMs <= 0) return 7;
-    final needed = ((_avgRttMs * 2) / _avgFrameDurMs).ceil();
-    return needed.clamp(3, 16);
-  }
-
-  /// 估算可持续播放速度倍率（1.0=原速, 0.5=半速, 0=建议等待）
-  double get estimatedSpeedMul {
-    if (_avgRttMs <= 0 || _avgFrameDurMs <= 0) return 1.0;
-    // 每帧解码耗时 vs 帧间隔 → 能跟上几倍速
-    final framesPerRtt = (_avgRttMs / _avgFrameDurMs).ceil();
-    final throughput = framesPerRtt / _dynamicTarget().clamp(1, 16);
-    if (throughput >= 1.0) return 1.0;
-    if (throughput >= 0.67) return 0.75;
-    if (throughput >= 0.4) return 0.5;
-    return 0.0; // < 0.4× → 建议等待缓冲而非慢速播放
-  }
-
-  void _updateRtt(int rttMs, int frameDurMs) {
-    _avgRttMs = (_rttSmooth * rttMs + (1.0 - _rttSmooth) * _avgRttMs).round();
-    _avgFrameDurMs = (_rttSmooth * frameDurMs + (1.0 - _rttSmooth) * _avgFrameDurMs).round();
-  }
-
-  // 管线分离：decode 和 GPU upload 可重叠
-  bool _isDecoding = false;   // worker 解码中
-  bool _isUploading = false;  // GPU 上传中
-  List<webp.WebPAnimFrameAddress>? _pendingUploadAddrs; // 待上传（当前批 upload 完成后处理）
+  bool _isDecoding = false;
+  bool _isUploading = false;
+  List<webp.WebPAnimFrameAddress>? _pendingUploadAddrs;
   bool _disposed = false;
   bool _pendingDispose = false;
 
@@ -134,7 +103,6 @@ class DecoderHolder {
     _triggerRefillIfNeeded();
   }
 
-  /// 消费一帧（由 Completer 驱动渲染循环调用）
   BufferedFrame? consumeFrame() {
     if (_disposed) return null;
     lastAccessTime = _nowMs();
@@ -142,7 +110,7 @@ class DecoderHolder {
     if (_frameBuffer.isEmpty) {
       _triggerRefillIfNeeded();
       debugPrint('[WebP-T] $shortKey consume EMPTY buf=0 state=${_state.name}');
-      return null; // buffer 空，playLoop 等待 refill。Flutter 保留上一帧不黑屏
+      return null;
     }
 
     final frame = _frameBuffer.removeFirst();
@@ -151,37 +119,30 @@ class DecoderHolder {
     return frame;
   }
 
-  /// 水位线驱动的批量补充逻辑
-  /// _isDecoding 只保护 worker 解码阶段；_isUploading 期间可发起新解码，实现管线重叠
   void _triggerRefillIfNeeded() {
     if (_isDecoding || _disposed || _pendingDispose) return;
 
-    int target = 0;
-    webp.DecodePriority priority = webp.DecodePriority.background;
     final buf = _frameBuffer.length;
+    int target;
+    webp.DecodePriority priority;
 
-    if (_state == PageState.current) {
-      final dynTarget = _dynamicTarget();        // 基于实测 RTT
-      if (buf == 0) {
-        target = (dynTarget ~/ 3).clamp(2, 4);  // 冷启动：dynTarget 的 1/3
-      } else if (buf * 2 < dynTarget) {         // buf < target 的一半 → 补水
-        target = dynTarget;
-      } else {
-        return;                                  // buf 充足
-      }
-      priority = webp.DecodePriority.current;
-    } else if (_state == PageState.next) {
-      final dyn = _dynamicTarget();
-      target = (dyn ~/ 3).clamp(1, 5);
-      priority = webp.DecodePriority.next;
-    } else if (_state == PageState.precache) {
-      target = _dynamicTarget() > 7 ? 2 : 1;
-      priority = webp.DecodePriority.background;
-    } else {
-      return; // LAST: 不补充
+    switch (_state) {
+      case PageState.current:
+        if (buf >= 7) return;
+        target = 7;
+        priority = webp.DecodePriority.current;
+      case PageState.next:
+        if (buf >= 5) return;
+        target = 5;
+        priority = webp.DecodePriority.next;
+      case PageState.precache:
+        if (buf >= 2) return;
+        target = 2;
+        priority = webp.DecodePriority.background;
+      case PageState.last:
+        return;
     }
 
-    if (buf >= target) return;
     int refillCount = target - buf;
 
     if (refillCount > 0) {
@@ -225,8 +186,6 @@ class DecoderHolder {
               return;
             }
 
-            // 管线重叠：若上一批仍在 GPU 上传中，暂存帧；否则立即上传
-            // 同时立即检查是否需要下一批解码（decode 与 upload 可并行）
             _scheduleUpload(newFrameAddresses, n, t0, t1, currentGen);
             _triggerRefillIfNeeded();
           },
@@ -236,10 +195,8 @@ class DecoderHolder {
     }
   }
 
-  /// 调度 GPU 上传。若当前无上传在执行，立即开始；否则暂存，等当前批完成后自动触发。
   void _scheduleUpload(List<webp.WebPAnimFrameAddress> addrs, int n, int t0, int t1, int currentGen) {
     if (_isUploading) {
-      // 上一批 upload 还在进行中，暂存帧
       _pendingUploadAddrs = addrs;
       return;
     }
@@ -281,35 +238,26 @@ class DecoderHolder {
     final t2 = _nowUs();
     _isUploading = false;
 
-    // 检查是否在解码/上传期间被标记为待释放
     if (_disposed || _pendingDispose) {
       if (_pendingDispose) { _pendingDispose = false; dispose(); }
       return;
     }
 
-    // 检查 generation：如果页面已切换，丢弃这批帧
     if (currentGen != DecoderManager.instance.generation && _state != PageState.current) {
-      // 已入队的帧会在 dispose 时清理，这里只停止后续处理
       return;
     }
 
-    // 更新动态水位 RTT 估算
     final totalMs = (t2 - t0) ~/ 1000;
-    final sampleDur = addrs.isNotEmpty ? addrs.first.durationMs : 100;
-    _updateRtt(totalMs, sampleDur);
-
     debugPrint('[WebP-T] $shortKey refill_done +$uploaded/$n frames '
         'wait=${(t1 - t0) ~/ 1000}ms '
         'gpu=${(t2 - tUpload) ~/ 1000}ms '
         'total=${totalMs}ms '
-        'buf=${_frameBuffer.length} dynT=${_dynamicTarget()} rtt=${_avgRttMs}ms gen=$currentGen');
+        'buf=${_frameBuffer.length} gen=$currentGen');
 
-    // 处理在当前批上传期间完成的下一批解码
     if (_pendingUploadAddrs != null) {
       final pending = _pendingUploadAddrs!;
       _pendingUploadAddrs = null;
       final pendingN = pending.length;
-      // 递归处理前检查 _pendingDispose
       if (_pendingDispose) {
         _releaseRemainingBuffers(pending, 0);
         _pendingDispose = false;
@@ -338,7 +286,6 @@ class DecoderHolder {
       return;
     }
     _disposed = true;
-    // 释放暂存帧的原生缓冲区
     if (_pendingUploadAddrs != null) {
       _releaseRemainingBuffers(_pendingUploadAddrs!, 0);
       _pendingUploadAddrs = null;
@@ -364,6 +311,9 @@ class DecoderManager {
 
   int _phase = 0;
   Timer? _evictionTimer;
+
+  // [FIX-1/16] 预下载订阅追踪：正确订阅 Stream + 翻页时取消远端预下载
+  final Map<String, StreamSubscription> _preDownloadSubs = {};
 
   int get generation => _generation;
 
@@ -449,7 +399,6 @@ class DecoderManager {
       _holders[k]?.updateState(PageState.precache);
     }
 
-    // 统一更新 L1/L2 三级缓存活跃集合
     if (cache != null) {
       final activeKeys = {
         currentKey.split('@').first,
@@ -459,25 +408,53 @@ class DecoderManager {
       cache.setActivePages(activeKeys);
     }
 
-    // ───────────────────────────────────────────────────────────
-    // 关键优化一：大窗口磁盘异步预下载管线 (Wider Disk Prefetch Window)
-    // ───────────────────────────────────────────────────────────
-    // 一切漫画格式（包含 JPEG/PNG 等非 WebP 图）在此处被统一管理
     final int preDownloadCount = appdata.settings["preloadImageCount"] ?? 5;
-    for (int i = 1; i <= preDownloadCount; i++) {
+
+    final Set<String> neededDownloadKeys = {};
+    for (int i = 0; i <= preDownloadCount; i++) {
       final int targetIdx = currentPageIndex + i;
       if (targetIdx >= 0 && targetIdx < images.length) {
         final String imageKey = images[targetIdx];
         if (!imageKey.startsWith('file://')) {
-          ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
+          neededDownloadKeys.add(imageKey);
         }
       }
     }
 
-    // ───────────────────────────────────────────────────────────
-    // 关键优化二：窄窗口 FFI 原生预解码管线 (Narrower VRAM Pre-decode Window)
-    // ───────────────────────────────────────────────────────────
-    // 仅对紧邻可见页的 NEXT/PRECACHE WebP 进行 FFI 预先解码上屏，维持 VRAM 占用极其合理
+    final List<String> subsToRemove = [];
+    for (final entry in _preDownloadSubs.entries) {
+      if (!neededDownloadKeys.contains(entry.key)) {
+        entry.value.cancel();
+        subsToRemove.add(entry.key);
+      }
+    }
+    for (final k in subsToRemove) {
+      _preDownloadSubs.remove(k);
+    }
+
+    for (final String imageKey in neededDownloadKeys) {
+      if (_preDownloadSubs.containsKey(imageKey)) continue; // 已有订阅
+
+      _preDownloadSubs[imageKey] = ImageDownloader.loadComicImage(
+        imageKey, sourceKey, cid, eid,
+      ).listen(
+        (event) {
+          if (event.imageBytes != null) {
+            debugPrint('[PreDownload] Completed: ${_short(imageKey)}');
+            _preDownloadSubs[imageKey]?.cancel();
+            _preDownloadSubs.remove(imageKey);
+          }
+        },
+        onError: (e) {
+          debugPrint('[PreDownload] Failed: ${_short(imageKey)} - $e');
+          _preDownloadSubs.remove(imageKey);
+        },
+        onDone: () {
+          _preDownloadSubs.remove(imageKey);
+        },
+      );
+    }
+
     final List<String> precreateTargets = [...nextKeys, ...precacheKeys];
     for (final k in precreateTargets) {
       if (!_holders.containsKey(k)) {
@@ -493,7 +470,7 @@ class DecoderManager {
             targetWidth: tw,
             targetHeight: th,
             scale: scale,
-            onlyIfCached: true, // 极其安全：只预解算已成功下载到磁盘的文件，绝不抢跑触发多余的网络请求
+            onlyIfCached: true,
           ).catchError((_) => null);
         }
       }
@@ -547,6 +524,10 @@ class DecoderManager {
     webp.WorkerPoolScheduler.instance.updateGeneration(_generation);
     for (final h in _holders.values) { h.dispose(); }
     _holders.clear();
+    for (final sub in _preDownloadSubs.values) {
+      sub.cancel();
+    }
+    _preDownloadSubs.clear();
   }
 }
 
@@ -603,13 +584,21 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
   @override
   ImageStreamCompleter loadImage(WebPImageProvider key, ImageDecoderCallback decode) {
-    return _WebPImageStreamCompleter(_loadImageAsync(), key);
+    final chunkEvents = StreamController<ImageChunkEvent>();
+    return _WebPImageStreamCompleter(
+      _loadImageAsync(chunkEvents: chunkEvents),
+      key,
+      chunkEvents: chunkEvents.stream,
+    );
   }
 
-  Future<_ImageResult> _loadImageAsync() async {
+  Future<_ImageResult> _loadImageAsync({
+    StreamController<ImageChunkEvent>? chunkEvents,
+  }) async {
     final t0 = _nowUs();
     final short = _short(imageKey);
-    
+    try {
+
     // 1. 内存缓存命中检测
     if (cache != null) {
       final cached = cache!.getL1(imageKey);
@@ -625,11 +614,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       if (cache != null && cache!.hasL2(imageKey)) {
         bytes = cache!.getL2(imageKey)!;
       } else {
-        // 安全防静默挂起：为后台或 I/O 文件读取增加 15s 强制超时锁，打破任何潜在的线程锁死死结
-        bytes = await _fetchBytes().timeout(
-          const Duration(seconds: 15),
-          onTimeout: () => throw TimeoutException('[WebP] 15秒读取/下载超时，安全断开'),
-        );
+        bytes = await _fetchBytes(chunkEvents: chunkEvents);
         if (cache != null && webp.isWebP(bytes)) cache!.putL2(imageKey, bytes);
       }
     } catch (e) {
@@ -649,7 +634,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
     // 4. 根据动静态类型分别解算
     if (info.isAnimated) {
-      // 动画 WebP -> 复用或创建 DecoderHolder
       final holder = await ensureHolder(
         imageKey: imageKey,
         fullKey: _fullKey,
@@ -660,12 +644,11 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         targetWidth: targetWidth,
         targetHeight: targetHeight,
         scale: scale,
-        providedBytes: bytes, // 传入已获取好的 bytes，避免 ensureHolder 重复读取
+        providedBytes: bytes,
       );
       if (holder != null) return _ImageResult.animated(holder);
       return _ImageResult.error('Failed to create animated decoder');
     } else {
-      // 静态 WebP -> 单帧解码
       final frame = webp.decodeStatic(bytes, targetWidth: targetWidth, targetHeight: targetHeight);
       if (frame == null) return _ImageResult.error('Failed to decode static WebP');
       
@@ -675,6 +658,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         completer.complete(_ImageResult.static(ImageInfo(image: img, scale: scale)));
       });
       return completer.future;
+    }
+    } finally {
+      chunkEvents?.close();
     }
   }
 
@@ -714,8 +700,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
             }
           }
         } else {
-          // 关键改动：网络图片在 precreate 预创建时，异步检索 L2 缓存及 CacheManager 本地沙盒
-          // 判定其是否下载完成。彻底解决网络 WebP 划页预解码被误截断拦截的问题。
           if (cache != null && cache.hasL2(imageKey)) {
             exists = true;
           } else {
@@ -730,7 +714,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
       if (!exists) {
         completer.complete(null);
-        return null; // 未在本地下载，静默放弃预分配
+        return null;
       }
     }
 
@@ -781,9 +765,10 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     }
   }
 
-  static Future<Uint8List> _fetchBytesStatic(String imageKey, String? sourceKey, String cid, String eid) async {
-    // 关键优化（全局字节单飞锁）：防范预载下载管线与主渲染加载管线在 App 刚启动时，
-    // 并发抢占 I/O 并读写同一本地物理文件造成的锁死与损坏（消灭 70% 的文件竞态）
+  static Future<Uint8List> _fetchBytesStatic(
+    String imageKey, String? sourceKey, String cid, String eid, {
+    StreamController<ImageChunkEvent>? chunkEvents,
+  }) async {
     if (_pendingByteLoads.containsKey(imageKey)) {
       debugPrint('[WebP-IO] Join pending byte loading task for $imageKey');
       return _pendingByteLoads[imageKey]!;
@@ -793,7 +778,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     _pendingByteLoads[imageKey] = completer.future;
 
     try {
-      final bytes = await _fetchBytesStaticRaw(imageKey, sourceKey, cid, eid);
+      final bytes = await _fetchBytesStaticRaw(imageKey, sourceKey, cid, eid, chunkEvents: chunkEvents);
       completer.complete(bytes);
       return bytes;
     } catch (e) {
@@ -804,11 +789,15 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     }
   }
 
-  static Future<Uint8List> _fetchBytesStaticRaw(String imageKey, String? sourceKey, String cid, String eid) async {
+  static Future<Uint8List> _fetchBytesStaticRaw(
+    String imageKey, String? sourceKey, String cid, String eid, {
+    StreamController<ImageChunkEvent>? chunkEvents,
+  }) async {
     final isLocal = imageKey.startsWith('file://');
     
     // 1. 本地 file:// 协议文件安全读取
     if (isLocal) {
+      // [FIX-11] 使用 Uri.parse 正确处理 file:// URI → File 转换
       final file = File(imageKey);
       try {
         if (await file.exists()) {
@@ -822,8 +811,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
           }
         }
       } catch (e) {
-        // 本地文件系统完全读取失败时，绝不进行 ImageDownloader 网络降级。
-        // 直接上报物理 I/O 异常，供 Flutter 渲染层排查权限或路径问题。
         throw FileSystemException('Failed to read local SAF/file WebP: $e', imageKey);
       }
       
@@ -843,20 +830,43 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       }
     }
     
-    // 3. 远端网络图片才会走到下载链路
+    // 先检查磁盘再从远端网络下载
+
+    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    try {
+      final cacheFile = await CacheManager().findCache(cacheKey);
+      if (cacheFile != null && await cacheFile.exists()) {
+        final bytes = await cacheFile.readAsBytes();
+        if (bytes.isNotEmpty) {
+          debugPrint('[WebP-IO] Disk cache hit for ${_short(imageKey)}');
+          return bytes;
+        }
+      }
+    } catch (e) {
+      debugPrint('[WebP-IO] Disk cache check failed for ${_short(imageKey)}: $e');
+    }
+
     Uint8List? result;
     await for (final event in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
       if (event.imageBytes != null) {
         result = event.imageBytes!;
         break;
       }
+      if (chunkEvents != null && !chunkEvents.isClosed) {
+        chunkEvents.add(ImageChunkEvent(
+          cumulativeBytesLoaded: event.currentBytes,
+          expectedTotalBytes: event.totalBytes,
+        ));
+      }
     }
     if (result == null) throw Exception('Load failed: $imageKey');
     return result;
   }
 
-  Future<Uint8List> _fetchBytes() async {
-    return _fetchBytesStatic(imageKey, sourceKey, cid, eid);
+  Future<Uint8List> _fetchBytes({
+    StreamController<ImageChunkEvent>? chunkEvents,
+  }) async {
+    return _fetchBytesStatic(imageKey, sourceKey, cid, eid, chunkEvents: chunkEvents);
   }
 
   @override
@@ -873,7 +883,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   @override
   int get hashCode => Object.hash(imageKey, sourceKey, cid, eid, targetWidth, targetHeight);
 
-  /// 全局滑动状态机更新接口：与新版 images.txt 完全同步
   static void onPageChanged({
     required int currentPageIndex,
     required List<String> images,
@@ -904,18 +913,43 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 class _WebPImageStreamCompleter extends ImageStreamCompleter {
   final WebPImageProvider _provider;
   bool _disposed = false;
-  // 滑动窗口释放队列：保留最近 4 帧，第 5 帧旧的显式 dispose
-  final List<ui.Image> _disposeQueue = [];
+  final List<ImageStreamListener> _listenersStore = [];
+  StreamSubscription<ImageChunkEvent>? _chunkSub;
 
-  void _enqueueDispose(ui.Image img) {
-    _disposeQueue.add(img);
-    while (_disposeQueue.length > 4) {
-      _disposeQueue.removeAt(0).dispose();
+  _WebPImageStreamCompleter(
+    Future<_ImageResult> future,
+    this._provider, {
+    Stream<ImageChunkEvent>? chunkEvents,
+  }) {
+    if (chunkEvents != null) {
+      _chunkSub = chunkEvents.listen((event) {
+        if (_disposed) return;
+        for (final listener in _listenersStore) {
+          listener.onChunk?.call(event);
+        }
+      });
     }
+    future.then(_onResult, onError: _onError);
   }
 
-  _WebPImageStreamCompleter(Future<_ImageResult> future, this._provider) {
-    future.then(_onResult, onError: _onError);
+  @override
+  void addListener(ImageStreamListener listener) {
+    _listenersStore.add(listener);
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    _listenersStore.remove(listener);
+    super.removeListener(listener);
+  }
+
+  @override
+  void onDisposed() {
+    _chunkSub?.cancel();
+    _listenersStore.clear();
+    _disposed = true;
+    super.onDisposed();
   }
 
   void _onResult(_ImageResult result) {
@@ -954,7 +988,6 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
     DecoderHolder holder = initialHolder;
     final short = holder.shortKey;
 
-    /// 统一异步重载逻辑
     Future<bool> reloadAndRestart() async {
       if (!isActive || _disposed) return false;
       debugPrint('[WebP] $short reloading (holder evicted)...');
@@ -964,10 +997,10 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
         
         if (result.type == _ResultType.animated) {
           holder = result.holder!;
-          return true; // 成功重新捕获动画句柄，继续循环
+          return true;
         } else if (result.type == _ResultType.static) {
           setImage(result.imageInfo!);
-          isActive = false; // 已降级为静态图片，安全退出循环
+          isActive = false;
           return false;
         }
       } catch (e) {
@@ -976,18 +1009,10 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       return false;
     }
 
-    /// 扁平化单向循环迭代器（完全避免递归、匿名闭包分配及 concurrent loop 竞争问题）
     void playLoop() async {
       int frameIndex = 0;
-      int tLastFrame = _nowUs();
-      double speedMul = 1.0;       // 当前播放速度倍率（固定，非逐帧变化）
-      int speedStableCount = 0;    // 连续稳定计数（调速用滞后）
-      int bufLowStreak = 0;        // 连续低 buffer 计数
-      bool waitedForStart = false; // 是否已完成初始缓冲等待
 
-      int framesSinceGc = 0;
       while (isActive && !_disposed) {
-        // 1. 无可见监听者或 App 处于后台时挂起
         if (!hasListeners) {
           await Future.delayed(const Duration(milliseconds: 200));
           continue;
@@ -1000,44 +1025,15 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           }
         } catch (_) { /* binding not ready yet */ }
 
-        // 1.5 每 30 帧触发一次 GC，避免临时对象累积导致 RSS 飙升
-        if (++framesSinceGc >= 30) {
-          framesSinceGc = 0;
-          await Future.delayed(Duration.zero); // 让出事件循环
-        }
-
-        // 2. 句柄被全局滑动回收机制逐出时，触发就地安全热重载
         if (holder.disposed) {
           final reloaded = await reloadAndRestart();
           if (reloaded) {
-            waitedForStart = false; // 重载后重新等缓冲
-            speedMul = 1.0;
             continue;
           } else {
             break;
           }
         }
 
-        // 3. 初始缓冲等待：启动播放前攒够最低帧数
-        if (!waitedForStart) {
-          final minStart = (holder._dynamicTarget() ~/ 3).clamp(2, 5);
-          if (holder._frameBuffer.length < minStart && holder._isDecoding) {
-            await Future.delayed(const Duration(milliseconds: 32));
-            continue;
-          }
-          // 确定初始播放速度
-          final est = holder.estimatedSpeedMul;
-          speedMul = est > 0 ? est : 0.5;
-          if (est == 0.0 && holder._frameBuffer.length < holder._dynamicTarget() ~/ 2) {
-            // 吞吐严重不足 → 继续等待缓冲
-            await Future.delayed(const Duration(milliseconds: 50));
-            continue;
-          }
-          waitedForStart = true;
-          tLastFrame = _nowUs();
-        }
-
-        // 4. 消费帧数据
         final frame = holder.consumeFrame();
         if (frame == null) {
           if (holder.disposed) continue;
@@ -1045,57 +1041,18 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
           continue;
         }
 
-        // 5. 派发渲染帧上屏（Flutter setImage 内部 dispose 旧帧）
-        final tNow = _nowUs();
-        final displayInterval = (tNow - tLastFrame) ~/ 1000;
-        tLastFrame = tNow;
         setImage(ImageInfo(image: frame.image, scale: holder.scale));
-        _enqueueDispose(frame.image);
         frameIndex++;
 
-        // 6. 帧间隔延时（固定速度 × 调速倍率）
         final rawDelay = frame.durationMs <= 10 ? 100 : frame.durationMs;
-        final baseDelay = rawDelay.clamp(8, 1000);
-        final buf = holder._frameBuffer.length;
-        final dynT = holder._dynamicTarget();
-
-        // 滞后调速：连续 N 帧 buffer 不足才降速，连续 N 帧恢复才升速
-        if (buf * 3 < dynT) {
-          bufLowStreak++;
-        } else {
-          bufLowStreak = 0;
-        }
-        if (bufLowStreak >= 5 && speedMul > 0.5) {
-          speedMul = (speedMul - 0.25).clamp(0.5, 1.0);
-          bufLowStreak = 0;
-        } else if (bufLowStreak == 0 && buf > dynT * 2 ~/ 3 && speedMul < 1.0) {
-          speedStableCount++;
-          if (speedStableCount >= 10) {
-            speedMul = (speedMul + 0.25).clamp(0.5, 1.0);
-            speedStableCount = 0;
-          }
-        } else {
-          speedStableCount = 0;
-        }
-
-        final delay = (baseDelay / speedMul).round().clamp(8, 2000);
+        final delay = rawDelay.clamp(8, 1000);
         debugPrint('[WebP-T] ${holder.shortKey} display f#$frameIndex '
-            'dur=${frame.durationMs}ms int=${displayInterval}ms '
-            'wait=${delay}ms spd=${speedMul.toStringAsFixed(2)} buf=$buf/$dynT rtt=${holder._avgRttMs}ms');
+            'dur=${frame.durationMs}ms wait=${delay}ms buf=${holder._frameBuffer.length}');
         await Future.delayed(Duration(milliseconds: (delay / webpPlaybackSpeed).round()));
       }
     }
 
-    // 启动扁平循环
     playLoop();
-  }
-
-  @override
-  void onDisposed() {
-    _disposed = true;
-    for (final img in _disposeQueue) { img.dispose(); }
-    _disposeQueue.clear();
-    super.onDisposed();
   }
 }
 

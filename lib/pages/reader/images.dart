@@ -21,11 +21,10 @@ class _ReaderImagesState extends State<_ReaderImages> {
 
   @override
   void dispose() {
-    super.dispose();
     ImageDownloader.cancelAllLoadingImages();
+    super.dispose();
   }
 
-  /// Handle jumping to last page when _jumpToLastPageOnLoad is true
   void _handleJumpToLastPage() {
     if (reader._jumpToLastPageOnLoad) {
       reader._page = reader.maxPage;
@@ -205,16 +204,16 @@ class _GalleryModeState extends State<_GalleryMode>
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
     });
-    Future.delayed(
-      const Duration(milliseconds: 100),
-      () => _updateWebPState(reader.page, context),
-    );
+    Future.microtask(() {
+      if (mounted) _updateWebPState(reader.page, context);
+    });
     super.initState();
   }
 
   @override
   void dispose() {
     webpCache.dispose();
+    _ComicImageState.clear();
     super.dispose();
   }
 
@@ -295,14 +294,30 @@ class _GalleryModeState extends State<_GalleryMode>
             photoViewControllers[index] ??= PhotoViewController();
 
             if (reader.imagesPerPage == 1 || pageImages.length == 1) {
-              return PhotoViewGalleryPageOptions(
-                filterQuality: FilterQuality.medium,
+              final imageProvider = _createImageProviderFromKey(pageImages[0], context, startIndex + 1);
+              final cachedSize = _ComicImageState._getCache(imageProvider.hashCode)
+                  ?? MediaQuery.of(context).size;
+              return PhotoViewGalleryPageOptions.customChild(
+                childSize: cachedSize,
                 controller: photoViewControllers[index],
-                imageProvider: _createImageProviderFromKey(pageImages[0], context, startIndex + 1),
-                fit: BoxFit.contain,
-                errorBuilder: (_, error, s, retry) {
-                  return NetworkError(message: error.toString(), retry: retry);
-                },
+                child: ComicImage(
+                  image: imageProvider,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.medium,
+                  onInit: (state) => imageStates.add(state),
+                  onDispose: (state) => imageStates.remove(state),
+                  onImageInfo: (w, h) {
+                    final newSize = Size(w.toDouble(), h.toDouble());
+                    final old = _ComicImageState._getCache(imageProvider.hashCode);
+                    if (old != newSize) {
+                      _ComicImageState._putCache(imageProvider.hashCode, newSize);
+                      if (mounted) setState(() {});
+                    }
+                  },
+                  errorBuilder: (_, error, s, retry) {
+                    return NetworkError(message: error.toString(), retry: retry);
+                  },
+                ),
               );
             }
 
@@ -380,6 +395,9 @@ class _GalleryModeState extends State<_GalleryMode>
             alignment: axis == Axis.vertical ? Alignment.bottomCenter : Alignment.centerRight,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            errorBuilder: (_, error, s, retry) {
+              return NetworkError(message: error.toString(), retry: retry);
+            },
           ),
         ),
         Expanded(
@@ -390,6 +408,9 @@ class _GalleryModeState extends State<_GalleryMode>
             alignment: axis == Axis.vertical ? Alignment.topCenter : Alignment.centerLeft,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            errorBuilder: (_, error, s, retry) {
+              return NetworkError(message: error.toString(), retry: retry);
+            },
           ),
         ),
       ];
@@ -402,6 +423,9 @@ class _GalleryModeState extends State<_GalleryMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            errorBuilder: (_, error, s, retry) {
+              return NetworkError(message: error.toString(), retry: retry);
+            },
           ),
         );
       }).toList();
@@ -585,10 +609,11 @@ class _ContinuousModeState extends State<_ContinuousMode>
   var fingers = 0;
   bool disableScroll = false;
 
-  late List<bool> cached;
   int get preCacheCount => appdata.settings["preloadImageCount"];
   bool delayedIsScrolling = false;
   var imageStates = <State<ComicImage>>{};
+
+  final DecodedImageCache webpCache = DecodedImageCache();
 
   void delayedSetIsScrolling(bool value) {
     Future.delayed(const Duration(milliseconds: 300), () => delayedIsScrolling = value);
@@ -607,17 +632,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
     reader = context.reader;
     reader._imageViewController = this;
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
-    cached = List.filled(reader.maxPage + 2, false);
-    Future.delayed(
-      const Duration(milliseconds: 100),
-      () => _updateWebPState(reader.page, context),
-    );
+    Future.microtask(() {
+      if (mounted) _updateWebPState(reader.page, context);
+    });
     super.initState();
   }
 
   @override
   void dispose() {
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
+    webpCache.dispose();
+    _ComicImageState.clear();
     super.dispose();
   }
 
@@ -722,6 +747,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            // [FIX-9] 补充 errorBuilder，提供重试能力
+            errorBuilder: (_, error, s, retry) {
+              return NetworkError(message: error.toString(), retry: retry);
+            },
           ),
         );
       },
@@ -983,7 +1012,13 @@ ImageProvider _createImageProviderFromKey(
   final size = WebPImageProvider.calculateTargetSize(context);
   final double dpr = MediaQuery.of(context).devicePixelRatio;
   var imageCtrl = reader._imageViewController;
-  DecodedImageCache? cache = imageCtrl is _GalleryModeState ? imageCtrl.webpCache : null;
+  // [FIX-4] Gallery 和 Continuous 模式都使用各自的 webpCache
+  DecodedImageCache? cache;
+  if (imageCtrl is _GalleryModeState) {
+    cache = imageCtrl.webpCache;
+  } else if (imageCtrl is _ContinuousModeState) {
+    cache = imageCtrl.webpCache;
+  }
 
   return WebPImageProvider(
     imageKey,
@@ -1004,19 +1039,20 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
   return _createImageProviderFromKey(imageKey, context, page);
 }
 
-int _lastWebPPage = 0;
-
 void _updateWebPState(int page, BuildContext context) {
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
 
-  _lastWebPPage = page;
   debugPrint('[WebP-PAGE] Page:$page');
   var imageCtrl = reader._imageViewController;
-  DecodedImageCache? cache = imageCtrl is _GalleryModeState ? imageCtrl.webpCache : null;
+  DecodedImageCache? cache;
+  if (imageCtrl is _GalleryModeState) {
+    cache = imageCtrl.webpCache;
+  } else if (imageCtrl is _ContinuousModeState) {
+    cache = imageCtrl.webpCache;
+  }
 
-  // 关键优化：状态计算与自动预分配交由 FFI 引擎状态管理器，消除冗余计算
   WebPImageProvider.onPageChanged(
     currentPageIndex: page - 1,
     images: images,

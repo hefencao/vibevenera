@@ -123,9 +123,7 @@ android {
             def abi = output.getFilter(com.android.build.OutputFile.ABI)
             def buildType = variant.buildType.name
 
-            // 处理 release 和 profile：使用相同的 versionCode 重写规则
             if (buildType == "release" || buildType == "profile") {
-                // 版本号重写（与 release 完全一致）
                 if (abi != null) {
                     def abiVersionCode = project.ext.abiCodes.get(abi)
                     if (abiVersionCode != null) {
@@ -143,7 +141,6 @@ android {
                     outputFileName = "venera-profile-${variant.versionName}-${abi ?: 'universal'}.apk"
                 }
             } else if (buildType == "debug") {
-                // debug 保持原有逻辑
                 // versionCodeOverride = variant.versionCode * 10 + 4
                 versionCodeOverride = variant.versionCode * 10
             }
