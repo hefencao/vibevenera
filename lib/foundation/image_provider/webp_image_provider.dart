@@ -303,23 +303,43 @@ class DecoderHolder {
 }
 
 /// 全局调度中枢
+///
+/// 职责拆分：
+///   Phase 1（立即执行）— 状态迁移：generation、key 集合、holder 状态、L1 active pages。
+///   Phase 2（防抖 80ms）— 资源管理：预下载订阅同步、解码器预创建。
+///
+/// 这样滑块快速拖拽时每个中间页的状态迁移仍然瞬时生效（页面优先级立即提升），
+/// 但昂贵的预下载/预创建操作不会抖动——只有用户停下来后才触发一次。
 class DecoderManager {
   static final DecoderManager instance = DecoderManager._();
   DecoderManager._();
 
+  // ── Holder 注册表 ──
+
   final Map<String, DecoderHolder> _holders = {};
   int _generation = 0;
+
+  // ── 页面 key 集合（Phase 1 立即更新） ──
 
   String _currentKey = '';
   final Set<String> _nextKeys = {};
   final Set<String> _lastKeys = {};
   final Set<String> _precacheKeys = {};
 
+  // ── Phase 进度（观察用） ──
+
   int _phase = 0;
   Timer? _evictionTimer;
 
-  // [FIX-1/16] 预下载订阅追踪：正确订阅 Stream + 翻页时取消远端预下载
+  // ── 预下载订阅追踪 ──
+  // key = imageKey（原始 URL，不含分辨率），value = 活跃的 Stream 订阅。
   final Map<String, StreamSubscription> _preDownloadSubs = {};
+
+  // ── Phase 2 防抖状态 ──
+
+  int _lastResourceCallMs = 0;
+  Timer? _pendingResourceTimer;
+  _ResourceArgs? _pendingResourceArgs;
 
   int get generation => _generation;
 
@@ -334,17 +354,17 @@ class DecoderManager {
     return _phase;
   }
 
-  void _ensureEvictionTimer() {
-    if (_evictionTimer != null) return;
-    _evictionTimer = Timer.periodic(const Duration(seconds: 1), _onEvictionHeartbeat);
-  }
+  // ═══════════════════════════════════════════════════════════════
+  // 公开入口
+  // ═══════════════════════════════════════════════════════════════
 
-  void _cancelEvictionTimer() {
-    _evictionTimer?.cancel();
-    _evictionTimer = null;
-  }
-
-  /// 状态机迁移。不在新集合中的 holder 降级为 precache。
+  /// 页面切换时调用。
+  ///
+  /// Phase 1（状态迁移）**始终同步执行**，确保当前页的线程优先级、L1 缓存
+  /// 等关键状态立即生效。
+  ///
+  /// Phase 2（预下载 + 预创建）通过 80ms 防抖延迟执行——连续快速翻页时中间
+  /// 状态被跳过，只有最终落点触发实际 I/O。
   void activePagesChanged({
     required int currentPageIndex,
     required List<String> images,
@@ -354,19 +374,54 @@ class DecoderManager {
     required String? sourceKey,
     DecodedImageCache? cache,
   }) {
-    _generation++;
-    webp.WorkerPoolScheduler.instance.updateGeneration(_generation);
-
+    // ── Phase 1: 状态迁移（立即） ──
     final size = WebPImageProvider.calculateTargetSize(context);
     final int tw = size.width.round();
     final int th = size.height.round();
     final double dpr = MediaQuery.of(context).devicePixelRatio;
     final double scale = 1.0 / dpr;
 
+    _updatePageState(
+      currentPageIndex: currentPageIndex,
+      images: images,
+      tw: tw,
+      th: th,
+      cache: cache,
+    );
+
+    // ── Phase 2: 资源管理（防抖 80ms） ──
+    _scheduleResourceManagement(
+      args: _ResourceArgs(
+        currentPageIndex: currentPageIndex,
+        images: images,
+        cid: cid,
+        eid: eid,
+        sourceKey: sourceKey,
+        cache: cache,
+        tw: tw,
+        th: th,
+        scale: scale,
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Phase 1: 状态迁移（立即，无节流）
+  // ═══════════════════════════════════════════════════════════════
+
+  void _updatePageState({
+    required int currentPageIndex,
+    required List<String> images,
+    required int tw,
+    required int th,
+    DecodedImageCache? cache,
+  }) {
+    _generation++;
+    webp.WorkerPoolScheduler.instance.updateGeneration(_generation);
+
     String fk(int index) {
       if (index < 0 || index >= images.length) return '';
-      final imageKey = images[index];
-      return '$imageKey@${tw}x$th';
+      return '${images[index]}@${tw}x$th';
     }
 
     final String currentKey = fk(currentPageIndex);
@@ -378,6 +433,7 @@ class DecoderManager {
       fk(currentPageIndex - 1),
     ].where((k) => k.isNotEmpty).toList();
     final List<String> precacheKeys = [
+      fk(currentPageIndex - 2),
       fk(currentPageIndex + 3),
       fk(currentPageIndex + 4),
     ].where((k) => k.isNotEmpty).toList();
@@ -387,8 +443,7 @@ class DecoderManager {
     _lastKeys..clear()..addAll(lastKeys);
     _precacheKeys..clear()..addAll(precacheKeys);
 
-    // [FIX] 不在任何活跃集合中的 holder 统一降级为 precache，
-    // 而不是保留旧的 last 状态（会导致永远不 refill，动画卡死）。
+    // 不在任何活跃集合中的 holder → 降级为 precache
     final keep = <String>{currentKey, ...nextKeys, ...lastKeys, ...precacheKeys};
     for (final e in _holders.entries) {
       if (!keep.contains(e.key)) {
@@ -407,8 +462,8 @@ class DecoderManager {
       _holders[k]?.updateState(PageState.precache);
     }
 
+    // L1 缓存 active pages（key 含分辨率）
     if (cache != null) {
-      // L1 缓存 key 包含分辨率（如 imageKey@1080x2340），active pages 也必须用完整 key
       final activeKeys = {
         currentKey,
         ...nextKeys,
@@ -416,37 +471,70 @@ class DecoderManager {
       }.where((k) => k.isNotEmpty).toList();
       cache.setActivePages(activeKeys);
     }
+  }
 
-    final int preDownloadCount = appdata.settings["preloadImageCount"] ?? 5;
+  // ═══════════════════════════════════════════════════════════════
+  // Phase 2: 资源管理（防抖 80ms）
+  // ═══════════════════════════════════════════════════════════════
 
-    final Set<String> neededDownloadKeys = {};
-    for (int i = 0; i <= preDownloadCount; i++) {
-      final int targetIdx = currentPageIndex + i;
-      if (targetIdx >= 0 && targetIdx < images.length) {
-        final String imageKey = images[targetIdx];
-        // 只对真正的网络 URL 发起预下载；本地路径（file:// 或普通文件系统路径）跳过
-        if (imageKey.contains('://') && !imageKey.startsWith('file://')) {
-          neededDownloadKeys.add(imageKey);
+  void _scheduleResourceManagement({required _ResourceArgs args}) {
+    final now = _nowMs();
+    if (_lastResourceCallMs > 0 && now - _lastResourceCallMs < 80) {
+      _pendingResourceTimer?.cancel();
+      _pendingResourceArgs = args;
+      _pendingResourceTimer = Timer(const Duration(milliseconds: 80), () {
+        final a = _pendingResourceArgs;
+        if (a != null) {
+          _manageResources(args: a);
+          _pendingResourceArgs = null;
         }
+      });
+      return;
+    }
+    _lastResourceCallMs = now;
+    _manageResources(args: args);
+  }
+
+  void _manageResources({required _ResourceArgs args}) {
+    _syncPreDownloads(args: args);
+    _syncPrecreate(args: args);
+  }
+
+  // ── 预下载同步 ──
+
+  void _syncPreDownloads({required _ResourceArgs args}) {
+    final preDownloadCount = appdata.settings["preloadImageCount"] ?? 5;
+
+    // 计算需要的下载 key 集合：[当前-1, 当前+preDownloadCount]
+    final needed = <String>{};
+    for (int i = -1; i <= preDownloadCount; i++) {
+      final idx = args.currentPageIndex + i;
+      if (idx < 0 || idx >= args.images.length) continue;
+      final key = args.images[idx];
+      // 只对网络 URL 发起预下载；本地 file:// 跳过
+      if (key.contains('://') && !key.startsWith('file://')) {
+        needed.add(key);
       }
     }
 
-    final List<String> subsToRemove = [];
+    // 移除不再需要的订阅
+    final toRemove = <String>[];
     for (final entry in _preDownloadSubs.entries) {
-      if (!neededDownloadKeys.contains(entry.key)) {
+      if (!needed.contains(entry.key)) {
         entry.value.cancel();
-        subsToRemove.add(entry.key);
+        toRemove.add(entry.key);
       }
     }
-    for (final k in subsToRemove) {
+    for (final k in toRemove) {
       _preDownloadSubs.remove(k);
     }
 
-    for (final String imageKey in neededDownloadKeys) {
-      if (_preDownloadSubs.containsKey(imageKey)) continue; // 已有订阅
+    // 添加新的订阅
+    for (final String imageKey in needed) {
+      if (_preDownloadSubs.containsKey(imageKey)) continue;
 
       _preDownloadSubs[imageKey] = ImageDownloader.loadComicImage(
-        imageKey, sourceKey, cid, eid,
+        imageKey, args.sourceKey, args.cid, args.eid,
       ).listen(
         (event) {
           if (event.imageBytes != null) {
@@ -464,28 +552,44 @@ class DecoderManager {
         },
       );
     }
+  }
 
-    final List<String> precreateTargets = [...nextKeys, ...precacheKeys];
-    for (final k in precreateTargets) {
-      if (!_holders.containsKey(k)) {
-        final imageKey = k.split('@').first;
-        if (imageKey.endsWith('.webp') || WebPImageProvider.isLikelyWebP(imageKey)) {
-          WebPImageProvider.ensureHolder(
-            imageKey: imageKey,
-            fullKey: k,
-            cache: cache,
-            sourceKey: sourceKey,
-            cid: cid,
-            eid: eid,
-            targetWidth: tw,
-            targetHeight: th,
-            scale: scale,
-            onlyIfCached: true,
-          ).catchError((_) => null);
-        }
+  // ── 解码器预创建 ──
+  // 对 next + precache 范围内尚未创建 holder 的 WebP 页面，
+  // 仅当字节已缓存时才创建解码器（避免触发网络下载）。
+
+  void _syncPrecreate({required _ResourceArgs args}) {
+    final targets = <String>{
+      ..._nextKeys,
+      ..._precacheKeys,
+    };
+
+    for (final fullKey in targets) {
+      if (_holders.containsKey(fullKey)) continue;
+
+      final imageKey = fullKey.split('@').first;
+      if (!imageKey.endsWith('.webp') && !WebPImageProvider.isLikelyWebP(imageKey)) {
+        continue;
       }
+
+      WebPImageProvider.ensureHolder(
+        imageKey: imageKey,
+        fullKey: fullKey,
+        cache: args.cache,
+        sourceKey: args.sourceKey,
+        cid: args.cid,
+        eid: args.eid,
+        targetWidth: args.tw,
+        targetHeight: args.th,
+        scale: args.scale,
+        onlyIfCached: true,
+      ).catchError((_) => null);
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Holder 生命周期
+  // ═══════════════════════════════════════════════════════════════
 
   DecoderHolder getOrCreateHolder(String key, webp.WebPAnimDecoder decoder, int tw, int th, double scale) {
     _ensureEvictionTimer();
@@ -505,6 +609,20 @@ class DecoderManager {
   }
 
   DecoderHolder? getHolder(String key) => _holders[key];
+
+  // ═══════════════════════════════════════════════════════════════
+  // 驱逐 & 清理
+  // ═══════════════════════════════════════════════════════════════
+
+  void _ensureEvictionTimer() {
+    if (_evictionTimer != null) return;
+    _evictionTimer = Timer.periodic(const Duration(seconds: 1), _onEvictionHeartbeat);
+  }
+
+  void _cancelEvictionTimer() {
+    _evictionTimer?.cancel();
+    _evictionTimer = null;
+  }
 
   void _onEvictionHeartbeat(Timer timer) {
     final now = _nowMs();
@@ -531,6 +649,9 @@ class DecoderManager {
 
   void clearAll() {
     _generation++;
+    _pendingResourceTimer?.cancel();
+    _pendingResourceTimer = null;
+    _pendingResourceArgs = null;
     webp.WorkerPoolScheduler.instance.updateGeneration(_generation);
     for (final h in _holders.values) { h.dispose(); }
     _holders.clear();
@@ -539,6 +660,34 @@ class DecoderManager {
     }
     _preDownloadSubs.clear();
   }
+}
+
+/// Phase 2 防抖参数快照。
+///
+/// 每次 [activePagesChanged] 调用都会更新此快照；
+/// 防抖 timer 触发时使用最新快照执行资源管理。
+class _ResourceArgs {
+  final int currentPageIndex;
+  final List<String> images;
+  final String cid;
+  final String eid;
+  final String? sourceKey;
+  final DecodedImageCache? cache;
+  final int tw;
+  final int th;
+  final double scale;
+
+  const _ResourceArgs({
+    required this.currentPageIndex,
+    required this.images,
+    required this.cid,
+    required this.eid,
+    required this.sourceKey,
+    required this.cache,
+    required this.tw,
+    required this.th,
+    required this.scale,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
