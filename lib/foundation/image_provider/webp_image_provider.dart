@@ -597,6 +597,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   }) async {
     final t0 = _nowUs();
     final short = _short(imageKey);
+    debugPrint('[WebP-PROVIDER] LOAD $imageKey');
     try {
 
     // 1. 内存缓存命中检测
@@ -946,6 +947,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
 
   @override
   void onDisposed() {
+    debugPrint('[WebP-COMPLETER] DISPOSED ${_short(_provider.imageKey)}');
     _chunkSub?.cancel();
     _listenersStore.clear();
     _disposed = true;
@@ -953,7 +955,11 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
   }
 
   void _onResult(_ImageResult result) {
-    if (_disposed) return;
+    if (_disposed) {
+      debugPrint('[WebP-COMPLETER] _onResult IGNORED (already disposed) ${_short(_provider.imageKey)}');
+      return;
+    }
+    debugPrint('[WebP-COMPLETER] _onResult ${_short(_provider.imageKey)} type=${result.type.name}');
     switch (result.type) {
       case _ResultType.static:
         setImage(result.imageInfo!);

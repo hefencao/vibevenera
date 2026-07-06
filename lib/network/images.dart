@@ -9,63 +9,356 @@ import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
 
-abstract class ImageDownloader {
-  static Stream<ImageDownloadProgress> loadThumbnail(
-      String url, String? sourceKey,
-      [String? cid]) async* {
-    final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
-    final cache = await CacheManager().findCache(cacheKey);
+// ═══════════════════════════════════════════════════════════════
+// ImageRequestConfig — typed, immutable request configuration
+// Replaces loose Map<String, dynamic> with type-safe fields.
+// ═══════════════════════════════════════════════════════════════
 
-    if (cache != null) {
-      var data = await cache.readAsBytes();
+class ImageRequestConfig {
+  final String url;
+  final String method;
+  final Map<String, dynamic> headers;
+  final dynamic data;
+  final JSInvokable? onResponse;
+  final JSInvokable? onLoadFailed;
+  final dynamic modifyImage;
+
+  const ImageRequestConfig({
+    required this.url,
+    this.method = 'GET',
+    this.headers = const {},
+    this.data,
+    this.onResponse,
+    this.onLoadFailed,
+    this.modifyImage,
+  });
+
+  factory ImageRequestConfig.fromMap(
+    String defaultUrl,
+    Map<String, dynamic>? map,
+  ) {
+    map ??= {};
+
+    final headers = Map<String, dynamic>.from(map['headers'] ?? {});
+    headers.putIfAbsent('user-agent', () => webUA);
+
+    return ImageRequestConfig(
+      url: map['url'] ?? defaultUrl,
+      method: map['method'] ?? 'GET',
+      headers: headers,
+      data: map['data'],
+      onResponse:
+          map['onResponse'] is JSInvokable ? map['onResponse'] as JSInvokable : null,
+      onLoadFailed:
+          map['onLoadFailed'] is JSInvokable ? map['onLoadFailed'] as JSInvokable : null,
+      modifyImage: map['modifyImage'],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// _SharedStream — ref-counted broadcast stream manager
+// Replaces _StreamWrapper (manual List<StreamController>).
+//
+// Key design decision (from original _StreamWrapper):
+//   - Upstream download KEEPS RUNNING even when all listeners unsubscribe.
+//   - This ensures the download completes and populates the disk cache.
+//   - Only explicit cancelAllLoadingImages() or natural completion/error
+//     stops the upstream.
+//
+// Single StreamController.broadcast() instead of N controllers.
+// ═══════════════════════════════════════════════════════════════
+
+class _SharedStream {
+  late final StreamController<ImageDownloadProgress> _controller;
+  final void Function() _onDispose;
+  StreamSubscription? _upstreamSub;
+  int _listenerCount = 0;
+  bool _disposed = false;
+
+  _SharedStream(
+    Stream<ImageDownloadProgress> source,
+    this._onDispose,
+  ) {
+    _controller = StreamController<ImageDownloadProgress>.broadcast(
+      onListen: () {
+        _listenerCount++;
+        _upstreamSub ??= source.listen(
+          _controller.add,
+          onError: (Object e, StackTrace st) {
+            _controller.addError(e, st);
+            _close();
+          },
+          onDone: _close,
+        );
+      },
+      onCancel: () {
+        _listenerCount--;
+        if (_listenerCount < 0) {
+          _listenerCount = 0;
+        }
+        // IMPORTANT: Do NOT cancel upstream here.
+        // The original _StreamWrapper kept the download alive even when
+        // all listeners disappeared — this ensures the file gets cached
+        // on disk for subsequent requests.
+      },
+    );
+  }
+
+  Stream<ImageDownloadProgress> get stream => _controller.stream;
+
+  void _close() {
+    if (_disposed) return;
+    _disposed = true;
+    _upstreamSub?.cancel();
+    _upstreamSub = null;
+    if (!_controller.isClosed) {
+      _controller.close();
+    }
+    _onDispose();
+  }
+
+  /// Force-cancel upstream and close all listeners (used by cancelAllLoadingImages).
+  void cancel() {
+    if (_disposed) return;
+    _disposed = true;
+    _upstreamSub?.cancel();
+    _upstreamSub = null;
+    if (!_controller.isClosed) {
+      _controller.close();
+    }
+    _onDispose();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ImageDownloader
+// ═══════════════════════════════════════════════════════════════
+
+abstract class ImageDownloader {
+  static final Map<String, _SharedStream> _loadingImages = {};
+
+  /// Cancel all in-flight image loads.
+  static void cancelAllLoadingImages() {
+    // Copy values first — each cancel() calls _onDispose which removes from map.
+    final values = _loadingImages.values.toList();
+    for (final shared in values) {
+      shared.cancel();
+    }
+    _loadingImages.clear();
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Public API
+  // ─────────────────────────────────────────────────────────────
+
+  static Stream<ImageDownloadProgress> loadThumbnail(
+    String url,
+    String? sourceKey, [
+    String? cid,
+  ]) async* {
+    final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
+
+    // 1. Check disk cache — yield immediately if found, then return
+    final cached = await CacheManager().findCache(cacheKey);
+    if (cached != null) {
+      final data = await cached.readAsBytes();
       yield ImageDownloadProgress(
         currentBytes: data.length,
         totalBytes: data.length,
         imageBytes: data,
       );
+      return;
     }
 
-    var configs = <String, dynamic>{};
+    // 2. Build config from comic source
+    Map<String, dynamic>? rawConfig;
     if (sourceKey != null) {
-      var comicSource = ComicSource.find(sourceKey);
-      configs = comicSource?.getThumbnailLoadingConfig?.call(url) ?? {};
-    }
-    configs['headers'] ??= {};
-    if (configs['headers']['user-agent'] == null &&
-        configs['headers']['User-Agent'] == null) {
-      configs['headers']['user-agent'] = webUA;
+      final cs = ComicSource.find(sourceKey);
+      rawConfig = cs?.getThumbnailLoadingConfig?.call(url) ?? {};
     }
 
-    if (((configs['url'] as String?) ?? url).startsWith('cover.') &&
-        sourceKey != null) {
-      var comicSource = ComicSource.find(sourceKey);
-      if(comicSource != null) {
-        var comicInfo = await comicSource.loadComicInfo!(cid!);
-        yield* loadThumbnail(comicInfo.data.cover, sourceKey);
+    // 3. Handle indirect "cover.xxx" URLs
+    final effectiveUrl = (rawConfig?['url'] ?? url) as String;
+    if (effectiveUrl.startsWith('cover.') && sourceKey != null && cid != null) {
+      final cs = ComicSource.find(sourceKey);
+      if (cs != null) {
+        final info = await cs.loadComicInfo!(cid);
+        yield* loadThumbnail(info.data.cover, sourceKey);
         return;
       }
     }
 
-    var dio = AppDio(BaseOptions(
-      headers: Map<String, dynamic>.from(configs['headers']),
-      method: configs['method'] ?? 'GET',
-      responseType: ResponseType.stream,
-    ));
+    final config = ImageRequestConfig.fromMap(url, rawConfig);
+    yield* _executeDownload(config: config, cacheKey: cacheKey);
+  }
 
-    String requestUrl = configs['url'] ?? url;
+  /// Load a comic image (deduplicated across concurrent calls).
+  ///
+  /// Multiple simultaneous calls for the same [imageKey]+[sourceKey]+[cid]+[eid]
+  /// share a single network request. Uses [_SharedStream] for automatic cleanup
+  /// when all listeners unsubscribe.
+  static Stream<ImageDownloadProgress> loadComicImage(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+
+    final existing = _loadingImages[cacheKey];
+    if (existing != null) {
+      return existing.stream;
+    }
+
+    final shared = _SharedStream(
+      _loadComicImage(imageKey, sourceKey, cid, eid),
+      () => _loadingImages.remove(cacheKey),
+    );
+    _loadingImages[cacheKey] = shared;
+    return shared.stream;
+  }
+
+  /// Load a comic image without deduplication.
+  ///
+  /// Each call creates an independent download stream. Used when the caller
+  /// needs its own retry/error path (e.g., download manager).
+  static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    return _loadComicImage(imageKey, sourceKey, cid, eid);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Private: Comic image loader (with retry loop)
+  // ─────────────────────────────────────────────────────────────
+
+  static Stream<ImageDownloadProgress> _loadComicImage(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) async* {
+    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+
+    // Cache hit → yield immediately and return (no network request)
+    final cached = await CacheManager().findCache(cacheKey);
+    if (cached != null) {
+      final data = await cached.readAsBytes();
+      yield ImageDownloadProgress(
+        currentBytes: data.length,
+        totalBytes: data.length,
+        imageBytes: data,
+      );
+      return;
+    }
+
+    // Build initial config
+    Map<String, dynamic>? rawConfig;
+    if (sourceKey != null) {
+      final cs = ComicSource.find(sourceKey);
+      rawConfig = (await cs?.getImageLoadingConfig?.call(imageKey, cid, eid)) ?? {};
+    }
+
+    var config = ImageRequestConfig.fromMap(imageKey, rawConfig);
+    var retry = 5;
+
+    while (true) {
+      try {
+        yield* _executeDownload(
+          config: config,
+          cacheKey: cacheKey,
+          enableModifyImage: true,
+        );
+        // Success — free unused onLoadFailed JS handle
+        config.onLoadFailed?.free();
+        return;
+      } catch (e) {
+        retry--;
+        if (retry < 0 || config.onLoadFailed == null) {
+          config.onLoadFailed?.free();
+          rethrow;
+        }
+        // Invoke retry callback → get new config
+        final newConfig = await _invokeLoadFailed(config.onLoadFailed!, config.url);
+        // _invokeLoadFailed frees the JS handle
+        if (newConfig == null) {
+          rethrow;
+        }
+        config = newConfig;
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Private: Retry helper
+  // ─────────────────────────────────────────────────────────────
+
+  /// Invokes the onLoadFailed JS callback and returns a new config.
+  /// Frees the [callback] JS handle after invocation.
+  /// [originalUrl] is used as fallback when the retry result doesn't include a url field.
+  static Future<ImageRequestConfig?> _invokeLoadFailed(
+    JSInvokable callback,
+    String originalUrl,
+  ) async {
+    dynamic result = callback([]);
+    callback.free();
+    if (result is Future) {
+      result = await result;
+    }
+    if (result is! Map<String, dynamic>) {
+      return null;
+    }
+    return ImageRequestConfig.fromMap(originalUrl, result);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Private: Unified download executor
+  //
+  // Shared flow for both thumbnail and comic image loading:
+  //   build request → stream bytes (yield progress) →
+  //   apply onResponse → [optional modifyImage] → write cache →
+  //   yield complete
+  // ─────────────────────────────────────────────────────────────
+
+  static Stream<ImageDownloadProgress> _executeDownload({
+    required ImageRequestConfig config,
+    required String cacheKey,
+    bool enableModifyImage = false,
+  }) async* {
+    String requestUrl = config.url;
+    if (requestUrl.isEmpty) {
+      throw Exception('Empty request URL');
+    }
     if (requestUrl.startsWith('//')) {
       requestUrl = 'https:$requestUrl';
     }
-    var req = await dio.request<ResponseBody>(requestUrl,
-        data: configs['data']);
-    var stream = req.data?.stream ?? (throw "Error: Empty response body.");
+    // Validate: bare filenames without scheme → error
+    if (!requestUrl.contains('://')) {
+      throw Exception('Not a valid URL: "$requestUrl"');
+    }
+
+    final dio = AppDio(BaseOptions(
+      headers: config.headers,
+      method: config.method,
+      responseType: ResponseType.stream,
+    ));
+
+    final req = await dio.request<ResponseBody>(requestUrl, data: config.data);
+    final stream = req.data?.stream ?? (throw Exception('Error: Empty response body.'));
+
     int? expectedBytes = req.data!.contentLength;
     if (expectedBytes == -1) {
       expectedBytes = null;
     }
+
+    // Collect bytes while yielding progress events
     var buffer = <int>[];
-    await for (var data in stream) {
-      buffer.addAll(data);
+    await for (final chunk in stream) {
+      buffer.addAll(chunk);
       if (expectedBytes != null) {
         yield ImageDownloadProgress(
           currentBytes: buffer.length,
@@ -74,253 +367,54 @@ abstract class ImageDownloader {
       }
     }
 
-    if (configs['onResponse'] is JSInvokable) {
-      final uint8List = Uint8List.fromList(buffer);
-      buffer = (configs['onResponse'] as JSInvokable)([uint8List]);
-      (configs['onResponse'] as JSInvokable).free();
+    // Apply onResponse JS transformation (decrypt, unpack, etc.)
+    if (config.onResponse != null) {
+      dynamic result = config.onResponse!([Uint8List.fromList(buffer)]);
+      if (result is Future) {
+        result = await result;
+      }
+      if (result is List<int>) {
+        buffer = result;
+      } else {
+        throw Exception('Error: Invalid onResponse result.');
+      }
+      config.onResponse!.free();
     }
 
-    await CacheManager().writeCache(cacheKey, buffer);
+    // Convert to Uint8List (avoid copy if already correct type)
+    final Uint8List data;
+    if (buffer is Uint8List) {
+      data = buffer;
+    } else {
+      data = Uint8List.fromList(buffer);
+      buffer.clear();
+    }
+
+    // Optionally apply modifyImage script
+    Uint8List finalData = data;
+    if (enableModifyImage && config.modifyImage != null) {
+      finalData = await modifyImageWithScript(data, config.modifyImage);
+    }
+
+    // Persist to disk cache
+    await CacheManager().writeCache(cacheKey, finalData);
+
+    // Yield final complete event with image bytes
     yield ImageDownloadProgress(
-      currentBytes: buffer.length,
-      totalBytes: buffer.length,
-      imageBytes: Uint8List.fromList(buffer),
+      currentBytes: finalData.length,
+      totalBytes: finalData.length,
+      imageBytes: finalData,
     );
-  }
-
-  static final _loadingImages = <String, _StreamWrapper<ImageDownloadProgress>>{};
-
-  /// Cancel all loading images.
-  static void cancelAllLoadingImages() {
-    for (var wrapper in _loadingImages.values) {
-      wrapper.cancel();
-    }
-    _loadingImages.clear();
-  }
-
-  /// Load a comic image from the network or cache.
-  /// The function will prevent multiple requests for the same image.
-  static Stream<ImageDownloadProgress> loadComicImage(
-      String imageKey, String? sourceKey, String cid, String eid) {
-    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-    if (_loadingImages.containsKey(cacheKey)) {
-      return _loadingImages[cacheKey]!.stream;
-    }
-    final stream = _StreamWrapper<ImageDownloadProgress>(
-      _loadComicImage(imageKey, sourceKey, cid, eid),
-      (wrapper) {
-        _loadingImages.remove(cacheKey);
-      },
-    );
-    _loadingImages[cacheKey] = stream;
-    return stream.stream;
-  }
-
-  static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
-      String imageKey, String? sourceKey, String cid, String eid) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid);
-  }
-
-  static Stream<ImageDownloadProgress> _loadComicImage(
-      String imageKey, String? sourceKey, String cid, String eid) async* {
-    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-    final cache = await CacheManager().findCache(cacheKey);
-
-    if (cache != null) {
-      var data = await cache.readAsBytes();
-      yield ImageDownloadProgress(
-        currentBytes: data.length,
-        totalBytes: data.length,
-        imageBytes: data,
-      );
-      return; // 缓存命中后立即返回，禁止继续走网络下载逻辑
-    }
-
-    Future<Map<String, dynamic>?> Function()? onLoadFailed;
-
-    var configs = <String, dynamic>{};
-    if (sourceKey != null) {
-      var comicSource = ComicSource.find(sourceKey);
-      configs = (await comicSource!.getImageLoadingConfig
-              ?.call(imageKey, cid, eid)) ??
-          {};
-    }
-    var retryLimit = 5;
-    while (true) {
-      try {
-        configs['headers'] ??= {
-          'user-agent': webUA,
-        };
-
-        if (configs['onLoadFailed'] is JSInvokable) {
-          onLoadFailed = () async {
-            dynamic result = (configs['onLoadFailed'] as JSInvokable)([]);
-            if (result is Future) {
-              result = await result;
-            }
-            if (result is! Map<String, dynamic>) return null;
-            return result;
-          };
-        }
-
-        var requestUrl = (configs['url'] ?? imageKey) as String;
-        // 仅拦截裸文件名（无 scheme），file:///http:// 等放行
-        if (!requestUrl.contains('://')) {
-          throw Exception('Not a valid URL: "$requestUrl" (sourceKey=$sourceKey)');
-        }
-
-        var dio = AppDio(BaseOptions(
-          headers: configs['headers'],
-          method: configs['method'] ?? 'GET',
-          responseType: ResponseType.stream,
-        ));
-
-        var req = await dio.request<ResponseBody>(requestUrl,
-            data: configs['data']);
-        var stream = req.data?.stream ?? (throw "Error: Empty response body.");
-        int? expectedBytes = req.data!.contentLength;
-        if (expectedBytes == -1) {
-          expectedBytes = null;
-        }
-        var buffer = <int>[];
-        await for (var data in stream) {
-          buffer.addAll(data);
-          yield ImageDownloadProgress(
-            currentBytes: buffer.length,
-            totalBytes: expectedBytes,
-          );
-        }
-
-        if (configs['onResponse'] is JSInvokable) {
-          dynamic result = (configs['onResponse'] as JSInvokable)([Uint8List.fromList(buffer)]);
-          if (result is Future) {
-            result = await result;
-          }
-          if (result is List<int>) {
-            buffer = result;
-          } else {
-            throw "Error: Invalid onResponse result.";
-          }
-          (configs['onResponse'] as JSInvokable).free();
-        }
-
-        Uint8List data;
-        if (buffer is Uint8List) {
-          data = buffer;
-        } else {
-          data = Uint8List.fromList(buffer);
-          buffer.clear();
-        }
-
-        if (configs['modifyImage'] != null) {
-          var newData = await modifyImageWithScript(
-            data,
-            configs['modifyImage'],
-          );
-          data = newData;
-        }
-
-        await CacheManager().writeCache(cacheKey, data);
-        yield ImageDownloadProgress(
-          currentBytes: data.length,
-          totalBytes: data.length,
-          imageBytes: data,
-        );
-        return;
-      } catch (e) {
-        if (retryLimit < 0 || onLoadFailed == null) {
-          rethrow;
-        }
-        var newConfig = await onLoadFailed();
-        (configs['onLoadFailed'] as JSInvokable).free();
-        onLoadFailed = null;
-        if (newConfig == null) {
-          rethrow;
-        }
-        configs = newConfig;
-        retryLimit--;
-      } finally {
-        if (onLoadFailed != null) {
-          (configs['onLoadFailed'] as JSInvokable).free();
-        }
-      }
-    }
   }
 }
 
-/// A wrapper class for a stream that
-/// allows multiple listeners to listen to the same stream.
-class _StreamWrapper<T> {
-  final Stream<T> _stream;
-
-  final List<StreamController> controllers = [];
-
-  final void Function(_StreamWrapper<T> wrapper) onClosed;
-
-  bool isClosed = false;
-
-  _StreamWrapper(this._stream, this.onClosed) {
-    _listen();
-  }
-
-  void _listen() async {
-    try {
-      await for (var data in _stream) {
-        if (isClosed) {
-          break;
-        }
-        for (var controller in controllers) {
-          if (!controller.isClosed) {
-            controller.add(data);
-          }
-        }
-      }
-    }
-    catch (e) {
-      for (var controller in controllers) {
-        if (!controller.isClosed) {
-          controller.addError(e);
-        }
-      }
-    }
-    finally {
-      for (var controller in controllers) {
-        if (!controller.isClosed) {
-          controller.close();
-        }
-      }
-    }
-    controllers.clear();
-    isClosed = true;
-    onClosed(this);
-  }
-
-  Stream<T> get stream {
-    if (isClosed) {
-      throw Exception('Stream is closed');
-    }
-    var controller = StreamController<T>();
-    controllers.add(controller);
-    controller.onCancel = () {
-      controllers.remove(controller);
-    };
-    return controller.stream;
-  }
-
-  void cancel() {
-    for (var controller in controllers) {
-      controller.close();
-    }
-    controllers.clear();
-    isClosed = true;
-  }
-}
+// ═══════════════════════════════════════════════════════════════
+// ImageDownloadProgress
+// ═══════════════════════════════════════════════════════════════
 
 class ImageDownloadProgress {
   final int currentBytes;
-
   final int? totalBytes;
-
   final Uint8List? imageBytes;
 
   const ImageDownloadProgress({
