@@ -203,20 +203,25 @@ typedef _WebPDecodeFragmentScaledDart = Pointer<Uint8> Function(
 // ═══════════════════════════════════════════════════════════════
 
 DynamicLibrary _loadLibrary() {
-  try {
-    return DynamicLibrary.open('libvenera_webp.so');
-  } catch (_) {}
+  // [FIX-BUG-2] 原实现有 3 个 try block，第一次和第三次都加载 .so（死代码）。
+  // 改为循环尝试多个候选名，覆盖 Android/Linux / macOS / Windows。
+  final candidates = <String>[
+    'libvenera_webp.so',    // Android / Linux
+    'libvenera_webp.dylib', // macOS
+    'libvenera_webp.dll',   // Windows
+  ];
 
-  try {
-    return DynamicLibrary.open('libvenera_webp.dll');
-  } catch (_) {}
-
-  try {
-    return DynamicLibrary.open('libvenera_webp.so');
-  } catch (_) {}
+  Object? lastError;
+  for (final name in candidates) {
+    try {
+      return DynamicLibrary.open(name);
+    } catch (e) {
+      lastError = e;
+    }
+  }
 
   throw UnsupportedError(
-    'Cannot load libvenera_webp native library. '
+    'Cannot load libvenera_webp native library: $lastError. '
     'Make sure it is compiled for your platform.',
   );
 }

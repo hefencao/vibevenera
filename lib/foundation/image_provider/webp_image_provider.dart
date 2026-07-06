@@ -13,6 +13,8 @@ import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
+import 'image_fetch.dart';
+
 // ═══════════════════════════════════════════════════════════════
 // 高能效渲染引擎：核心组件
 // ═══════════════════════════════════════════════════════════════
@@ -140,7 +142,11 @@ class DecoderHolder {
         target = 2;
         priority = webp.DecodePriority.background;
       case PageState.last:
-        return;
+        // [FIX] last 也允许少量 refill，防止前一个页面的动画立即卡死。
+        // 用户可能快速回翻，保留 2 帧缓冲避免播放循环空转。
+        if (buf >= 2) return;
+        target = 2;
+        priority = webp.DecodePriority.background;
     }
 
     int refillCount = target - buf;
@@ -381,9 +387,11 @@ class DecoderManager {
     _lastKeys..clear()..addAll(lastKeys);
     _precacheKeys..clear()..addAll(precacheKeys);
 
+    // [FIX] 不在任何活跃集合中的 holder 统一降级为 precache，
+    // 而不是保留旧的 last 状态（会导致永远不 refill，动画卡死）。
     final keep = <String>{currentKey, ...nextKeys, ...lastKeys, ...precacheKeys};
     for (final e in _holders.entries) {
-      if (!keep.contains(e.key) && e.value.state != PageState.last && e.value.state != PageState.precache) {
+      if (!keep.contains(e.key)) {
         e.value.updateState(PageState.precache);
       }
     }
@@ -400,10 +408,11 @@ class DecoderManager {
     }
 
     if (cache != null) {
+      // L1 缓存 key 包含分辨率（如 imageKey@1080x2340），active pages 也必须用完整 key
       final activeKeys = {
-        currentKey.split('@').first,
-        ...nextKeys.map((k) => k.split('@').first),
-        ...lastKeys.map((k) => k.split('@').first),
+        currentKey,
+        ...nextKeys,
+        ...lastKeys,
       }.where((k) => k.isNotEmpty).toList();
       cache.setActivePages(activeKeys);
     }
@@ -415,7 +424,8 @@ class DecoderManager {
       final int targetIdx = currentPageIndex + i;
       if (targetIdx >= 0 && targetIdx < images.length) {
         final String imageKey = images[targetIdx];
-        if (!imageKey.startsWith('file://')) {
+        // 只对真正的网络 URL 发起预下载；本地路径（file:// 或普通文件系统路径）跳过
+        if (imageKey.contains('://') && !imageKey.startsWith('file://')) {
           neededDownloadKeys.add(imageKey);
         }
       }
@@ -600,9 +610,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     debugPrint('[WebP-PROVIDER] LOAD $imageKey');
     try {
 
-    // 1. 内存缓存命中检测
+    // 1. L1 内存缓存命中检测（解码数据包含分辨率，key 必须含分辨率）
     if (cache != null) {
-      final cached = cache!.getL1(imageKey);
+      final cached = cache!.getL1(_fullKey);
       if (cached != null) {
         debugPrint('[WebP] $short load: hit L1 (${(_nowUs() - t0) ~/ 1000}ms)');
         return _ImageResult.static(ImageInfo(image: cached, scale: scale));
@@ -655,7 +665,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       
       final completer = Completer<_ImageResult>();
       ui.decodeImageFromPixels(frame.rgba, frame.width, frame.height, ui.PixelFormat.rgba8888, (img) {
-        if (cache != null) cache!.putL1(imageKey, img);
+        if (cache != null) cache!.putL1(_fullKey, img);
         completer.complete(_ImageResult.static(ImageInfo(image: img, scale: scale)));
       });
       return completer.future;
@@ -690,25 +700,17 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     if (onlyIfCached) {
       bool exists = false;
       try {
-        if (imageKey.startsWith('file://')) {
-          final file = File(imageKey);
-          if (await file.exists() && await file.length() > 0) {
-            exists = true;
-          } else {
-            final decodedFile = File(Uri.decodeFull(imageKey));
-            if (await decodedFile.exists() && await decodedFile.length() > 0) {
-              exists = true;
-            }
-          }
+        // 统一走 tryLoadLocalFile + L2 缓存 + 磁盘缓存 检测
+        final local = await tryLoadLocalFile(imageKey);
+        if (local != null) {
+          exists = true;
+        } else if (cache != null && cache.hasL2(imageKey)) {
+          exists = true;
         } else {
-          if (cache != null && cache.hasL2(imageKey)) {
+          final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+          final cacheFile = await CacheManager().findCache(cacheKey);
+          if (cacheFile != null && await cacheFile.exists() && await cacheFile.length() > 0) {
             exists = true;
-          } else {
-            final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-            final cacheFile = await CacheManager().findCache(cacheKey);
-            if (cacheFile != null && await cacheFile.exists() && await cacheFile.length() > 0) {
-              exists = true;
-            }
           }
         }
       } catch (_) {}
@@ -794,74 +796,38 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     String imageKey, String? sourceKey, String cid, String eid, {
     StreamController<ImageChunkEvent>? chunkEvents,
   }) async {
-    final isLocal = imageKey.startsWith('file://');
-    
-    // 1. 本地 file:// 协议文件安全读取
-    if (isLocal) {
-      // [FIX-11] 使用 Uri.parse 正确处理 file:// URI → File 转换
-      final file = File(imageKey);
-      try {
-        if (await file.exists()) {
-          final bytes = await file.readAsBytes();
-          if (bytes.isNotEmpty) {
-            if (webp.isWebP(bytes)) {
-              return bytes;
-            } else {
-              throw FileSystemException('File is not a valid WebP format', imageKey);
-            }
-          }
-        }
-      } catch (e) {
-        throw FileSystemException('Failed to read local SAF/file WebP: $e', imageKey);
-      }
-      
-      throw FileSystemException('Local WebP file not found or inaccessible', imageKey);
-    }
-    
-    // 2. 本地直接路径文件（针对无协议头的本地路径检测）
-    final directFile = File(imageKey);
-    if (await directFile.exists()) {
-      final bytes = await directFile.readAsBytes();
-      if (bytes.isNotEmpty) {
-        if (webp.isWebP(bytes)) {
-          return bytes;
-        } else {
-          throw FileSystemException('Direct file is not a valid WebP', imageKey);
-        }
-      }
-    }
-    
-    // 先检查磁盘再从远端网络下载
-
-    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    // 1. 本地文件 — 统一走 tryLoadLocalFile，额外做 WebP 格式校验
     try {
-      final cacheFile = await CacheManager().findCache(cacheKey);
-      if (cacheFile != null && await cacheFile.exists()) {
-        final bytes = await cacheFile.readAsBytes();
-        if (bytes.isNotEmpty) {
-          debugPrint('[WebP-IO] Disk cache hit for ${_short(imageKey)}');
-          return bytes;
+      final local = await tryLoadLocalFile(imageKey);
+      if (local != null) {
+        if (!webp.isWebP(local)) {
+          throw FileSystemException('Local file is not a valid WebP format', imageKey);
         }
+        return local;
       }
+    } on FileSystemException {
+      rethrow;
     } catch (e) {
-      debugPrint('[WebP-IO] Disk cache check failed for ${_short(imageKey)}: $e');
+      // file:// 路径绝不跌落网络层
+      if (imageKey.startsWith('file://')) {
+        throw FileSystemException('Local file not accessible: $imageKey');
+      }
     }
 
-    Uint8List? result;
-    await for (final event in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
-      if (event.imageBytes != null) {
-        result = event.imageBytes!;
-        break;
-      }
-      if (chunkEvents != null && !chunkEvents.isClosed) {
-        chunkEvents.add(ImageChunkEvent(
-          cumulativeBytesLoaded: event.currentBytes,
-          expectedTotalBytes: event.totalBytes,
-        ));
-      }
-    }
-    if (result == null) throw Exception('Load failed: $imageKey');
-    return result;
+    // 2-3. 磁盘缓存 + 网络下载 — 委托给 image_fetch 共享函数
+    return fetchImageBytesRaw(
+      imageKey, sourceKey, cid, eid,
+      onProgress: chunkEvents != null
+          ? (current, total) {
+              if (!chunkEvents.isClosed) {
+                chunkEvents.add(ImageChunkEvent(
+                  cumulativeBytesLoaded: current,
+                  expectedTotalBytes: total,
+                ));
+              }
+            }
+          : null,
+    );
   }
 
   Future<Uint8List> _fetchBytes({
@@ -1043,7 +1009,9 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
         final frame = holder.consumeFrame();
         if (frame == null) {
           if (holder.disposed) continue;
-          await Future.delayed(const Duration(milliseconds: 16));
+          // 已降级的页面用较长间隔轮询，减少 CPU 空转和日志刷屏
+          final waitMs = holder.state == PageState.current ? 16 : 200;
+          await Future.delayed(Duration(milliseconds: waitMs));
           continue;
         }
 

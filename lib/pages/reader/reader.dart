@@ -813,4 +813,8 @@ abstract interface class _ImageViewController {
   Future<Uint8List?> getImageByOffset(Offset offset);
 
   String? getImageKeyByOffset(Offset offset);
+
+  /// WebP 三级缓存（生命周期绑定到具体的视图模式 State）。
+  /// [FIX-ARCH-2] 提升到接口，消除 `is _GalleryModeState` / `is _ContinuousModeState` 类型检查。
+  DecodedImageCache get webpCache;
 }

@@ -1,5 +1,30 @@
 part of 'reader.dart';
 
+// ═══════════════════════════════════════════════════════════════
+// _ImageViewControllerMixin — Gallery/Continuous 共享方法
+// ═══════════════════════════════════════════════════════════════
+
+/// [FIX-ARCH-3] 提取 _GalleryModeState 和 _ContinuousModeState 的公共方法。
+///
+/// 两种模式共享 [getImageByOffset]（实现完全相同）。
+mixin _ImageViewControllerMixin implements _ImageViewController {
+  /// 由混入此 mixin 的 State 子类提供。
+  BuildContext get context;
+
+  @override
+  Future<Uint8List?> getImageByOffset(Offset offset) async {
+    var imageKey = getImageKeyByOffset(offset);
+    if (imageKey == null) return null;
+    if (imageKey.startsWith("file://")) {
+      return await File(imageKey).readAsBytes();
+    } else {
+      return (await CacheManager().findCache(
+        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
+      ))!.readAsBytes();
+    }
+  }
+}
+
 class _ReaderImages extends StatefulWidget {
   const _ReaderImages({super.key});
 
@@ -149,7 +174,7 @@ class _GalleryMode extends StatefulWidget {
 }
 
 class _GalleryModeState extends State<_GalleryMode>
-    implements _ImageViewController {
+    with _ImageViewControllerMixin implements _ImageViewController {
   late PageController controller;
   int get preCacheCount => appdata.settings["preloadImageCount"];
   final Map<int, PhotoViewController> photoViewControllers = {};
@@ -194,6 +219,7 @@ class _GalleryModeState extends State<_GalleryMode>
   int fingers = 0;
 
   /// WebP 三级缓存（生命周期绑定本 State）
+  @override
   final DecodedImageCache webpCache = DecodedImageCache();
 
   @override
@@ -533,19 +559,6 @@ class _GalleryModeState extends State<_GalleryMode>
   bool handleOnTap(Offset location) => false;
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
   String? getImageKeyByOffset(Offset offset) {
     var range = getCurrentPageImageRange();
     if (range == null) return null;
@@ -594,7 +607,7 @@ class _ContinuousMode extends StatefulWidget {
 }
 
 class _ContinuousModeState extends State<_ContinuousMode>
-    implements _ImageViewController {
+    with _ImageViewControllerMixin implements _ImageViewController {
   late _ReaderState reader;
 
   var itemScrollController = ItemScrollController();
@@ -605,7 +618,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
   ScrollController get scrollController => _scrollController!;
 
   var isCTRLPressed = false;
-  static var _isMouseScrolling = false;
+  // [FIX-BUG-8] 改为实例变量，防止多个 Reader 实例互相干扰。
+  var _isMouseScrolling = false;
   var fingers = 0;
   bool disableScroll = false;
 
@@ -613,10 +627,18 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool delayedIsScrolling = false;
   var imageStates = <State<ComicImage>>{};
 
+  @override
   final DecodedImageCache webpCache = DecodedImageCache();
 
+  /// [FIX-BUG-7] 使用可取消的 Timer，并在回调中检查 mounted。
+  Timer? _delayedScrollingTimer;
+
   void delayedSetIsScrolling(bool value) {
-    Future.delayed(const Duration(milliseconds: 300), () => delayedIsScrolling = value);
+    _delayedScrollingTimer?.cancel();
+    _delayedScrollingTimer = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      delayedIsScrolling = value;
+    });
   }
 
   bool prepareToPrevChapter = false;
@@ -640,6 +662,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void dispose() {
+    _delayedScrollingTimer?.cancel();
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
     webpCache.dispose();
     _ComicImageState.clear();
@@ -974,19 +997,6 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool handleOnTap(Offset location) => delayedIsScrolling;
 
   @override
-  Future<Uint8List?> getImageByOffset(Offset offset) async {
-    var imageKey = getImageKeyByOffset(offset);
-    if (imageKey == null) return null;
-    if (imageKey.startsWith("file://")) {
-      return await File(imageKey).readAsBytes();
-    } else {
-      return (await CacheManager().findCache(
-        "$imageKey@${context.reader.type.sourceKey}@${context.reader.cid}@${context.reader.eid}",
-      ))!.readAsBytes();
-    }
-  }
-
-  @override
   String? getImageKeyByOffset(Offset offset) {
     String? imageKey;
     for (var imageState in imageStates) {
@@ -1012,13 +1022,7 @@ ImageProvider _createImageProviderFromKey(
   final size = WebPImageProvider.calculateTargetSize(context);
   final double dpr = MediaQuery.of(context).devicePixelRatio;
   var imageCtrl = reader._imageViewController;
-  // [FIX-4] Gallery 和 Continuous 模式都使用各自的 webpCache
-  DecodedImageCache? cache;
-  if (imageCtrl is _GalleryModeState) {
-    cache = imageCtrl.webpCache;
-  } else if (imageCtrl is _ContinuousModeState) {
-    cache = imageCtrl.webpCache;
-  }
+  final cache = imageCtrl?.webpCache;
 
   return WebPImageProvider(
     imageKey,
@@ -1040,18 +1044,13 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
 }
 
 void _updateWebPState(int page, BuildContext context) {
+  debugPrint('[WebP] Page:$page');
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
 
-  debugPrint('[WebP-PAGE] Page:$page');
-  var imageCtrl = reader._imageViewController;
-  DecodedImageCache? cache;
-  if (imageCtrl is _GalleryModeState) {
-    cache = imageCtrl.webpCache;
-  } else if (imageCtrl is _ContinuousModeState) {
-    cache = imageCtrl.webpCache;
-  }
+  final imageCtrl = reader._imageViewController;
+  final cache = imageCtrl?.webpCache;
 
   WebPImageProvider.onPageChanged(
     currentPageIndex: page - 1,

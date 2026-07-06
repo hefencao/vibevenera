@@ -15,6 +15,17 @@ class LocalComicImageProvider
 
   final LocalComic comic;
 
+  /// [FIX-QUAL-3] 支持的图片扩展名 — 单一来源，消除重复。
+  /// 原实现写了两遍且 "jpeg" 出现两次。
+  static const _supportedExtensions = {
+    '.jpg', '.jpeg', '.jpe', '.png', '.webp', '.gif',
+  };
+
+  bool _isImageFile(String? extension) {
+    if (extension == null) return false;
+    return _supportedExtensions.contains(extension.toLowerCase());
+  }
+
   @override
   Future<Uint8List> load(chunkEvents, checkStop) async {
     File? file = comic.coverFile;
@@ -27,7 +38,7 @@ class LocalComicImageProvider
       Directory? firstDir;
       await for (var entity in dir.list()) {
         if(entity is File) {
-          if(["jpg", "jpeg", "png", "webp", "gif", "jpe", "jpeg"].contains(entity.extension)) {
+          if(_isImageFile(entity.extension)) {
             file = entity;
             break;
           }
@@ -38,7 +49,7 @@ class LocalComicImageProvider
       if(file == null && firstDir != null) {
         await for (var entity in firstDir.list()) {
           if(entity is File) {
-            if(["jpg", "jpeg", "png", "webp", "gif", "jpe", "jpeg"].contains(entity.extension)) {
+            if(_isImageFile(entity.extension)) {
               file = entity;
               break;
             }

@@ -7,6 +7,7 @@ import 'package:venera/network/images.dart';
 import 'package:venera/utils/io.dart';
 import 'base_image_provider.dart';
 import 'cached_image.dart' as image_provider;
+import 'image_fetch.dart';
 
 class CachedImageProvider
     extends BaseImageProvider<image_provider.CachedImageProvider> {
@@ -43,15 +44,10 @@ class CachedImageProvider
     }
     loadingCount++;
     try {
-      if(url.startsWith("file://")) {
-        var file = File(url.substring(7));
-        return file.readAsBytes();
-      }
-      // 本地直接路径文件检测（无 protocol 头）
-      final directFile = File(url);
-      if (await directFile.exists()) {
-        return directFile.readAsBytes();
-      }
+      // 统一走 tryLoadLocalFile — 消除重复的 file:// / 本地文件检测
+      final local = await tryLoadLocalFile(url);
+      if (local != null) return local;
+
       await for (var progress in ImageDownloader.loadThumbnail(url, sourceKey, cid)) {
         checkStop();
         chunkEvents.add(ImageChunkEvent(

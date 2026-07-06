@@ -527,7 +527,8 @@ Future<Res<T>> _runWithRetry<T>(Future<T> Function() task,
       await Future.delayed(Duration(seconds: i + 1));
     }
   }
-  throw UnimplementedError();
+  // [FIX-BUG-4] 移除不可达的 throw UnimplementedError()
+  return Res.error('Unexpected: max retries exceeded');
 }
 
 class _ImageDownloadWrapper {
@@ -565,41 +566,45 @@ class _ImageDownloadWrapper {
 
   var retry = 3;
 
-  void start() async {
-    int lastBytes = 0;
-    try {
-      await for (var p in ImageDownloader.loadComicImageUnwrapped(
-          image, task.source.key, task.comicId, chapter)) {
+  /// [FIX-BUG-3] 将递归调用改为循环重试，避免潜在的栈溢出。
+  Future<void> start() async {
+    while (retry > 0) {
+      int lastBytes = 0;
+      try {
+        await for (var p in ImageDownloader.loadComicImageUnwrapped(
+            image, task.source.key, task.comicId, chapter)) {
+          if (isCancelled) {
+            return;
+          }
+          task.onData(p.currentBytes - lastBytes);
+          lastBytes = p.currentBytes;
+          if (p.imageBytes != null) {
+            var fileType = detectFileType(p.imageBytes!);
+            var file = saveTo.joinFile("$index${fileType.ext}");
+            await file.writeAsBytes(p.imageBytes!);
+            isComplete = true;
+            for (var c in completers) {
+              c.complete(this);
+            }
+            completers.clear();
+            return;
+          }
+        }
+        return; // stream completed without imageBytes
+      } catch (e, s) {
         if (isCancelled) {
           return;
         }
-        task.onData(p.currentBytes - lastBytes);
-        lastBytes = p.currentBytes;
-        if (p.imageBytes != null) {
-          var fileType = detectFileType(p.imageBytes!);
-          var file = saveTo.joinFile("$index${fileType.ext}");
-          await file.writeAsBytes(p.imageBytes!);
-          isComplete = true;
+        Log.error("Download", e.toString(), s);
+        retry--;
+        if (retry <= 0) {
+          error = e.toString();
           for (var c in completers) {
-            c.complete(this);
+            if (!c.isCompleted) {
+              c.complete(this);
+            }
           }
-          completers.clear();
-        }
-      }
-    } catch (e, s) {
-      if (isCancelled) {
-        return;
-      }
-      Log.error("Download", e.toString(), s);
-      retry--;
-      if (retry > 0) {
-        start();
-        return;
-      }
-      error = e.toString();
-      for (var c in completers) {
-        if (!c.isCompleted) {
-          c.complete(this);
+          return;
         }
       }
     }

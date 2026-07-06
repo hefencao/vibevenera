@@ -66,12 +66,25 @@ class NetworkCacheManager implements Interceptor {
     size = 0;
   }
 
+  /// [FIX-QUAL-4] 原实现两个分支都 return handler.next(err)（冗余）。
+  /// 改为在出错时尝试从缓存中恢复。
   @override
   void onError(DioException err, ErrorInterceptorHandler handler) {
     if (err.requestOptions.method != "GET") {
       return handler.next(err);
     }
-    return handler.next(err);
+    final cached = getCache(err.requestOptions.uri);
+    if (cached != null) {
+      handler.resolve(Response(
+        requestOptions: err.requestOptions,
+        data: cached.data,
+        headers: Headers.fromMap(cached.responseHeaders)
+          ..set('venera-cache', 'true'),
+        statusCode: 200,
+      ));
+      return;
+    }
+    handler.next(err);
   }
 
   @override

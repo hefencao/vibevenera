@@ -28,6 +28,10 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
 
   bool ignoreNextTag = false;
 
+  /// [FIX-BUG-6] 使用可取消的 Timer 替代 Future.delayed，防止 dispose 后回调。
+  Timer? _longPressTimer;
+  Timer? _doubleTapTimer;
+
   void ignoreNextTap() {
     ignoreNextTag = true;
   }
@@ -46,6 +50,14 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
     super.initState();
     context.readerScaffold._gestureDetectorState = this;
     reader = context.reader;
+  }
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    _doubleTapTimer?.cancel();
+    _tapGestureRecognizer.dispose();
+    super.dispose();
   }
 
   @override
@@ -71,7 +83,9 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
           }
           _dragInProgress = false;
         }
-        Future.delayed(_kLongPressMinTime, () {
+        _longPressTimer?.cancel();
+        _longPressTimer = Timer(_kLongPressMinTime, () {
+          if (!mounted) return;
           if (_lastTapPointer == event.pointer && fingers == 1) {
             if (_lastTapMoveDistance!.distanceSquared < 20.0 * 20.0) {
               onLongPressedDown(event.position);
@@ -190,7 +204,9 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
       }
     }
     _previousEvent = event;
-    Future.delayed(_kDoubleTapMaxTime, () {
+    _doubleTapTimer?.cancel();
+    _doubleTapTimer = Timer(_kDoubleTapMaxTime, () {
+      if (!mounted) return;
       if (_previousEvent == event) {
         onTap(location);
         _previousEvent = null;

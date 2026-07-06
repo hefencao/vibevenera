@@ -155,6 +155,13 @@ class _GroupedChaptersViewState extends State<_GroupedChaptersView>
 
   Widget buildGroup(String groupName) {
     var group = chapters.getGroup(groupName);
+    // [FIX-BUG-5] 预计算全局起始索引，避免 O(n²) 复杂度。
+    // 原实现在每个 item 中都从头遍历所有 group 计算全局 index。
+    int groupStartIndex = 0;
+    for (final g in chapters.groups) {
+      if (g == groupName) break;
+      groupStartIndex += chapters.getGroup(g).length;
+    }
     return SmoothCustomScrollView(
       controller: initialGroupName == groupName ? _scrollController : null,
       slivers: [
@@ -162,14 +169,7 @@ class _GroupedChaptersViewState extends State<_GroupedChaptersView>
           delegate: SliverChildBuilderDelegate(
             (context, index) {
               var name = group.values.elementAt(index);
-              var i = 0;
-              for (var g in chapters.groups) {
-                if (g == groupName) {
-                  break;
-                }
-                i += chapters.getGroup(g).length;
-              }
-              i += index + 1;
+              final i = groupStartIndex + index + 1;
               return _ChapterListTile(
                 onTap: () {
                   widget.reader.toChapter(i);

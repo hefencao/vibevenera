@@ -1,460 +1,318 @@
-17.webp load: fetch 17961KB (61ms)
-+decoder #1 186f 1080x806
-17.webp load: decoder 186f 1080x806 (10ms) total=83ms
-Page:17 ->
-17.webp PageState.precache to PageState.current
-w0 +2 frames 104ms gen=1
-17.webp +2 frames decode=109ms gpu=120ms total=229ms buf=2 gen=1
-w0 +5 frames 242ms gen=1
-17.webp +5 frames decode=242ms gpu=28ms total=270ms buf=5 gen=1
-w0 +3 frames 144ms gen=1
-17.webp +3 frames decode=144ms gpu=24ms total=168ms buf=3 gen=1
-w0 +4 frames 195ms gen=1
-17.webp +4 frames decode=195ms gpu=37ms total=232ms buf=4 gen=1
-w0 +4 frames 198ms gen=1
-17.webp +4 frames decode=199ms gpu=41ms total=241ms buf=4 gen=1
-w0 +4 frames 194ms gen=1
-17.webp +4 frames decode=194ms gpu=60ms total=254ms buf=4 gen=1
-w0 +4 frames 196ms gen=1
-17.webp +4 frames decode=196ms gpu=73ms total=270ms buf=4 gen=1
-w0 +4 frames 192ms gen=1
-17.webp +4 frames decode=192ms gpu=97ms total=290ms buf=4 gen=1
-w0 +4 frames 193ms gen=1
-17.webp +4 frames decode=193ms gpu=72ms total=265ms buf=4 gen=1
-w0 +4 frames 193ms gen=1
-17.webp +4 frames decode=193ms gpu=104ms total=297ms buf=4 gen=1
-w0 +4 frames 196ms gen=1
-17.webp +4 frames decode=196ms gpu=92ms total=289ms buf=4 gen=1
-Page:8 <-
-08.webp load: fetch 14336KB (65ms)
-+decoder #2 186f 1080x806
-08.webp PageState.precache to PageState.current
-08.webp load: decoder 186f 1080x806 (12ms) total=93ms
-w0 +2 frames 117ms gen=2
-17.webp +2 frames decode=117ms gpu=35ms total=152ms buf=2 gen=2
-w1 +2 frames 103ms gen=2
-08.webp +2 frames decode=103ms gpu=20ms total=124ms buf=2 gen=2
-w0 +5 frames 245ms gen=2
-w1 +5 frames 235ms gen=2
-17.webp +5 frames decode=245ms gpu=51ms total=296ms buf=7 gen=2
-08.webp +5 frames decode=235ms gpu=81ms total=317ms buf=5 gen=2
-w0 +3 frames 139ms gen=2
-08.webp +3 frames decode=139ms gpu=45ms total=185ms buf=3 gen=2
-w0 +4 frames 184ms gen=2
-08.webp +4 frames decode=184ms gpu=66ms total=251ms buf=4 gen=2
-w0 +4 frames 188ms gen=2
-08.webp +4 frames decode=188ms gpu=64ms total=253ms buf=4 gen=2
-w0 +4 frames 184ms gen=2
-08.webp +4 frames decode=184ms gpu=37ms total=221ms buf=4 gen=2
-w0 +4 frames 182ms gen=2
-08.webp +4 frames decode=182ms gpu=58ms total=241ms buf=4 gen=2
-w0 +4 frames 183ms gen=2
-08.webp +4 frames decode=183ms gpu=49ms total=232ms buf=4 gen=2
-09.webp load: fetch 17341KB (71ms)
-+decoder #3 186f 1080x806
-09.webp PageState.precache to PageState.last
-09.webp load: decoder 186f 1080x806 (11ms) total=95ms
-Page:9 ->
-09.webp PageState.last to PageState.current
-08.webp PageState.current to PageState.last
-w1 +2 frames 102ms gen=3
-09.webp +2 frames decode=103ms gpu=27ms total=130ms buf=2 gen=3
-w0 +5 frames 241ms gen=3
-09.webp +5 frames decode=241ms gpu=74ms total=316ms buf=5 gen=3
-w0 +3 frames 146ms gen=3
-09.webp +3 frames decode=147ms gpu=43ms total=190ms buf=3 gen=3
-w0 +4 frames 191ms gen=3
-09.webp +4 frames decode=191ms gpu=42ms total=233ms buf=4 gen=3
-10.webp load: fetch 5411KB (46ms)
-+decoder #4 93f 1080x806
-10.webp PageState.precache to PageState.next
-10.webp load: decoder 93f 1080x806 (3ms) total=53ms
-Page:10 ->
-10.webp PageState.next to PageState.current
-09.webp PageState.current to PageState.last
-w0 +2 frames 65ms gen=4
-10.webp +2 frames decode=65ms gpu=13ms total=78ms buf=2 gen=4
-w0 +5 frames 160ms gen=4
-10.webp +5 frames decode=160ms gpu=36ms total=196ms buf=5 gen=4
-w0 +3 frames 97ms gen=4
-10.webp +3 frames decode=97ms gpu=21ms total=119ms buf=6 gen=4
-w0 +2 frames 70ms gen=4
-10.webp +2 frames decode=71ms gpu=13ms total=84ms buf=6 gen=4
-w0 +2 frames 65ms gen=4
-10.webp +2 frames decode=66ms gpu=13ms total=79ms buf=6 gen=4
-w0 +2 frames 69ms gen=4
-10.webp +2 frames decode=69ms gpu=13ms total=82ms buf=6 gen=4
-w0 +2 frames 67ms gen=4
-10.webp +2 frames decode=67ms gpu=13ms total=81ms buf=6 gen=4
-w0 +2 frames 70ms gen=4
-10.webp +2 frames decode=70ms gpu=12ms total=83ms buf=6 gen=4
-w0 +2 frames 67ms gen=4
-10.webp +2 frames decode=67ms gpu=28ms total=95ms buf=6 gen=4
-w0 +2 frames 71ms gen=4
-10.webp +2 frames decode=72ms gpu=30ms total=103ms buf=6 gen=4
-w0 +2 frames 66ms gen=4
-10.webp +2 frames decode=66ms gpu=30ms total=97ms buf=6 gen=4
-Page:9 <-
-09.webp PageState.last to PageState.current
-08.webp PageState.last to PageState.next
-10.webp PageState.current to PageState.last
-w0 +1 frames 46ms gen=5
-08.webp +1 frames decode=61ms gpu=11ms total=73ms buf=1 gen=5
-w1 +2 frames 96ms gen=5
-09.webp +2 frames decode=96ms gpu=19ms total=115ms buf=2 gen=5
-w0 +5 frames 241ms gen=5
-09.webp +5 frames decode=241ms gpu=78ms total=320ms buf=5 gen=5
-w0 +3 frames 142ms gen=5
-09.webp +3 frames decode=142ms gpu=51ms total=193ms buf=3 gen=5
-w0 +4 frames 190ms gen=5
-09.webp +4 frames decode=190ms gpu=81ms total=272ms buf=4 gen=5
-w0 +4 frames 192ms gen=5
-Page:8 <-
-08.webp PageState.next to PageState.current
-09.webp PageState.current to PageState.last
-09.webp +4 frames decode=192ms gpu=91ms total=284ms buf=4 gen=5
-w0 +6 frames 275ms gen=6
-08.webp +6 frames decode=275ms gpu=108ms total=384ms buf=6 gen=6
-w0 +2 frames 92ms gen=6
-08.webp +2 frames decode=92ms gpu=40ms total=132ms buf=4 gen=6
-w0 +4 frames 185ms gen=6
-08.webp +4 frames decode=186ms gpu=96ms total=282ms buf=4 gen=6
-07.webp load: fetch 5555KB (44ms)
-+decoder #5 93f 1080x806
-07.webp PageState.precache to PageState.next
-07.webp load: decoder 93f 1080x806 (2ms) total=51ms
-w1 +2 frames 65ms gen=6
-Page:7 <-
-07.webp PageState.next to PageState.current
-08.webp PageState.current to PageState.last
-07.webp +2 frames decode=65ms gpu=26ms total=91ms buf=2 gen=6
-w1 +5 frames 161ms gen=7
-07.webp +5 frames decode=161ms gpu=88ms total=250ms buf=5 gen=7
-w0 +3 frames 97ms gen=7
-07.webp +3 frames decode=97ms gpu=45ms total=142ms buf=5 gen=7
-w0 +3 frames 102ms gen=7
-07.webp +3 frames decode=104ms gpu=42ms total=147ms buf=5 gen=7
-w0 +3 frames 98ms gen=7
-07.webp +3 frames decode=98ms gpu=44ms total=142ms buf=5 gen=7
-Page:8 ->
-08.webp PageState.last to PageState.current
-09.webp PageState.last to PageState.next
-10.webp PageState.last to PageState.next
-07.webp PageState.current to PageState.last
-w0 +1 frames 47ms gen=8
-09.webp +1 frames decode=71ms gpu=22ms total=94ms buf=1 gen=8
-w1 +2 frames 94ms gen=8
-w0 +1 frames 34ms gen=8
-10.webp +1 frames decode=108ms gpu=10ms total=118ms buf=1 gen=8
-08.webp +2 frames decode=94ms gpu=34ms total=129ms buf=2 gen=8
-w0 +5 frames 232ms gen=8
-08.webp +5 frames decode=232ms gpu=73ms total=306ms buf=5 gen=8
-Page:9 ->
-09.webp PageState.next to PageState.current
-08.webp PageState.current to PageState.last
-w1 +6 frames 286ms gen=9
-09.webp +6 frames decode=286ms gpu=104ms total=390ms buf=6 gen=9
-w0 +2 frames 94ms gen=9
-09.webp +2 frames decode=94ms gpu=48ms total=143ms buf=3 gen=9
-w0 +4 frames 190ms gen=9
-09.webp +4 frames decode=190ms gpu=72ms total=263ms buf=4 gen=9
-w0 +4 frames 192ms gen=9
-09.webp +4 frames decode=192ms gpu=60ms total=252ms buf=4 gen=9
-Page:10 ->
-10.webp PageState.next to PageState.current
-09.webp PageState.current to PageState.last
-w1 +2 frames 65ms gen=10
-10.webp +2 frames decode=65ms gpu=28ms total=94ms buf=2 gen=10
-w0 +5 frames 160ms gen=10
-10.webp +5 frames decode=160ms gpu=118ms total=279ms buf=5 gen=10
-w0 +3 frames 96ms gen=10
-10.webp +3 frames decode=97ms gpu=49ms total=147ms buf=5 gen=10
-w0 +3 frames 97ms gen=10
-10.webp +3 frames decode=97ms gpu=64ms total=161ms buf=5 gen=10
-w0 +3 frames 99ms gen=10
-10.webp +3 frames decode=99ms gpu=89ms total=189ms buf=5 gen=10
-w0 +3 frames 98ms gen=10
-11.webp load: fetch 5564KB (54ms)
-+decoder #6 93f 1080x806
-11.webp PageState.precache to PageState.next
-11.webp load: decoder 93f 1080x806 (2ms) total=60ms
-10.webp +3 frames decode=98ms gpu=35ms total=133ms buf=6 gen=10
-w1 +2 frames 73ms gen=10
-w0 +2 frames 80ms gen=10
-Page:11 ->
-11.webp PageState.next to PageState.current
-10.webp PageState.current to PageState.last
-10.webp +2 frames decode=73ms gpu=36ms total=109ms buf=6 gen=10
-11.webp +2 frames decode=81ms gpu=37ms total=119ms buf=2 gen=10
-w0 +5 frames 164ms gen=11
-07.webp evicted (TTL)
--decoder (5 remain)
-11.webp +5 frames decode=164ms gpu=104ms total=269ms buf=5 gen=11
-w0 +3 frames 96ms gen=11
-11.webp +3 frames decode=96ms gpu=99ms total=195ms buf=5 gen=11
-w0 +3 frames 96ms gen=11
-11.webp +3 frames decode=96ms gpu=86ms total=182ms buf=5 gen=11
-w0 +3 frames 96ms gen=11
-11.webp +3 frames decode=96ms gpu=73ms total=170ms buf=5 gen=11
-w0 +3 frames 98ms gen=11
-12.webp load: fetch 5691KB (50ms)
-+decoder #6 93f 1080x806
-12.webp PageState.precache to PageState.next
-12.webp load: decoder 93f 1080x806 (2ms) total=56ms
-11.webp +3 frames decode=98ms gpu=44ms total=143ms buf=5 gen=11
-w0 +2 frames 57ms gen=11
-Page:12 ->
-12.webp PageState.next to PageState.current
-11.webp PageState.current to PageState.last
-12.webp +2 frames decode=57ms gpu=49ms total=106ms buf=2 gen=11
-08.webp evicted (TTL)
--decoder (5 remain)
-w1 +5 frames 186ms gen=12
-12.webp +5 frames decode=186ms gpu=148ms total=335ms buf=5 gen=12
-w0 +3 frames 106ms gen=12
-12.webp +3 frames decode=106ms gpu=93ms total=200ms buf=5 gen=12
-w0 +3 frames 103ms gen=12
-12.webp +3 frames decode=103ms gpu=76ms total=179ms buf=5 gen=12
-w0 +3 frames 105ms gen=12
-12.webp +3 frames decode=105ms gpu=90ms total=196ms buf=5 gen=12
-09.webp evicted (TTL)
--decoder (4 remain)
-w0 +3 frames 104ms gen=12
-12.webp +3 frames decode=105ms gpu=81ms total=186ms buf=5 gen=12
-w0 +3 frames 98ms gen=12
-12.webp +3 frames decode=98ms gpu=84ms total=182ms buf=5 gen=12
-w0 +3 frames 106ms gen=12
-12.webp +3 frames decode=107ms gpu=89ms total=196ms buf=5 gen=12
-w0 +3 frames 104ms gen=12
-12.webp +3 frames decode=104ms gpu=92ms total=197ms buf=5 gen=12
-w0 +3 frames 98ms gen=12
-12.webp +3 frames decode=99ms gpu=93ms total=192ms buf=5 gen=12
-10.webp evicted (TTL)
--decoder (3 remain)
-w0 +3 frames 104ms gen=12
-12.webp +3 frames decode=104ms gpu=81ms total=186ms buf=5 gen=12
-w0 +3 frames 98ms gen=12
-12.webp +3 frames decode=98ms gpu=92ms total=191ms buf=5 gen=12
-13.webp load: fetch 20469KB (62ms)
-+decoder #4 186f 1080x806
-13.webp PageState.precache to PageState.next
-13.webp load: decoder 186f 1080x806 (19ms) total=107ms
-w0 +3 frames 117ms gen=12
-Page:13 ->
-13.webp PageState.next to PageState.current
-12.webp PageState.current to PageState.last
-17.webp PageState.current to PageState.precache
-12.webp +3 frames decode=117ms gpu=67ms total=185ms buf=5 gen=12
-w0 +2 frames 98ms gen=13
-13.webp +2 frames decode=98ms gpu=50ms total=149ms buf=2 gen=13
-w0 +5 frames 249ms gen=13
-11.webp evicted (TTL)
--decoder (3 remain)
-13.webp +5 frames decode=249ms gpu=121ms total=371ms buf=5 gen=13
-w0 +3 frames 147ms gen=13
-13.webp +3 frames decode=147ms gpu=84ms total=231ms buf=3 gen=13
-w0 +4 frames 195ms gen=13
-13.webp +4 frames decode=195ms gpu=121ms total=316ms buf=4 gen=13
-w0 +4 frames 201ms gen=13
-13.webp +4 frames decode=201ms gpu=99ms total=301ms buf=4 gen=13
-w0 +4 frames 198ms gen=13
-13.webp +4 frames decode=198ms gpu=124ms total=323ms buf=4 gen=13
-w0 +4 frames 202ms gen=13
-13.webp +4 frames decode=202ms gpu=104ms total=307ms buf=4 gen=13
-w0 +4 frames 198ms gen=13
-13.webp +4 frames decode=198ms gpu=105ms total=303ms buf=4 gen=13
-17.webp evicted (TTL)
--decoder (2 remain)
-w0 +4 frames 199ms gen=13
-13.webp +4 frames decode=199ms gpu=104ms total=304ms buf=4 gen=13
-w0 +4 frames 198ms gen=13
-13.webp +4 frames decode=199ms gpu=113ms total=312ms buf=4 gen=13
-w0 +4 frames 199ms gen=13
-13.webp +4 frames decode=199ms gpu=100ms total=299ms buf=4 gen=13
-Page:14 ->
-13.webp PageState.current to PageState.last
-14.webp load: fetch 20148KB (56ms)
-+decoder #3 186f 1080x806
-14.webp PageState.precache to PageState.current
-14.webp load: decoder 186f 1080x806 (15ms) total=88ms
-12.webp evicted (TTL)
--decoder (2 remain)
-w1 +2 frames 106ms gen=14
-14.webp +2 frames decode=106ms gpu=44ms total=151ms buf=2 gen=14
-w0 +5 frames 255ms gen=14
-14.webp +5 frames decode=255ms gpu=151ms total=407ms buf=5 gen=14
-w0 +3 frames 149ms gen=14
-14.webp +3 frames decode=149ms gpu=98ms total=247ms buf=3 gen=14
-w0 +4 frames 197ms gen=14
-14.webp +4 frames decode=197ms gpu=70ms total=268ms buf=4 gen=14
-w0 +4 frames 195ms gen=14
-14.webp +4 frames decode=196ms gpu=108ms total=304ms buf=4 gen=14
-w0 +4 frames 200ms gen=14
-Page:13 <-
-13.webp PageState.last to PageState.current
-14.webp PageState.current to PageState.last
-14.webp +4 frames decode=200ms gpu=102ms total=303ms buf=4 gen=14
-w0 +2 frames 101ms gen=15
-13.webp +2 frames decode=101ms gpu=52ms total=154ms buf=2 gen=15
-w0 +5 frames 247ms gen=15
-13.webp +5 frames decode=248ms gpu=140ms total=388ms buf=5 gen=15
-w0 +3 frames 147ms gen=15
-13.webp +3 frames decode=147ms gpu=84ms total=232ms buf=3 gen=15
-w0 +4 frames 195ms gen=15
-13.webp +4 frames decode=196ms gpu=112ms total=308ms buf=4 gen=15
-w0 +4 frames 209ms gen=15
-13.webp +4 frames decode=209ms gpu=109ms total=319ms buf=4 gen=15
-w0 +4 frames 198ms gen=15
-13.webp +4 frames decode=199ms gpu=115ms total=314ms buf=4 gen=15
-w0 +4 frames 197ms gen=15
-13.webp +4 frames decode=197ms gpu=124ms total=322ms buf=4 gen=15
-Page:12 <-
-13.webp PageState.current to PageState.last
-12.webp reloading (holder evicted)...
-12.webp load: L2 5691KB (0ms)
-+decoder #3 93f 1080x806
-12.webp PageState.precache to PageState.current
-12.webp load: decoder 93f 1080x806 (5ms) total=8ms
-w1 +2 frames 81ms gen=16
-12.webp +2 frames decode=82ms gpu=58ms total=140ms buf=2 gen=16
-14.webp evicted (TTL)
--decoder (2 remain)
-w0 +5 frames 171ms gen=16
-12.webp +5 frames decode=171ms gpu=129ms total=301ms buf=5 gen=16
-w0 +3 frames 98ms gen=16
-12.webp +3 frames decode=98ms gpu=87ms total=186ms buf=5 gen=16
-w0 +3 frames 99ms gen=16
-12.webp +3 frames decode=99ms gpu=92ms total=191ms buf=5 gen=16
-Page:13 ->
-13.webp PageState.last to PageState.current
-12.webp PageState.current to PageState.last
-w1 +2 frames 97ms gen=17
-13.webp +2 frames decode=98ms gpu=57ms total=155ms buf=2 gen=17
-w0 +5 frames 249ms gen=17
-13.webp +5 frames decode=249ms gpu=108ms total=357ms buf=5 gen=17
-14.webp reloading (holder evicted)...
-14.webp load: L2 20148KB (0ms)
-+decoder #3 186f 1080x806
-14.webp PageState.precache to PageState.next
-14.webp load: decoder 186f 1080x806 (10ms) total=22ms
-Page:14 ->
-14.webp PageState.next to PageState.current
-13.webp PageState.current to PageState.last
-w0 +2 frames 100ms gen=18
-14.webp +2 frames decode=100ms gpu=59ms total=159ms buf=2 gen=18
-w0 +5 frames 252ms gen=18
-14.webp +5 frames decode=252ms gpu=132ms total=384ms buf=5 gen=18
-w0 +3 frames 149ms gen=18
-14.webp +3 frames decode=149ms gpu=77ms total=226ms buf=3 gen=18
-w0 +4 frames 203ms gen=18
-14.webp +4 frames decode=203ms gpu=100ms total=304ms buf=4 gen=18
-w0 +4 frames 195ms gen=18
-14.webp +4 frames decode=195ms gpu=98ms total=294ms buf=4 gen=18
-12.webp evicted (TTL)
--decoder (2 remain)
-Page:15 ->
-14.webp PageState.current to PageState.last
-15.webp load: fetch 17728KB (85ms)
-+decoder #3 186f 1080x806
-15.webp PageState.precache to PageState.current
-15.webp load: decoder 186f 1080x806 (13ms) total=122ms
-w1 +2 frames 100ms gen=19
-15.webp +2 frames decode=100ms gpu=62ms total=163ms buf=2 gen=19
-w0 +5 frames 242ms gen=19
-15.webp +5 frames decode=242ms gpu=150ms total=393ms buf=5 gen=19
-w0 +3 frames 148ms gen=19
-15.webp +3 frames decode=148ms gpu=77ms total=226ms buf=3 gen=19
-13.webp evicted (TTL)
--decoder (2 remain)
-w0 +4 frames 193ms gen=19
-15.webp +4 frames decode=193ms gpu=111ms total=305ms buf=4 gen=19
-w0 +4 frames 191ms gen=19
-15.webp +4 frames decode=192ms gpu=134ms total=326ms buf=4 gen=19
-Page:16 ->
-15.webp PageState.current to PageState.last
-16.webp load: fetch 17890KB (62ms)
-+decoder #3 186f 1080x806
-16.webp PageState.precache to PageState.current
-16.webp load: decoder 186f 1080x806 (8ms) total=82ms
-w1 +2 frames 99ms gen=20
-16.webp +2 frames decode=99ms gpu=55ms total=154ms buf=2 gen=20
-w0 +5 frames 245ms gen=20
-16.webp +5 frames decode=245ms gpu=130ms total=376ms buf=5 gen=20
-w0 +3 frames 143ms gen=20
-16.webp +3 frames decode=143ms gpu=92ms total=235ms buf=3 gen=20
-w0 +4 frames 190ms gen=20
-16.webp +4 frames decode=191ms gpu=113ms total=304ms buf=4 gen=20
-w0 +4 frames 193ms gen=20
-14.webp evicted (TTL)
--decoder (2 remain)
-16.webp +4 frames decode=193ms gpu=124ms total=318ms buf=4 gen=20
-w0 +4 frames 190ms gen=20
-16.webp +4 frames decode=190ms gpu=109ms total=300ms buf=4 gen=20
-w0 +4 frames 191ms gen=20
-16.webp +4 frames decode=192ms gpu=125ms total=317ms buf=4 gen=20
-w0 +4 frames 190ms gen=20
-15.webp evicted (TTL)
--decoder (1 remain)
-16.webp +4 frames decode=191ms gpu=129ms total=320ms buf=4 gen=20
-w0 +4 frames 190ms gen=20
-16.webp +4 frames decode=190ms gpu=118ms total=309ms buf=4 gen=20
-w0 +4 frames 191ms gen=20
-16.webp +4 frames decode=191ms gpu=111ms total=303ms buf=4 gen=20
-w0 +4 frames 191ms gen=20
-16.webp +4 frames decode=191ms gpu=110ms total=302ms buf=4 gen=20
-Page:17 ->
-16.webp PageState.current to PageState.last
-17.webp reloading (holder evicted)...
-17.webp load: fetch 17961KB (77ms)
-+decoder #2 186f 1080x806
-17.webp PageState.precache to PageState.current
-17.webp load: decoder 186f 1080x806 (8ms) total=94ms
-w0 +2 frames 104ms gen=21
-17.webp +2 frames decode=104ms gpu=50ms total=155ms buf=2 gen=21
-w0 +5 frames 250ms gen=21
-17.webp +5 frames decode=250ms gpu=146ms total=397ms buf=5 gen=21
-w0 +3 frames 145ms gen=21
-17.webp +3 frames decode=145ms gpu=82ms total=227ms buf=3 gen=21
-w0 +4 frames 193ms gen=21
-17.webp +4 frames decode=193ms gpu=120ms total=313ms buf=4 gen=21
-w0 +4 frames 193ms gen=21
-17.webp +4 frames decode=193ms gpu=122ms total=315ms buf=4 gen=21
-w0 +4 frames 193ms gen=21
-17.webp +4 frames decode=193ms gpu=118ms total=311ms buf=4 gen=21
-w0 +4 frames 192ms gen=21
-17.webp +4 frames decode=192ms gpu=115ms total=308ms buf=4 gen=21
-w0 +4 frames 192ms gen=21
-17.webp +4 frames decode=193ms gpu=123ms total=317ms buf=4 gen=21
-Page:16 <-
-16.webp PageState.last to PageState.current
-17.webp PageState.current to PageState.last
-w1 +2 frames 116ms gen=22
-16.webp +2 frames decode=116ms gpu=63ms total=179ms buf=2 gen=22
-w0 +5 frames 241ms gen=22
-16.webp +5 frames decode=241ms gpu=160ms total=401ms buf=5 gen=22
-w0 +3 frames 146ms gen=22
-16.webp +3 frames decode=146ms gpu=87ms total=234ms buf=3 gen=22
-w0 +4 frames 189ms gen=22
-16.webp +4 frames decode=189ms gpu=108ms total=297ms buf=4 gen=22
-w0 +4 frames 191ms gen=22
-16.webp +4 frames decode=191ms gpu=62ms total=254ms buf=4 gen=22
-w0 +4 frames 191ms gen=22
-16.webp +4 frames decode=191ms gpu=121ms total=313ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=133ms total=324ms buf=4 gen=22
-17.webp evicted (TTL)
--decoder (1 remain)
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=110ms total=301ms buf=4 gen=22
-w0 +4 frames 189ms gen=22
-16.webp +4 frames decode=189ms gpu=101ms total=290ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=122ms total=312ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=101ms total=291ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=79ms total=269ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=190ms gpu=107ms total=298ms buf=4 gen=22
-w0 +4 frames 190ms gen=22
-16.webp +4 frames decode=191ms gpu=103ms total=294ms buf=4 gen=22
+[WebP] 17.webp evicted
+[WebP] 18.webp evicted
+[WebP] 13.webp evicted
+[WebP] 12.webp evicted
+[WebP] -decoder (14 remain)
+[WebP] 16.webp evicted
+[WebP] -decoder (13 remain)
+[WebP] 14.webp evicted
+[WebP] 15.webp evicted
+[WebP] 11.webp evicted
+[WebP] -decoder (12 remain)
+[WebP] 10.webp evicted
+[WebP] -decoder (11 remain)
+[WebP] 09.webp evicted
+[WebP] -decoder (10 remain)
+[WebP] 03.webp evicted
+[WebP] -decoder (9 remain)
+[WebP] 04.webp evicted
+[WebP] -decoder (8 remain)
+[WebP] -decoder (7 remain)
+[WebP] -decoder (6 remain)
+[WebP] -decoder (5 remain)
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000018.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000017.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000016.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000015.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000014.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000013.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000012.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000019.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000020.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000021.webp
+[WebP] 18.webp PageState.precache to PageState.current
+[WebP] 18.webp decoder 186f 1080x806 (143ms)
+[WebP-COMPLETER] _onResult 18.webp type=animated
+[WebP] 17.webp PageState.precache to PageState.last
+[WebP] 17.webp decoder 186f 1080x806 (139ms)
+[WebP-COMPLETER] _onResult 17.webp type=animated
+[WebP] 15.webp decoder 186f 1080x806 (178ms)
+[WebP-COMPLETER] _onResult 15.webp type=animated
+[WebP] 16.webp decoder 186f 1080x806 (494ms)
+[WebP-COMPLETER] _onResult 16.webp type=animated
+[WebP] 14.webp decoder 186f 1080x806 (314ms)
+[WebP-COMPLETER] _onResult 14.webp type=animated
+[WebP] 12.webp decoder 93f 1080x806 (121ms)
+[WebP-COMPLETER] _onResult 12.webp type=animated
+[WebP] 13.webp decoder 186f 1080x806 (295ms)
+[WebP-COMPLETER] _onResult 13.webp type=animated
+[WebP] 20.webp pending, waiting
+[WebP] 19.webp PageState.precache to PageState.next
+[WebP] 19.webp decoder 186f 1080x806 (337ms)
+[WebP-COMPLETER] _onResult 19.webp type=animated
+[WebP] 21.webp pending, waiting
+[WebP] 20.webp pending, waiting
+[WebP] 21.webp decoder 186f 1080x806 (315ms)
+[WebP-COMPLETER] _onResult 21.webp type=animated
+[WebP] 20.webp PageState.precache to PageState.next
+[WebP] 20.webp decoder 186f 1080x806 (683ms)
+[WebP-COMPLETER] _onResult 20.webp type=animated
+[WebP] 17.webp PageState.last to PageState.precache
+[WebP] 19.webp PageState.next to PageState.current
+[WebP] 21.webp PageState.precache to PageState.next
+[WebP] 18.webp PageState.current to PageState.last
+[WebP] 21.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 18.webp PageState.last to PageState.precache
+[WebP] 20.webp PageState.next to PageState.current
+[WebP] 19.webp PageState.current to PageState.last
+[WebP] 14.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 19.webp PageState.last to PageState.current
+[WebP] 20.webp PageState.current to PageState.next
+[WebP] 18.webp PageState.precache to PageState.last
+[WebP] 13.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 18.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 16.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 19.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 15.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 17.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 18.webp PageState.last to PageState.current
+[WebP] 19.webp PageState.current to PageState.next
+[WebP] 17.webp PageState.precache to PageState.last
+[WebP] 21.webp PageState.next to PageState.precache
+[WebP] 21.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 12.webp evicted
+[WebP] -decoder (14 remain)
+[WebP] 14.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 12.webp reloading (holder evicted)...
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000012.webp
+[WebP] 20.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 17.webp PageState.last to PageState.current
+[WebP] 18.webp PageState.current to PageState.next
+[WebP] 16.webp PageState.precache to PageState.last
+[WebP] 20.webp PageState.next to PageState.precache
+[WebP] 16.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 16.webp PageState.last to PageState.current
+[WebP] 17.webp PageState.current to PageState.next
+[WebP] 15.webp PageState.precache to PageState.last
+[WebP] 19.webp PageState.next to PageState.precache
+[WebP] 18.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 15.webp PageState.last to PageState.current
+[WebP] 16.webp PageState.current to PageState.next
+[WebP] 14.webp PageState.precache to PageState.last
+[WebP] 18.webp PageState.next to PageState.precache
+[WebP] 17.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 13.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 14.webp PageState.last to PageState.current
+[WebP] 15.webp PageState.current to PageState.next
+[WebP] 13.webp PageState.precache to PageState.last
+[WebP] 17.webp PageState.next to PageState.precache
+[WebP] 21.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 13.webp PageState.last to PageState.current
+[WebP] 14.webp PageState.current to PageState.next
+[WebP] 16.webp PageState.next to PageState.precache
+[WebP] 20.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 13.webp PageState.current to PageState.next
+[WebP] 15.webp PageState.next to PageState.precache
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000011.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000010.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000009.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000008.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000007.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000006.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000005.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000004.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000003.webp
+[WebP] 18.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000002.webp
+[WebP] 14.webp PageState.next to PageState.precache
+[WebP] 19.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 13.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 15.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 12.webp PageState.precache to PageState.next
+[WebP] 12.webp decoder 93f 1080x806 (800ms)
+[WebP] 20.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 11.webp PageState.precache to PageState.current
+[WebP] 11.webp decoder 93f 1080x806 (179ms)
+[WebP-COMPLETER] _onResult 11.webp type=animated
+[WebP] 14.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000001.webp
+[WebP] 11.webp PageState.current to PageState.next
+[WebP] 13.webp PageState.next to PageState.precache
+[WebP] 13.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 09.webp PageState.precache to PageState.last
+[WebP] 09.webp decoder 186f 1080x806 (364ms)
+[WebP-COMPLETER] _onResult 09.webp type=animated
+[WebP] 16.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 11.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 07.webp decoder 93f 1080x806 (542ms)
+[WebP-COMPLETER] _onResult 07.webp type=animated
+[WebP] 05.webp decoder 186f 1080x798 (404ms)
+[WebP-COMPLETER] _onResult 05.webp type=animated
+[WebP] 17.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 03.webp decoder 186f 1080x798 (394ms)
+[WebP-COMPLETER] _onResult 03.webp type=animated
+[WebP] 19.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 10.webp PageState.precache to PageState.current
+[WebP] 10.webp decoder 93f 1080x806 (1006ms)
+[WebP-COMPLETER] _onResult 10.webp type=animated
+[WebP] 12.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 08.webp decoder 186f 1080x806 (1067ms)
+[WebP-COMPLETER] _onResult 08.webp type=animated
+[WebP] 20.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 06.webp decoder 93f 1080x806 (1080ms)
+[WebP-COMPLETER] _onResult 06.webp type=animated
+[WebP] 04.webp decoder 186f 1080x798 (898ms)
+[WebP-COMPLETER] _onResult 04.webp type=animated
+[WebP] 01.webp decoder 93f 1080x806 (627ms)
+[WebP-COMPLETER] _onResult 01.webp type=animated
+[WebP] 02.webp decoder 186f 1080x806 (789ms)
+[WebP-COMPLETER] _onResult 02.webp type=animated
+[WebP] 18.webp evicted
+[WebP] -decoder (25 remain)
+[WebP] 17.webp evicted
+[WebP] -decoder (24 remain)
+[WebP] 21.webp evicted
+[WebP] -decoder (23 remain)
+[WebP] 15.webp evicted
+[WebP] -decoder (22 remain)
+[WebP] 16.webp evicted
+[WebP] -decoder (21 remain)
+[WebP] 14.webp evicted
+[WebP] -decoder (20 remain)
+[WebP] 13.webp evicted
+[WebP] -decoder (19 remain)
+[WebP] 19.webp evicted
+[WebP] 20.webp evicted
+[WebP] -decoder (18 remain)
+[WebP] 09.webp evicted
+[WebP] 07.webp evicted
+[WebP] -decoder (17 remain)
+[WebP] 05.webp evicted
+[WebP] -decoder (16 remain)
+[WebP] 03.webp evicted
+[WebP] 08.webp evicted
+[WebP] -decoder (15 remain)
+[WebP] 06.webp evicted
+[WebP] -decoder (14 remain)
+[WebP] 04.webp evicted
+[WebP] -decoder (13 remain)
+[WebP] 01.webp evicted
+[WebP] -decoder (12 remain)
+[WebP] 02.webp evicted
+[WebP] -decoder (11 remain)
+[WebP] -decoder (10 remain)
+[WebP] -decoder (9 remain)
+[WebP] -decoder (8 remain)
+PS D:\work\Source\venera> adb logcat -d -v time 2>&1 | grep -E "WebP|Page:|COMIC" | grep -v "WebP-T" | grep -v "WebP_Native"
+[WebP-COMPLETER] DISPOSED 17.webp
+[WebP-COMPLETER] DISPOSED 18.webp
+[WebP-COMPLETER] DISPOSED 15.webp
+[WebP-COMPLETER] DISPOSED 16.webp
+[WebP-COMPLETER] DISPOSED 14.webp
+[WebP-COMPLETER] DISPOSED 19.webp
+[WebP-COMPLETER] DISPOSED 21.webp
+[WebP-COMPLETER] DISPOSED 20.webp
+[WebP-COMPLETER] DISPOSED 13.webp
+[WebP-COMPLETER] DISPOSED 12.webp
+[WebP-COMPLETER] DISPOSED 07.webp
+[WebP-COMPLETER] DISPOSED 11.webp
+[WebP-COMPLETER] DISPOSED 09.webp
+[WebP-COMPLETER] DISPOSED 03.webp
+[WebP-COMPLETER] DISPOSED 05.webp
+[WebP-COMPLETER] DISPOSED 10.webp
+[WebP-COMPLETER] DISPOSED 08.webp
+[WebP-COMPLETER] DISPOSED 01.webp
+[WebP-COMPLETER] DISPOSED 02.webp
+[WebP-COMPLETER] DISPOSED 06.webp
+[WebP-COMPLETER] DISPOSED 04.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000009.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000008.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000007.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000006.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000005.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000004.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000003.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000010.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000011.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000012.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000013.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000014.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000015.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000016.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000017.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000018.webp
+[WebP-PROVIDER] LOAD file://android://primary:unkloser/eHentai/3806722-[HalfLove] [馃帴 Animated WEBP] Mikado Ryouko - To Love-Ru (Patreon) [AI Generated]/00000019.webp
+[WebP] 09.webp PageState.precache to PageState.last
+[WebP] 09.webp decoder 186f 1080x806 (173ms)
+[WebP-COMPLETER] _onResult 09.webp type=animated
+[WebP] 08.webp decoder 186f 1080x806 (92ms)
+[WebP-COMPLETER] _onResult 08.webp type=animated
+[WebP] 07.webp decoder 93f 1080x806 (203ms)
+[WebP-COMPLETER] _onResult 07.webp type=animated
+[WebP] 06.webp decoder 93f 1080x806 (187ms)
+[WebP-COMPLETER] _onResult 06.webp type=animated
+[WebP] 05.webp decoder 186f 1080x798 (188ms)
+[WebP-COMPLETER] _onResult 05.webp type=animated
+[WebP-COMPLETER] _onResult 10.webp type=animated
+[WebP-COMPLETER] _onResult 11.webp type=animated
+[WebP] 04.webp decoder 186f 1080x798 (171ms)
+[WebP-COMPLETER] _onResult 04.webp type=animated
+[WebP-COMPLETER] _onResult 12.webp type=animated
+[WebP] 03.webp decoder 186f 1080x798 (206ms)
+[WebP-COMPLETER] _onResult 03.webp type=animated
+[WebP] 13.webp decoder 186f 1080x806 (149ms)
+[WebP-COMPLETER] _onResult 13.webp type=animated
+[WebP] 15.webp decoder 186f 1080x806 (325ms)
+[WebP-COMPLETER] _onResult 15.webp type=animated
+[WebP] 14.webp decoder 186f 1080x806 (424ms)
+[WebP-COMPLETER] _onResult 14.webp type=animated
+[WebP] 16.webp decoder 186f 1080x806 (324ms)
+[WebP-COMPLETER] _onResult 16.webp type=animated
+[WebP] 17.webp decoder 186f 1080x806 (326ms)
+[WebP-COMPLETER] _onResult 17.webp type=animated
+[WebP] 19.webp decoder 186f 1080x806 (257ms)
+[WebP-COMPLETER] _onResult 19.webp type=animated
+[WebP] 18.webp decoder 186f 1080x806 (405ms)
+[WebP-COMPLETER] _onResult 18.webp type=animated
+[WebP] 03.webp evicted
+[WebP] -decoder (21 remain)
+PS D:\work\Source\venera> adb logcat -d -v time 2>&1 | grep -E "WebP|Page:|COMIC" | grep -v "WebP-T" | grep -v "WebP_Native"
+[WebP] 13.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 16.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 18.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 04.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 09.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 17.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 08.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 07.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 05.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 14.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 06.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 10.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 11.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 15.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 12.webp Refill yielded 0 frames, aborting retry to prevent deadlocks.
+[WebP] 09.webp evicted
+[WebP] -decoder (19 remain)
+[WebP] 08.webp evicted
+[WebP] -decoder (18 remain)
+[WebP] 07.webp evicted
+[WebP] -decoder (17 remain)
+[WebP] 06.webp evicted
+[WebP] -decoder (16 remain)
+[WebP] 05.webp evicted
+[WebP] -decoder (15 remain)
+[WebP] 04.webp evicted
+[WebP] -decoder (14 remain)
+[WebP] 13.webp evicted
+[WebP] -decoder (13 remain)
+[WebP] 15.webp evicted
+[WebP] -decoder (12 remain)
+[WebP] 14.webp evicted
+[WebP] -decoder (11 remain)
+[WebP] 16.webp evicted
+[WebP] -decoder (10 remain)
+[WebP] 17.webp evicted
+[WebP] -decoder (9 remain)
+[WebP] 18.webp evicted
+[WebP] -decoder (8 remain)

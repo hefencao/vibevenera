@@ -215,37 +215,32 @@ class FileDownloader {
       throw Exception("Failed to block $start-$end");
     }
 
-    var buffer = <int>[];
+    // [FIX-PERF-1] 直接写入文件，不再使用 List<int> buffer 累积。
+    // 原实现用 buffer.addAll(data) 动态扩容 List<int>，大文件下极其低效。
+    // 现在每收到一个 chunk 就立即写入 RandomAccessFile。
     await for (var data in res.data!.stream) {
       if (_canceled) return;
-      buffer.addAll(data);
-      if (buffer.length > 16 * 1024) {
-        if (_isWriting) continue;
-        _currentBytes += buffer.length;
-        _isWriting = true;
-        await _file!.setPosition(start + block.downloadedBytes);
-        await _file!.writeFrom(buffer);
-        block.downloadedBytes += buffer.length;
-        buffer.clear();
-        await _writeStatus();
-        _isWriting = false;
-      }
-    }
-
-    if (buffer.isNotEmpty) {
-      while (_isWriting) {
-        await Future.delayed(const Duration(milliseconds: 10));
-      }
-      _isWriting = true;
-      _currentBytes += buffer.length;
-      await _file!.setPosition(start + block.downloadedBytes);
-      await _file!.writeFrom(buffer);
-      block.downloadedBytes += buffer.length;
+      await _writeChunk(data, start + block.downloadedBytes);
+      block.downloadedBytes += data.length;
+      _currentBytes += data.length;
       await _writeStatus();
-      _isWriting = false;
     }
 
     block.downloading = false;
+  }
+
+  /// [FIX-PERF-1] 直接写入文件（串行化并行 block 的写入操作）。
+  Future<void> _writeChunk(List<int> data, int position) async {
+    while (_isWriting) {
+      await Future.delayed(const Duration(milliseconds: 1));
+    }
+    _isWriting = true;
+    try {
+      await _file!.setPosition(position);
+      await _file!.writeFrom(data);
+    } finally {
+      _isWriting = false;
+    }
   }
 
   Future<void> stop() async {
@@ -291,9 +286,12 @@ class _DownloadBlock {
     return "$start-$end-$downloadedBytes";
   }
 
-  _DownloadBlock.fromString(String str)
-      : start = int.parse(str.split("-")[0]),
-        end = int.parse(str.split("-")[1]),
-        downloadedBytes = int.parse(str.split("-")[2]),
+  /// [FIX-QUAL-2] 只 split 一次，避免对同一字符串调用 3 次 split。
+  _DownloadBlock.fromString(String str) : this._fromParts(str.split("-"));
+
+  _DownloadBlock._fromParts(List<String> parts)
+      : start = int.parse(parts[0]),
+        end = int.parse(parts[1]),
+        downloadedBytes = int.parse(parts[2]),
         downloading = false;
 }

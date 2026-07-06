@@ -126,7 +126,6 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    debugPrint('[COMIC-IMG] INIT ${identityHashCode(this)} provider=${widget.image.hashCode}');
     WidgetsBinding.instance.addObserver(this);
     _scrollAwareContext = DisposableBuildContext<State<ComicImage>>(this);
     widget.onInit?.call(this);
@@ -134,7 +133,6 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
-    debugPrint('[COMIC-IMG] DISPOSE ${identityHashCode(this)} provider=${widget.image.hashCode}');
     WidgetsBinding.instance.removeObserver(this);
     _stopListeningToStream();
     _completerHandle?.dispose();
@@ -146,7 +144,6 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   @override
   void didChangeDependencies() {
-    debugPrint('[COMIC-IMG] didChangeDeps ${identityHashCode(this)} provider=${widget.image.hashCode}');
     _updateInvertColors();
     _resolveImage();
 
@@ -163,7 +160,6 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   void didUpdateWidget(ComicImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.image != oldWidget.image) {
-      debugPrint('[COMIC-IMG] didUpdateWidget ${identityHashCode(this)} old=${oldWidget.image.hashCode} new=${widget.image.hashCode}');
       final bool isListening = _isListeningToStream;
       if (isListening) {
         _stopListeningToStream(keepStreamAlive: true);
