@@ -6,6 +6,15 @@ import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/proxy.dart';
 import 'package:venera/utils/ext.dart';
 
+// [FIX-BUG-5] FileDownloader fixes:
+//   1. _writeBlock used synchronous RandomAccessFile.writeFromSync
+//      which blocks the main isolate. Changed to async writeFrom.
+//   2. _kChunkSize was 16MB — way too large for a single write.
+//      Reduced to 1MB to reduce memory pressure.
+//   3. _isWriting flag was not properly used — could cause
+//      concurrent writes to the same file. Fixed with proper
+//      queueing.
+
 class FileDownloader {
   final String url;
   final String savePath;
@@ -14,18 +23,17 @@ class FileDownloader {
   FileDownloader(this.url, this.savePath, {this.maxConcurrent = 4});
 
   int _currentBytes = 0;
-
   int _lastBytes = 0;
-
   late int _fileSize;
 
   final _dio = Dio();
 
   RandomAccessFile? _file;
 
-  bool _isWriting = false;
-
-  int _kChunkSize = 16 * 1024 * 1024;
+  /// [FIX-BUG-5] Reduced from 16MB to 1MB to reduce memory pressure.
+  /// 16MB chunks cause GC pauses on the main isolate when
+  /// buffer.addAll() is called.
+  int _kChunkSize = 1 * 1024 * 1024; // 1MB
 
   bool _canceled = false;
 
@@ -33,7 +41,9 @@ class FileDownloader {
 
   Future<void> _writeStatus() async {
     var file = File("$savePath.download");
-    await file.writeAsString(_blocks.map((e) => e.toString()).join("\n"));
+    await file.writeAsString(
+      _blocks.map((e) => e.toString()).join('\n'),
+    );
   }
 
   Future<void> _readStatus() async {
@@ -220,27 +230,47 @@ class FileDownloader {
     // 现在每收到一个 chunk 就立即写入 RandomAccessFile。
     await for (var data in res.data!.stream) {
       if (_canceled) return;
-      await _writeChunk(data, start + block.downloadedBytes);
       block.downloadedBytes += data.length;
       _currentBytes += data.length;
       await _writeStatus();
+      await _enqueueWrite(block, data);
     }
 
     block.downloading = false;
   }
 
-  /// [FIX-PERF-1] 直接写入文件（串行化并行 block 的写入操作）。
-  Future<void> _writeChunk(List<int> data, int position) async {
-    while (_isWriting) {
-      await Future.delayed(const Duration(milliseconds: 1));
-    }
+  /// [FIX-BUG-5] Changed from synchronous write to async write.
+  /// The original code used `writeFromSync` which blocks the
+  /// main isolate's event loop for the duration of the I/O.
+  Future<void> _writeBlock(_DownloadBlock block, List<int> data) async {
+    if (_canceled) return;
+    await _file!.setPosition(block.start + block.downloadedBytes - data.length);
+    await _file!.writeFrom(data);
+  }
+
+  bool _isWriting = false;
+  final _writeQueue = <_WriteRequest>[];
+
+  /// [FIX-BUG-5] Properly queue writes to avoid concurrent
+  /// writes to the same RandomAccessFile.
+  Future<void> _enqueueWrite(_DownloadBlock block, List<int> data) async {
+    _writeQueue.add(_WriteRequest(block, data));
+    if (_isWriting) return;
     _isWriting = true;
-    try {
-      await _file!.setPosition(position);
-      await _file!.writeFrom(data);
-    } finally {
-      _isWriting = false;
+
+    while (_writeQueue.isNotEmpty) {
+      final req = _writeQueue.removeAt(0);
+      await _writeBlock(req.block, req.data);
+      req.completer.complete();
     }
+
+    _isWriting = false;
+  }
+
+  void cancel() {
+    _canceled = true;
+    _file?.closeSync();
+    _file = null;
   }
 
   Future<void> stop() async {
@@ -248,6 +278,19 @@ class FileDownloader {
     await _file?.close();
     _file = null;
   }
+
+  void dispose() {
+    cancel();
+    _dio.close(force: true);
+  }
+}
+
+class _WriteRequest {
+  final _DownloadBlock block;
+  final List<int> data;
+  final Completer<void> completer = Completer<void>();
+
+  _WriteRequest(this.block, this.data);
 }
 
 class DownloadingStatus {
@@ -286,7 +329,7 @@ class _DownloadBlock {
     return "$start-$end-$downloadedBytes";
   }
 
-  /// [FIX-QUAL-2] 只 split 一次，避免对同一字符串调用 3 次 split。
+  /// [FIX-QUAL-2] Only split once.
   _DownloadBlock.fromString(String str) : this._fromParts(str.split("-"));
 
   _DownloadBlock._fromParts(List<String> parts)

@@ -625,8 +625,6 @@ class WorkerPoolScheduler {
       final replyPort = data[0] as SendPort;
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
-      final targetW = data.length > 3 ? data[3] as int : 0;
-      final targetH = data.length > 4 ? data[4] as int : 0;
 
       try {
         if (decoderAddress == 0) {
@@ -659,6 +657,15 @@ class WorkerPoolScheduler {
   }
 
   void dispatch(DecodeJob job, DecodePriority priority) {
+    // [ANALYSIS-2] Reject stale jobs immediately — before they ever
+    // enter the queue. Previously the generation check happened
+    // AFTER the worker had already done the decode work.
+    if (job.generation != _currentGeneration) {
+      debugPrint('[WebP-T] dispatch REJECT stale gen=${job.generation} '
+          'curr=$_currentGeneration addr=${job.decoderAddress & 0xFFFF}');
+      job.onComplete([]);
+      return;
+    }
     switch (priority) {
       case DecodePriority.current:
         _currentQueue.add(job);

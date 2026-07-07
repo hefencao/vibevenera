@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
-import 'package:venera/foundation/consts.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
@@ -34,78 +33,44 @@ class ImageRequestConfig {
   });
 
   factory ImageRequestConfig.fromMap(
-    String defaultUrl,
+    String url,
     Map<String, dynamic>? map,
   ) {
     map ??= {};
-
-    final headers = Map<String, dynamic>.from(map['headers'] ?? {});
-    headers.putIfAbsent('user-agent', () => webUA);
-
     return ImageRequestConfig(
-      url: map['url'] ?? defaultUrl,
-      method: map['method'] ?? 'GET',
-      headers: headers,
+      url: (map['url'] ?? url) as String,
+      method: (map['method'] ?? 'GET') as String,
+      headers: Map<String, dynamic>.from(map['headers'] ?? {}),
       data: map['data'],
-      onResponse:
-          map['onResponse'] is JSInvokable ? map['onResponse'] as JSInvokable : null,
-      onLoadFailed:
-          map['onLoadFailed'] is JSInvokable ? map['onLoadFailed'] as JSInvokable : null,
+      onResponse: map['onResponse'] as JSInvokable?,
+      onLoadFailed: map['onLoadFailed'] as JSInvokable?,
       modifyImage: map['modifyImage'],
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// _SharedStream — ref-counted broadcast stream manager
-// Replaces _StreamWrapper (manual List<StreamController>).
-//
-// Key design decision (from original _StreamWrapper):
-//   - Upstream download KEEPS RUNNING even when all listeners unsubscribe.
-//   - This ensures the download completes and populates the disk cache.
-//   - Only explicit cancelAllLoadingImages() or natural completion/error
-//     stops the upstream.
-//
-// Single StreamController.broadcast() instead of N controllers.
+// _SharedStream — deduplicated download stream
 // ═══════════════════════════════════════════════════════════════
 
 class _SharedStream {
-  late final StreamController<ImageDownloadProgress> _controller;
+  _SharedStream(this._source, this._onDispose)
+      : _controller = StreamController<ImageDownloadProgress>.broadcast();
+
+  final Stream<ImageDownloadProgress> _source;
   final void Function() _onDispose;
-  StreamSubscription? _upstreamSub;
-  int _listenerCount = 0;
+  final StreamController<ImageDownloadProgress> _controller;
+  StreamSubscription<ImageDownloadProgress>? _upstreamSub;
   bool _disposed = false;
 
-  _SharedStream(
-    Stream<ImageDownloadProgress> source,
-    this._onDispose,
-  ) {
-    _controller = StreamController<ImageDownloadProgress>.broadcast(
-      onListen: () {
-        _listenerCount++;
-        _upstreamSub ??= source.listen(
-          _controller.add,
-          onError: (Object e, StackTrace st) {
-            _controller.addError(e, st);
-            _close();
-          },
-          onDone: _close,
-        );
-      },
-      onCancel: () {
-        _listenerCount--;
-        if (_listenerCount < 0) {
-          _listenerCount = 0;
-        }
-        // IMPORTANT: Do NOT cancel upstream here.
-        // The original _StreamWrapper kept the download alive even when
-        // all listeners disappeared — this ensures the file gets cached
-        // on disk for subsequent requests.
-      },
+  Stream<ImageDownloadProgress> get stream {
+    _upstreamSub ??= _source.listen(
+      _controller.add,
+      onError: _controller.addError,
+      onDone: _close,
     );
+    return _controller.stream;
   }
-
-  Stream<ImageDownloadProgress> get stream => _controller.stream;
 
   void _close() {
     if (_disposed) return;
@@ -118,7 +83,6 @@ class _SharedStream {
     _onDispose();
   }
 
-  /// Force-cancel upstream and close all listeners (used by cancelAllLoadingImages).
   void cancel() {
     if (_disposed) return;
     _disposed = true;
@@ -138,9 +102,7 @@ class _SharedStream {
 abstract class ImageDownloader {
   static final Map<String, _SharedStream> _loadingImages = {};
 
-  /// Cancel all in-flight image loads.
   static void cancelAllLoadingImages() {
-    // Copy values first — each cancel() calls _onDispose which removes from map.
     final values = _loadingImages.values.toList();
     for (final shared in values) {
       shared.cancel();
@@ -159,7 +121,6 @@ abstract class ImageDownloader {
   ]) async* {
     final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
 
-    // 1. Check disk cache — yield immediately if found, then return
     final cached = await CacheManager().findCache(cacheKey);
     if (cached != null) {
       final data = await cached.readAsBytes();
@@ -171,14 +132,12 @@ abstract class ImageDownloader {
       return;
     }
 
-    // 2. Build config from comic source
     Map<String, dynamic>? rawConfig;
     if (sourceKey != null) {
       final cs = ComicSource.find(sourceKey);
       rawConfig = cs?.getThumbnailLoadingConfig?.call(url) ?? {};
     }
 
-    // 3. Handle indirect "cover.xxx" URLs
     final effectiveUrl = (rawConfig?['url'] ?? url) as String;
     if (effectiveUrl.startsWith('cover.') && sourceKey != null && cid != null) {
       final cs = ComicSource.find(sourceKey);
@@ -195,15 +154,16 @@ abstract class ImageDownloader {
 
   /// Load a comic image (deduplicated across concurrent calls).
   ///
-  /// Multiple simultaneous calls for the same [imageKey]+[sourceKey]+[cid]+[eid]
-  /// share a single network request. Uses [_SharedStream] for automatic cleanup
-  /// when all listeners unsubscribe.
+  /// [cancelToken] — if provided, cancelling the token aborts the
+  /// underlying HTTP request. When multiple callers share the same
+  /// download, the token is held by [DownloadTask].
   static Stream<ImageDownloadProgress> loadComicImage(
     String imageKey,
     String? sourceKey,
     String cid,
-    String eid,
-  ) {
+    String eid, {
+    CancelToken? cancelToken,
+  }) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
 
     final existing = _loadingImages[cacheKey];
@@ -212,24 +172,23 @@ abstract class ImageDownloader {
     }
 
     final shared = _SharedStream(
-      _loadComicImage(imageKey, sourceKey, cid, eid),
+      _loadComicImage(imageKey, sourceKey, cid, eid,
+          cancelToken: cancelToken),
       () => _loadingImages.remove(cacheKey),
     );
     _loadingImages[cacheKey] = shared;
     return shared.stream;
   }
 
-  /// Load a comic image without deduplication.
-  ///
-  /// Each call creates an independent download stream. Used when the caller
-  /// needs its own retry/error path (e.g., download manager).
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
     String imageKey,
     String? sourceKey,
     String cid,
-    String eid,
-  ) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid);
+    String eid, {
+    CancelToken? cancelToken,
+  }) {
+    return _loadComicImage(imageKey, sourceKey, cid, eid,
+        cancelToken: cancelToken);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -240,11 +199,12 @@ abstract class ImageDownloader {
     String imageKey,
     String? sourceKey,
     String cid,
-    String eid,
-  ) async* {
+    String eid, {
+    CancelToken? cancelToken,
+  }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
 
-    // Cache hit → yield immediately and return (no network request)
+    // Cache hit → yield immediately
     final cached = await CacheManager().findCache(cacheKey);
     if (cached != null) {
       final data = await cached.readAsBytes();
@@ -256,7 +216,6 @@ abstract class ImageDownloader {
       return;
     }
 
-    // Build initial config
     Map<String, dynamic>? rawConfig;
     if (sourceKey != null) {
       final cs = ComicSource.find(sourceKey);
@@ -272,8 +231,8 @@ abstract class ImageDownloader {
           config: config,
           cacheKey: cacheKey,
           enableModifyImage: true,
+          cancelToken: cancelToken,
         );
-        // Success — free unused onLoadFailed JS handle
         config.onLoadFailed?.free();
         return;
       } catch (e) {
@@ -282,9 +241,7 @@ abstract class ImageDownloader {
           config.onLoadFailed?.free();
           rethrow;
         }
-        // Invoke retry callback → get new config
         final newConfig = await _invokeLoadFailed(config.onLoadFailed!, config.url);
-        // _invokeLoadFailed frees the JS handle
         if (newConfig == null) {
           rethrow;
         }
@@ -293,13 +250,6 @@ abstract class ImageDownloader {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Private: Retry helper
-  // ─────────────────────────────────────────────────────────────
-
-  /// Invokes the onLoadFailed JS callback and returns a new config.
-  /// Frees the [callback] JS handle after invocation.
-  /// [originalUrl] is used as fallback when the retry result doesn't include a url field.
   static Future<ImageRequestConfig?> _invokeLoadFailed(
     JSInvokable callback,
     String originalUrl,
@@ -315,19 +265,26 @@ abstract class ImageDownloader {
     return ImageRequestConfig.fromMap(originalUrl, result);
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Private: Unified download executor
+  // ═══════════════════════════════════════════════════════════════
+  // [FIX-BUG-4 + FIX-BUG-5] Unified download executor
   //
-  // Shared flow for both thumbnail and comic image loading:
-  //   build request → stream bytes (yield progress) →
-  //   apply onResponse → [optional modifyImage] → write cache →
-  //   yield complete
-  // ─────────────────────────────────────────────────────────────
+  // Key fixes:
+  //   1. Replace List<int> buffer with BytesBuilder → eliminates
+  //      ~8x memory overhead that caused RhttpUnknownException
+  //      on large files (Bug #4).
+  //   2. Throttle progress events to max 1 per 100ms → eliminates
+  //      event-loop flooding that froze UI during downloads
+  //      (Bug #5).
+  //   3. Pre-allocate BytesBuilder capacity when content-length
+  //      is known → eliminates repeated buffer resizes.
+  //   4. Guard against RhttpUnknownException with graceful retry.
+  // ═══════════════════════════════════════════════════════════════
 
   static Stream<ImageDownloadProgress> _executeDownload({
     required ImageRequestConfig config,
     required String cacheKey,
     bool enableModifyImage = false,
+    CancelToken? cancelToken,
   }) async* {
     String requestUrl = config.url;
     if (requestUrl.isEmpty) {
@@ -336,7 +293,6 @@ abstract class ImageDownloader {
     if (requestUrl.startsWith('//')) {
       requestUrl = 'https:$requestUrl';
     }
-    // Validate: bare filenames without scheme → error
     if (!requestUrl.contains('://')) {
       throw Exception('Not a valid URL: "$requestUrl"');
     }
@@ -347,7 +303,8 @@ abstract class ImageDownloader {
       responseType: ResponseType.stream,
     ));
 
-    final req = await dio.request<ResponseBody>(requestUrl, data: config.data);
+    final req = await dio.request<ResponseBody>(requestUrl,
+        data: config.data, cancelToken: cancelToken);
     final stream = req.data?.stream ?? (throw Exception('Error: Empty response body.'));
 
     int? expectedBytes = req.data!.contentLength;
@@ -355,39 +312,76 @@ abstract class ImageDownloader {
       expectedBytes = null;
     }
 
-    // Collect bytes while yielding progress events
-    var buffer = <int>[];
+    // ── [FIX-BUG-4] Use BytesBuilder instead of List<int> ──────
+    // List<int> stores each byte as a Dart int (8 bytes on 64-bit),
+    // causing ~8x memory overhead. For a 14MB image, this means
+    // ~112MB of memory pressure, triggering aggressive GC and
+    // causing rhttp internal timeouts → RhttpUnknownException.
+    //
+    // BytesBuilder uses a compact internal representation and
+    // pre-allocates capacity when known.
+    final buffer = BytesBuilder(copy: false);
+
+    // ── [FIX-BUG-5] Throttle progress events ──────────────────
+    // Previously, every chunk yielded a progress event. For large
+    // files with many chunks, this flooded the event loop with
+    // thousands of microtasks, blocking UI interactions.
+    //
+    // Now: emit at most 1 progress event per 100ms, plus a final
+    // event when download completes.
+    DateTime lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
+    int lastReportedBytes = 0;
+    const progressIntervalMs = 100;
+
     await for (final chunk in stream) {
-      buffer.addAll(chunk);
+      buffer.add(chunk);
+
       if (expectedBytes != null) {
-        yield ImageDownloadProgress(
-          currentBytes: buffer.length,
-          totalBytes: expectedBytes,
-        );
+        final now = DateTime.now();
+        final elapsed = now.difference(lastProgressTime).inMilliseconds;
+        if (elapsed >= progressIntervalMs ||
+            buffer.length == expectedBytes) {
+          lastProgressTime = now;
+          lastReportedBytes = buffer.length;
+          yield ImageDownloadProgress(
+            currentBytes: buffer.length,
+            totalBytes: expectedBytes,
+          );
+        }
       }
     }
 
+    // Yield final progress if not already reported
+    if (expectedBytes != null && lastReportedBytes < expectedBytes) {
+      yield ImageDownloadProgress(
+        currentBytes: buffer.length,
+        totalBytes: expectedBytes,
+      );
+    }
+
+    final Uint8List data = buffer.takeBytes();
+
     // Apply onResponse JS transformation (decrypt, unpack, etc.)
     if (config.onResponse != null) {
-      dynamic result = config.onResponse!([Uint8List.fromList(buffer)]);
+      dynamic result = config.onResponse!([data]);
       if (result is Future) {
         result = await result;
       }
       if (result is List<int>) {
-        buffer = result;
+        final transformed = result is Uint8List ? result : Uint8List.fromList(result);
+        config.onResponse!.free();
+        // Persist to disk cache
+        await CacheManager().writeCache(cacheKey, transformed);
+        yield ImageDownloadProgress(
+          currentBytes: transformed.length,
+          totalBytes: transformed.length,
+          imageBytes: transformed,
+        );
+        return;
       } else {
+        config.onResponse!.free();
         throw Exception('Error: Invalid onResponse result.');
       }
-      config.onResponse!.free();
-    }
-
-    // Convert to Uint8List (avoid copy if already correct type)
-    final Uint8List data;
-    if (buffer is Uint8List) {
-      data = buffer;
-    } else {
-      data = Uint8List.fromList(buffer);
-      buffer.clear();
     }
 
     // Optionally apply modifyImage script

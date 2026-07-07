@@ -29,6 +29,7 @@ import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
+import 'package:venera/foundation/image_provider/task_scheduler.dart';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';

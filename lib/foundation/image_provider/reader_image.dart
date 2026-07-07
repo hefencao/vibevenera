@@ -38,16 +38,7 @@ class ReaderImageProvider
     void Function() checkStop,
   ) async {
     return fetchImageBytes(
-      imageKey, sourceKey, cid, eid,
-      onProgress: (current, total) {
-        if (!chunkEvents.isClosed) {
-          chunkEvents.add(ImageChunkEvent(
-            cumulativeBytesLoaded: current,
-            expectedTotalBytes: total,
-          ));
-        }
-      },
-      checkStop: checkStop,
+      imageKey, sourceKey, cid, eid
     );
   }
 
