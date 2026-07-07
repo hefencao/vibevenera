@@ -1,206 +1,237 @@
 # Image Pipeline Architecture
 
-> Last updated: 2026-07-06
+> Last updated: 2026-07-07
 
-## 1. Architecture Overview
+## 1. Goals
 
-```
-┌─ Reader UI Layer ────────────────────────────────────────────────────┐
-│  _GalleryModeState / _ContinuousModeState                            │
-│  ─ Sets InteractionState (idle/dragging/jumping/settling)            │
-│  ─ Calls _updateWebPState on page changes                            │
-└──────────────────────────────────────────────────────────────────────┘
-         │ setInteractionState() / onPageChanged()
-         ▼
-┌─ Policy Engine (DecoderManager) ─────────────────────────────────────┐
-│  ResourcePolicyEngine.refresh()                                      │
-│  ─ Computes ResourcePolicy for each entry                            │
-│  ─ Generates work list based on policy gaps                          │
-│  ─ Priority-based task migration (not generation-based)              │
-└──────────────────────────────────────────────────────────────────────┘
-         │ policy-driven task submission
-         ▼
-┌─ Resource State (ResourceEntry) ─────────────────────────────────────┐
-│  Single source of truth per image:                                   │
-│  state / bytes / holder / priority / policy / frame counters         │
-│  ─ Replaces fragmented DecoderHolder + L2 cache + TaskScheduler state│
-└──────────────────────────────────────────────────────────────────────┘
-         │ DownloadTask / PrecreateTask
-         ▼
-┌─ Execution Layer (TaskScheduler) ─────────────────────────────────────┐
-│  Pure execution: Run(Task) with concurrency control (max 3)          │
-│  ─ CancelToken propagation for HTTP abort                            │
-│  ─ Preemption at priority gap ≥40                                    │
-│  ─ List<Completer> for multi-caller dedup                            │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-    ┌────┴──────────────────────┐
-    ▼                           ▼
-┌─ Download ───────────┐  ┌─ Decode (WorkerPoolScheduler) ───┐
-│ ImageDownloader      │  │ Frame decode in isolate workers  │
-│ ─ Dio + CancelToken  │  │ ─ Ctx-hash affinity             │
-│ ─ Disk cache         │  │ ─ Generation check at dispatch  │
-│ ─ SharedStream dedup │  │ ─ Priority-aware queue          │
-└──────────────────────┘  └──────────────────────────────────┘
-                                    │
-                                    ▼
-                           ┌─ GPU Upload ──────────┐
-                           │ decodeImageFromPixels │
-                           │ ─ Per-frame async     │
-                           │ ─ As frameBuffer fill │
-                           └───────────────────────┘
-```
+The image pipeline has two separate jobs:
 
-## 2. Key Design Decisions
+1. Keep the visible page responsive.
+2. Prepare nearby pages without stealing decode/upload time from the visible page.
 
-### 2.1 ResourceEntry as Single Source of Truth
+UI interaction must not be blocked by resource policy timers. A 300ms UI debounce is acceptable for visual gestures, but it must not be the gate that decides when background decode resumes. Resource scheduling is driven by current-page buffer water level instead.
 
-**Problem**: State was fragmented across 5+ locations (DecoderHolder._disposed, DecodedImageCache L1/L2, TaskScheduler._activeTasks, _holders, _pendingLoads). Each had its own lifecycle tracking, leading to inevitable desync.
-
-**Solution**: `ResourceEntry` in [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) holds all state for one image resource. All other components query or update this single entry rather than maintaining parallel state.
-
-```dart
-class ResourceEntry {
-  final String imageKey;          // bare key
-  final String fullKey;           // imageKey@WxH (dedup key)
-  ResourceState state;            // none → downloading → downloaded → decoding → decoded
-  Uint8List? bytes;               // raw WebP bytes
-  DecoderHolder? holder;          // decoder instance (dynamic to avoid circular import)
-  PagePriority priority;          // current / near / far / distant
-  ResourcePolicy policy;          // allowDownload / allowDecode / allowGpuUpload
-  int decodedFrameCount;          // frames decoded, not yet uploaded
-  int uploadedFrameCount;         // frames on GPU
-}
-```
-
-### 2.2 Policy-Driven Scheduling
-
-**Problem**: `activePagesChanged` submitted `DownloadTask`/`PrecreateTask` directly, then called `refresh()` which only updated holder policies. `InteractionState.dragging` set `allowDecode=false` but pre-download tasks were still submitted anyway.
-
-**Solution**: `refresh()` runs BEFORE task submission. Each task submission is gated on the entry's current policy. During dragging, only the current page gets downloads; near/far pages get nothing.
-
-| Interaction | Current | Near (±1-3) | Far (+4-5) | Distant |
-|---|---|---|---|---|
-| **idle** | download+decode+upload | download+decode | download only | evict |
-| **dragging** | download+upload (no decode) | — | — | — |
-| **settling** | download+decode+upload | download+decode (no upload) | download only | — |
-| **jumping** | download+decode+upload | — | — | evict |
-
-### 2.3 Priority-Based Task Migration (not Generation)
-
-**Problem**: `_generation++` on every page change canceled ALL pre-download tasks. Page 5→6 would cancel tasks for pages 7-11, which immediately re-submitted. This caused the "预下载失效" (pre-download not working) and task churn.
-
-**Solution**: `TaskScheduler.migrateTasks()` cancels only tasks for pages that left the working set. Tasks for pages still in range get priority updates. `WorkerPoolScheduler` generation check is kept separately for frame-decode safety.
-
-### 2.4 TaskScheduler as Pure Execution Layer
-
-**Problem**: TaskScheduler handled priority, merge, callback management, generation cancellation, and dedup — it knew too much about why tasks run.
-
-**Solution**: TaskScheduler now only knows `submit(Task)`, `cancel(key)`, `_dispatchNext()`, and `migrateTasks()`. All policy decisions live in `DecoderManager` / `ResourcePolicyEngine`.
-
-### 2.5 CancelToken Propagation
-
-**Problem**: `_sub?.cancel()` only stopped listening to the stream; the HTTP request continued, consuming bandwidth and memory.
-
-**Solution**: `DownloadTask` creates a `CancelToken` passed through `ImageDownloader.loadComicImage()` → `_loadComicImage()` → `_executeDownload()` → `dio.request(cancelToken:)`. On cancel, the HTTP request is aborted at the Dio level.
-
-## 3. Data Flow
-
-### Normal Page Turn (Page 5 → Page 6)
+## 2. High-Level Architecture
 
 ```
-1. Reader UI: setInteractionState(settling)
-2. _updateWebPState(6, context)
-3. DecoderManager.activePagesChanged(currentPageIndex=5)
-4.   _generation++ (for WorkerPoolScheduler frame-decode safety)
-5.   Compute page priorities: current=5, near={6,7}, last={4}, far={8,9}
-6.   _ensureEntry() for each → populates ResourceEntry map + index
-7.   refresh() → compute ResourcePolicy for all entries
-8.   migrateTasks() → upgrade page 7-9 tasks, cancel tasks for page 3
-9.   Submit DownloadTask for page 7-9 (if allowDownload)
-10.  Submit PrecreateTask for page 6-7 (if allowDecode)
-11.  300ms timer → setInteractionState(idle) → refresh() again
-12.    In idle: allowDecode for near pages, PrecreateTask for 8-9
+Reader UI
+  - reports page changes
+  - creates ImageProviders
+  - does not own decode policy
+        |
+        v
+PipelineController
+  - owns ResourceEntry map
+  - computes dynamic preload window from current-page buffer level
+  - maps relative page offsets to current / decode / downloadOnly / keep / evict
+  - submits DownloadTask and PrecreateTask through TaskScheduler
+        |
+        +--> DecodedImageCache
+        |     - L1: ui.Image
+        |     - L2: original bytes
+        |     - L3: optional RGBA
+        |
+        +--> DecoderManager
+        |     - owns active DecoderHolder instances
+        |     - applies holder page state and resource policy
+        |
+        v
+TaskScheduler
+  - priority queue
+  - download/decode task dedup
+  - task migration when the active window changes
+        |
+        +--> DownloadExecution
+        |     - disk cache / network bytes
+        |
+        +--> PrecreateTask
+              - creates WebP decoder holder when bytes are available
+
+DecoderHolder
+  - owns native animated WebP decoder
+  - keeps frame buffer
+  - reports current-page buffer level back to PipelineController
+  - requests frame decode through WorkerPoolScheduler
+        |
+        v
+WorkerPoolScheduler
+  - isolate workers
+  - current queue before next queue
+  - generation check for stale decode jobs
+  - ctx-hash affinity for native decoder safety
 ```
 
-### Rapid Drag
+## 3. Design Decisions
+
+### 3.1 UI and Resource Scheduling Are Decoupled
+
+The reader UI should not wait for a 300ms "settling" timeout before it can drag a scrollbar or react to a page gesture. The UI layer reports page changes immediately. The resource layer independently decides how much background work is allowed.
+
+The previous model coupled user interaction to resource state:
 
 ```
-1. ScrollStartNotification → setInteractionState(dragging)
-2.   refresh() → all non-current entries: allowDownload=false, allowDecode=false
-3.   Running PrecreateTasks check policy at execute() → self-cancel
-4.   Running DownloadTasks continue (current page needs bytes)
-5.   No new tasks submitted for near/far
-6. ScrollEndNotification → setInteractionState(settling)
-7.   300ms → idle → full pipeline resumes for current+near
+page change -> settling -> 300ms timer -> idle -> background work resumes
 ```
 
-### Jump to Distant Page (Page 5 → Page 100)
+That made scrollbar dragging feel sticky and made fast page changes repeatedly churn the background queue.
+
+The current model:
 
 ```
-1. toPage(100) → setInteractionState(jumping)
-2.   refresh() → only current page gets full pipeline; all others: evict
-3.   migrateTasks() → cancel all tasks for pages 6-12
-4.   Only page 100 gets DownloadTask + PrecreateTask
-5.   300ms → idle → pre-download for 101-105 resumes
+page change -> current page gets priority immediately
+current buffer level changes -> dynamic window expands/shrinks
 ```
 
-## 4. Component Inventory
+The 300ms concept, if used by UI code, is only a UI debounce. It must not be the authority for decode/upload scheduling.
+
+### 3.2 Dynamic Window Is Table-Driven
+
+Dynamic preload policy lives in `preload_policy.dart` and is split into two tables:
+
+1. Water-level table: `currentBufferedFrames + preloadCount -> DynamicPreloadWindow`
+2. Relative-page table: `offset + DynamicPreloadWindow -> PreloadPageClass`
+
+This keeps the policy explainable and easy to tune. It also avoids growing chains of `if/else` in the pipeline controller.
+
+Water-level table:
+
+| Current buffered frames | Additional condition | Decode next | Decode prev | Download-only next+ |
+|---:|---|---:|---:|---:|
+| `< 3` | any | 0 | 0 | 0 |
+| `>= 3` | any | 1 | 0 | 0 |
+| `>= 5` | any | 2 | 1 | 0 |
+| `>= 7` | `preloadCount < 7` | 3 | 2 | 1 |
+| `>= 7` | `preloadCount >= 7` | 5 | 2 | 2 |
+
+Relative-page table:
+
+| Page class | Offset rule | Pipeline stage |
+|---|---|---|
+| `current` | `offset == 0` | download + decode + GPU upload |
+| `decode` | `1 <= offset <= decodeNext` | download + decode + GPU upload if policy allows |
+| `decode` | `-decodePrev <= offset <= -1` | download + decode + GPU upload if policy allows |
+| `downloadOnly` | `decodeNext < offset <= decodeNext + downloadExtraNext` | download only |
+| `keep` | `offset == -1` and not already decode | keep holder/bytes, do not refill frames |
+| `evict` | otherwise | cancel/evict when allowed |
+
+### 3.3 ResourcePolicy Is Also a Matrix
+
+`ResourcePolicy.compute(interaction, priority)` is a matrix lookup:
+
+```
+InteractionState x PagePriority -> ResourcePolicy
+```
+
+This keeps interaction policy orthogonal to the dynamic window. The window decides which relative pages are current/near/far/keep; the policy matrix decides what each class may do.
+
+### 3.4 Current Page Is the Only Hard Realtime Consumer
+
+Background work is allowed only while current-page buffer health permits it. When the current page drops below the low water mark, non-current decode/upload should stop refilling. Download-only work may continue because it does not touch the native decoder or GPU upload path.
+
+Current page priority exists at three levels:
+
+- Task priority: current download/decode uses highest priority.
+- Worker queue: current frame jobs go before next jobs.
+- Dynamic window: low current buffer shrinks near/far work to zero.
+
+### 3.5 Pre-download Means Bytes, Not Frames
+
+Pre-download writes WebP bytes into L2 cache. It should not imply frame decode or GPU upload. This distinction matters because bytes are cheap and reusable; decoded/uploaded frames are expensive and can quickly saturate memory and the UI thread.
+
+## 4. Decode Size and Pixel Alignment
+
+Animated WebP frames are decoded at the target display size. This avoids decoding full-resolution frames that will only be downscaled later, but target size must be chosen carefully.
+
+Example observation:
+
+```
+1079 x 806 = 869,674 pixels
+48 ms / frame ~= 20.8 decoded frames per second
+```
+
+This is plausible on mobile when native WebP decode, scaling, isolate handoff, and `decodeImageFromPixels` upload are all included. It is not enough for a stable 24 fps animation if every frame must be decoded just-in-time.
+
+The width `1079` is suspicious because it is not aligned to common GPU/CPU-friendly boundaries. It usually comes from:
+
+```
+logical viewport width * devicePixelRatio -> round()
+```
+
+For decode targets, prefer an aligned physical size:
+
+- Use physical viewport size as the base.
+- Preserve source aspect ratio.
+- Round width/height to a small alignment boundary, for example even pixels or 8-pixel blocks.
+- Clamp to the actual source size to avoid upscaling.
+- Keep the same aligned target for cache keys, decoder holder keys, and L1/L2/L3 lookup.
+
+The goal is not visual exactness at one physical pixel. The goal is stable cache keys, less scaler edge work, and fewer odd-sized uploads.
+
+## 5. Main Data Flow
+
+### Page Change
+
+```
+1. Reader calls WebPImageProvider.onPageChanged()
+2. Decoder generation is incremented for stale frame safety.
+3. Reader calls PipelineController.onPageRangeChanged()
+4. PipelineController starts with currentBufferedFrames = 0.
+5. DynamicPreloadPolicy selects the smallest window: current only.
+6. Current page download/decode/upload starts first.
+7. As current frames are uploaded, DecoderHolder reports buffer length.
+8. PipelineController expands the window by table lookup.
+9. TaskScheduler migrates queued/running tasks to match the new active keys.
+```
+
+### Current Buffer Drops
+
+```
+1. Animation consumes frames.
+2. DecoderHolder reports the new buffer length.
+3. PipelineController recomputes the dynamic window.
+4. If the bucket changed, non-current decode keys leave the active decode set.
+5. Running/queued background decode tasks are cancelled when possible.
+6. Download-only tasks may remain if still in the active download window.
+```
+
+### Rapid Scroll or Drag
+
+```
+1. UI remains responsive; no resource timer blocks dragging.
+2. New current page is applied immediately.
+3. Background decode/upload is naturally suppressed because current buffer starts low.
+4. Once current buffer recovers, the window expands.
+```
+
+## 6. Component Inventory
 
 | Component | File | Responsibility |
 |---|---|---|
-| `InteractionState` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Enum: idle/dragging/jumping/settling |
-| `PagePriority` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Enum: current/near/far/distant |
-| `ResourcePolicy` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | allowDownload/allowDecode/allowGpuUpload + priorities |
-| `ResourceEntry` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Single source of truth per image |
-| `ResourceState` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Lifecycle: none→downloading→downloaded→decoding→decoded |
-| `DownloadTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Network/cache byte fetch with CancelToken |
-| `PrecreateTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Pre-create WebP decoder holder |
-| `TaskScheduler` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Pure execution: priority queue + concurrency control |
-| `DecoderManager` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | PolicyEngine + entry/holder lifecycle |
-| `DecoderHolder` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | WebP decoder wrapper + frame buffer |
-| `WebPImageProvider` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | Flutter ImageProvider + animation loop |
-| `ImageDownloader` | [images.dart](../lib/network/images.dart) | HTTP download with SharedStream dedup + CancelToken |
-| `WorkerPoolScheduler` | [webp_decoder.dart](../lib/utils/webp_decoder.dart) | Isolate-based frame decode with ctx-hash affinity |
-| `DecodedImageCache` | [decoded_image_cache.dart](../lib/foundation/image_provider/decoded_image_cache.dart) | L1 (ui.Image) + L2 (bytes) + L3 (RGBA) storage |
+| `DynamicPreloadPolicy` | [preload_policy.dart](../lib/foundation/image_provider/preload_policy.dart) | Water-level and relative-page policy tables |
+| `PipelineController` | [pipeline_controller.dart](../lib/foundation/image_provider/pipeline_controller.dart) | Resource state, dynamic window application, task submission |
+| `ResourcePolicy` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Interaction x priority policy matrix |
+| `ResourceEntry` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Single resource state: bytes, holder, policy, sub-states |
+| `TaskScheduler` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Priority queue, dedup, migration, cancellation |
+| `DownloadTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Raw byte fetch |
+| `PrecreateTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Decoder holder creation |
+| `DecoderManager` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | Active holder lifecycle and holder page state |
+| `DecoderHolder` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | Native decoder, frame buffer, buffer-level reporting |
+| `WorkerPoolScheduler` | [webp_decoder.dart](../lib/utils/webp_decoder.dart) | Isolate frame decode with priority queues |
+| `DecodedImageCache` | [decoded_image_cache.dart](../lib/foundation/image_provider/decoded_image_cache.dart) | L1 decoded images, L2 bytes, L3 RGBA |
 
-## 5. Concurrency Model
+## 7. Why Not a Parameter Model Yet?
 
-```
-TaskScheduler: max 3 concurrent tasks (I/O bound)
-├── DownloadTask: Dio HTTP → disk cache
-│   └── CancelToken: aborts HTTP on cancel
-└── PrecreateTask: ensureHolder(onlyIfCached: true)
-    └── Checks policy.allowDecode before executing
-
-WorkerPoolScheduler: 2 persistent workers
-├── DecodeJob: ctx-hash → deterministic worker assignment
-├── Generation check: reject stale jobs at dispatch
-└── DecodePriority: current > next (for queue ordering)
-```
-
-## 6. Key Bug Fixes Applied
-
-| # | Bug | Fix | File |
-|---|---|---|---|
-| 1 | Callback overwrite on duplicate submit | `List<Completer>` instead of single callback | task_scheduler.dart |
-| 2 | onDone check wrong (callback always exists) | Track `_bytesReceived` flag | task_scheduler.dart |
-| 3 | Priority upgrade doesn't re-sort queue | Call `_sortQueue()` after upgrade | task_scheduler.dart |
-| 4 | Running task can't be preempted | `_maybePreempt()` with 40-pt threshold | task_scheduler.dart |
-| 5 | HTTP continues after stream cancel | `CancelToken` through to `dio.request()` | task_scheduler.dart, images.dart |
-| 6 | `file://` URI crash | `Uri.parse().toFilePath()` | image_fetch.dart |
-| 7 | Pre-download not working | Policy-driven scheduling + priority migration | webp_image_provider.dart |
-| 8 | `_evictDistant` use-after-free crash | `markPendingDispose()` with 500ms fallback | webp_image_provider.dart |
-
-## 7. Logging Convention
+A learned or formula-based model could eventually replace the policy tables:
 
 ```
-[WebP-PRE]       — Pre-download/pre-create scheduling decisions
-[DownloadTask]   — Download lifecycle (START/HIT-CACHE/NETWORK/DONE/CANCEL-POLICY)
-[Precreate]      — Precreate lifecycle (EXEC/DONE/FAIL/CANCEL-POLICY)
-[WebP]           — Image loading (L2 cache hit/miss, byte source, timing)
-[WebP-HOLDER]    — DecoderHolder creation (byte source, size)
-[Resource]       — ResourceEntry state transitions
-[TaskScheduler]  — Task dispatch, preemption, migration
-[WebP-T]         — WorkerPoolScheduler dispatch/reject
+score(offset, buffer, decodeMs, uploadMs, velocity, memoryPressure) -> action
 ```
+
+However, this requires telemetry and a clear objective function. Without that, a parameter model is harder to debug than a table and can oscillate under fast page changes.
+
+The table-driven design is the right intermediate step:
+
+- deterministic
+- easy to inspect in logs
+- easy to tune
+- can be replaced by a model later behind the same `DynamicPreloadPolicy` API

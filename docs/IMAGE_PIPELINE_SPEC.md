@@ -1,314 +1,246 @@
 # Image Pipeline Specification
 
-> Last updated: 2026-07-06
+> Last updated: 2026-07-07
 
-## 1. InteractionState Specification
+## 1. Terminology
 
-The `InteractionState` enum drives all policy decisions. It is set by the Reader UI layer and consumed by `ResourcePolicy.compute()`.
+| Term | Meaning |
+|---|---|
+| `current` | The page currently visible or being displayed by the active image provider. |
+| `buffer level` | Number of uploaded frames available in the current page's `DecoderHolder`. |
+| `decode window` | Relative pages allowed to create holders and decode/upload frames. |
+| `download window` | Relative pages allowed to fetch/store raw WebP bytes only. |
+| `next+` | Forward pages beyond the decode-next range; download-only. |
+| `keep` | Page remains active enough to avoid immediate disposal, but must not refill frames. |
 
-### 1.1 States
+## 2. Dynamic Preload Policy
 
-| State | Trigger | Duration | Effect |
-|---|---|---|---|
-| `idle` | Default; 300ms after last scroll/jump event | Until next interaction | Full pipeline for current+near; download-only for far |
-| `dragging` | `ScrollStartNotification` in ContinuousMode | Until `ScrollEndNotification` | Only current page: download+upload. No decode. No pre-download. |
-| `settling` | Page change / scroll end | 300ms timer, then → idle | Current: full. Near: download+decode (no GPU upload). Far: download-only. |
-| `jumping` | `jumpTo`/`toPage` for distant pages | 300ms timer, then → idle | Only target page: full pipeline. All others: evict. |
+Dynamic preload policy is table-driven and lives in `preload_policy.dart`.
 
-### 1.2 Transition Rules
+### 2.1 Water-Level Table
 
-```
-idle ──(scroll start)──► dragging
-idle ──(page change)──► settling
-idle ──(jumpTo far)──► jumping
-dragging ──(scroll end)──► settling
-settling ──(300ms timeout)──► idle
-jumping ──(300ms timeout)──► idle
-```
+`DynamicPreloadPolicy.windowFor(currentBufferedFrames, preloadCount)` scans this table from top to bottom and returns the first matching row.
 
-### 1.3 UI Integration
+| Row | `currentBufferedFrames` | `preloadCount` | `decodeNext` | `decodePrev` | `downloadExtraNext` |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `>= 7` | `>= 7` | 5 | 2 | 2 |
+| 2 | `>= 7` | `>= 0` | 3 | 2 | 1 |
+| 3 | `>= 5` | `>= 0` | 2 | 1 | 0 |
+| 4 | `>= 3` | `>= 0` | 1 | 0 | 0 |
+| 5 | `>= 0` | `>= 0` | 0 | 0 | 0 |
 
-**GalleryMode** (`_GalleryModeState`):
-- `onPageChanged`: `setInteractionState(settling)` → 300ms → `idle`
-- `animateToPage` (distant): `setInteractionState(jumping)` → 300ms → `idle`
-- `toPage`: `setInteractionState(jumping)` → 300ms → `idle`
+This means `c >= 7` has two modes:
 
-**ContinuousMode** (`_ContinuousModeState`):
-- `ScrollStartNotification`: `setInteractionState(dragging)`
-- `ScrollEndNotification`: `setInteractionState(settling)` → 300ms → `idle`
-- `onPositionChanged` (page change): `setInteractionState(settling)` → 300ms → `idle`
+- if the configured preload depth is high enough, use `next 5, next+ 2, prev 2`
+- otherwise use `next 3, next+ 1, prev 2`
 
-## 2. PagePriority Specification
+### 2.2 Relative Page Table
 
-Assigned by distance from the current viewport page.
+`DynamicPreloadPolicy.pageClassFor(offset, window)` maps a page offset to a class.
 
-| Priority | Distance | Description |
-|---|---|---|
-| `current` | 0 | Visible now. Always gets highest priority. |
-| `near` | ±1 to +2 | Next pages to view. Full pipeline in idle. |
-| `far` | +3 to +4 | Prefetch range. Download-only in idle. |
-| `distant` | > +4 or not in range | Candidate for eviction. |
+| Order | Page class | Rule |
+|---:|---|---|
+| 1 | `current` | `offset == 0` |
+| 2 | `decode` | `1 <= offset <= decodeNext` |
+| 3 | `decode` | `-decodePrev <= offset <= -1` |
+| 4 | `downloadOnly` | `decodeNext < offset <= decodeNext + downloadExtraNext` |
+| 5 | `keep` | `offset == -1` and not already matched by decode |
+| 6 | `evict` | all other offsets |
 
-## 3. ResourcePolicy Rules
+The order is important. `offset == -1` becomes `decode` when `decodePrev >= 1`; otherwise it falls through to `keep`.
 
-`ResourcePolicy.compute(interaction, priority)` returns a policy object:
+### 2.3 Actions By Page Class
 
-### 3.1 Policy Matrix
+| Page class | Download bytes | Create holder | Decode frames | GPU upload | Retain holder |
+|---|---|---|---|---|---|
+| `current` | yes | yes | yes | yes | yes |
+| `decode` | yes | yes | yes | policy-dependent | yes |
+| `downloadOnly` | yes | no | no | no | no |
+| `keep` | no new work | no new work | no refill | no refill | yes if already present |
+| `evict` | no | no | no | no | no |
+
+## 3. ResourcePolicy Matrix
+
+`ResourcePolicy.compute(interaction, priority)` is a two-dimensional matrix. It does not know page offsets. Page offsets are first mapped to `PagePriority` by `PipelineController`.
 
 | Interaction | Priority | allowDownload | allowDecode | allowGpuUpload | downloadPriority | decodePriority |
-|---|---|---|---|---|---|---|
-| idle | current | ✓ | ✓ | ✓ | 100 | 100 |
-| idle | near | ✓ | ✓ | ✓ | 50 | 50 |
-| idle | far | ✓ | ✗ | ✗ | 20 | 0 |
-| idle | distant | ✗ | ✗ | ✗ | 0 | 0 |
-| dragging | current | ✓ | ✗ | ✓ | 100 | 0 |
-| dragging | near | ✓ | ✗ | ✗ | 30 | 0 |
-| dragging | far | ✓ | ✗ | ✗ | 10 | 0 |
-| dragging | distant | ✗ | ✗ | ✗ | 0 | 0 |
-| settling | current | ✓ | ✓ | ✓ | 100 | 100 |
-| settling | near | ✓ | ✓ | ✗ | 40 | 40 |
-| settling | far | ✓ | ✗ | ✗ | 15 | 0 |
-| settling | distant | ✗ | ✗ | ✗ | 0 | 0 |
-| jumping | current | ✓ | ✓ | ✓ | 100 | 100 |
-| jumping | non-current | ✗ | ✗ | ✗ | 0 | 0 |
+|---|---|---|---|---|---:|---:|
+| idle | current | yes | yes | yes | 100 | 100 |
+| idle | near | yes | yes | yes | 50 | 50 |
+| idle | far | yes | no | no | 20 | 0 |
+| idle | distant | no | no | no | 0 | 0 |
+| dragging | current | yes | no | yes | 100 | 0 |
+| dragging | near | yes | no | no | 30 | 0 |
+| dragging | far | yes | no | no | 10 | 0 |
+| dragging | distant | no | no | no | 0 | 0 |
+| settling | current | yes | yes | yes | 100 | 100 |
+| settling | near | yes | yes | no | 40 | 40 |
+| settling | far | yes | no | no | 15 | 0 |
+| settling | distant | no | no | no | 0 | 0 |
+| jumping | current | yes | yes | yes | 100 | 100 |
+| jumping | near | no | no | no | 0 | 0 |
+| jumping | far | no | no | no | 0 | 0 |
+| jumping | distant | no | no | no | 0 | 0 |
 
-### 3.2 Static Constants
+## 4. UI Interaction Rules
 
-Policy objects are pre-allocated as `static const` instances (`_none`, `_current`, `_near`, `_far`, `_distant`) and only instantiated for mixed states.
+UI interaction must be decoupled from resource scheduling.
 
-## 4. ResourceEntry State Machine
+### 4.1 Required Behavior
 
-### 4.1 States
+- Page changes must apply the new current page immediately.
+- Scrollbar drag and gesture handling must not wait for a 300ms resource state transition.
+- Background decode/upload must be controlled by current buffer level, not by UI timers.
+- A UI debounce may exist for visual state, but it must not block resource migration.
 
-```
-none ──(download started)──► downloading
-downloading ──(bytes received)──► downloaded
-downloaded ──(decoder created)──► decoding
-decoding ──(holder ready)──► decoded
-decoded ──(evicted)──► downloaded   (holder removed, bytes kept)
-any ──(error)──► error
-```
+### 4.2 InteractionState Guidance
 
-### 4.2 State Transitions
+`InteractionState` remains useful as a policy input, but it is not the primary throttle.
 
-| From | To | Trigger | Set By |
-|---|---|---|---|
-| `none` | `downloading` | DownloadTask submitted | `activePagesChanged` |
-| `downloading` | `downloaded` | Bytes received from network/cache | DownloadTask completion callback |
-| `none` | `downloaded` | Bytes found in L2 cache | `_ensureEntry` |
-| `downloaded` | `decoding` | PrecreateTask submitted | `activePagesChanged` |
-| `decoding` | `decoded` | DecoderHolder created | `getOrCreateHolder` |
-| `decoded` | `downloaded` | Holder evicted (bytes kept) | `_evictDistant` |
-| `decoded` | `downloaded` | Holder marked for dispose | `markPendingDispose` callback |
-
-### 4.3 Frame Counters
-
-`decodedFrameCount` and `uploadedFrameCount` track per-frame progress on the DecoderHolder rather than a misleading binary "gpu" state. These are maintained by `DecoderHolder` during `_scheduleDecode` and `_doUpload`.
-
-## 5. Task Specification
-
-### 5.1 DownloadTask
-
-**Purpose**: Fetch raw image bytes from network or disk cache.
-
-**Lifecycle**:
-```
-Created → Queued (priority order) → Executing → Completed/Failed
-         ↓                                    ↓
-      Merged (if same key)              Cancelled (CancelToken)
-```
-
-**Key dedup**: By `imageKey` (bare key). If a DownloadTask with the same key is already queued/running, the new task's completers are merged into the existing task.
-
-**Policy check**: At `execute()` start, checks `DecoderManager.getEntry(fullKey)?.policy.allowDownload`. If false, self-cancels.
-
-**CancelToken**: Created at `execute()` start. Passed through `ImageDownloader.loadComicImage()` → `_loadComicImage()` → `_executeDownload()` → `dio.request(cancelToken:)`. On `cancel()`, calls `_cancelToken?.cancel()` which aborts the HTTP request at the Dio level.
-
-**Multi-caller**: Uses `List<Completer<Uint8List>>`. Callers call `register()` to get a Future. On completion, all completers are resolved. On failure, all are rejected.
-
-**Cache check order**:
-1. `CacheManager.findCache(cacheKey)` → disk cache
-2. `ImageDownloader.loadComicImage()` → network (with CancelToken)
-
-### 5.2 PrecreateTask
-
-**Purpose**: Pre-create a WebP `DecoderHolder` before the image is first viewed. Eliminates first-frame latency.
-
-**Lifecycle**:
-```
-Created → Queued → Executing → Completed/Failed
-```
-
-**Key dedup**: By `fullKey` (imageKey@WxH). Ensures only one holder per target resolution.
-
-**Policy check**: At `execute()` start, checks `DecoderManager.getEntry(key)?.policy.allowDecode`. If false, self-cancels.
-
-**Execution**: Calls `WebPImageProvider.ensureHolder(onlyIfCached: true)`. This only creates a holder if bytes are already in L2 cache or provided. If bytes need fetching, returns null (does NOT trigger network download — that's DownloadTask's job).
-
-### 5.3 Task Priority Ranges
-
-| Priority Range | Usage |
+| State | Usage |
 |---|---|
-| 100 | Current page |
-| 50 | Near page (idle) |
-| 30-40 | Near page (settling/dragging) |
-| 10-20 | Far page (pre-download) |
-| 0 | Distant (no work) |
+| `idle` | Normal matrix row. Dynamic window decides how many pages are active. |
+| `dragging` | Prefer no background decode. Keep UI path light. |
+| `settling` | Transitional row only; must not require a fixed 300ms before current work starts. |
+| `jumping` | Current only; all unrelated work can be evicted/cancelled. |
 
-## 6. TaskScheduler Specification
+## 5. Decode Target Size
 
-### 6.1 Core API
+### 5.1 Observed Cost
 
-```dart
-void submit(SchedulerTask task);     // Queue or merge
-void cancel(String key);             // Cancel specific task
-void migrateTasks(activeKeys, newPriorities); // Priority-based migration
-void clear();                        // Cancel all
-```
-
-### 6.2 Concurrency Control
-
-- Max concurrent: 3 tasks (`_maxConcurrentTasks`)
-- Queue ordered by `priority` descending
-- Tasks dispatched via `scheduleMicrotask` to avoid blocking the event loop
-
-### 6.3 Preemption Rules
-
-When `submit()` finds an existing task with the same key:
-1. If new priority > old priority: upgrade priority + re-sort queue
-2. If new priority - old priority ≥ 40 (preemption threshold): cancel the running task and submit the new one
-3. Merge completers (DownloadTask) — never overwrite
-
-### 6.4 Task Migration
-
-`migrateTasks(activeKeys, newPriorities)`:
-- Tasks for keys in `activeKeys`: update priority
-- Tasks for keys NOT in `activeKeys` and `cancelable`: cancel
-- Running tasks for keys NOT in `activeKeys` and `cancelable`: cancel
-- Re-sort queue after migration
-
-## 7. DecoderManager Specification
-
-### 7.1 Entry Points
-
-| Method | Called By | Purpose |
-|---|---|---|
-| `activePagesChanged()` | `_updateWebPState` (reader UI) | Page range changed — full refresh |
-| `setInteractionState()` | Reader UI (scroll/page events) | Interaction state changed — policy refresh |
-| `getEntry()` | `_loadImageAsync`, tasks | Query resource state |
-| `getOrCreateHolder()` | `ensureHolder` | Create decoder holder |
-| `clearAll()` | Reader dispose | Cleanup all resources |
-
-### 7.2 Data Structures
+For a target of `1079 x 806`:
 
 ```
-_holders:          Map<fullKey, DecoderHolder>   — active decoder holders
-_entries:          Map<fullKey, ResourceEntry>   — all tracked image state
-_entryKeyIndex:    Map<imageKey, fullKey>        — O(1) bare-key lookup
-_currentKey:       String                        — current page key
-_nextKeys:         Set<String>                   — near (+1,+2) keys
-_lastKeys:          Set<String>                   — previous (-1) keys
-_precacheKeys:     Set<String>                   — far (+3,+4) keys
+pixels = 1079 * 806 = 869,674
+48 ms/frame ~= 20.8 frames/sec
 ```
 
-### 7.3 Eviction Policy
+This is plausible for animated WebP when the measured time includes native decode, scaling, isolate round trip, and GPU upload. It is borderline for smooth playback because a 24 fps animation has only about `41.7ms` per frame.
 
-- Timer: 1-second heartbeat via `_ensureEvictionTimer()`
-- Criteria: holder not in any priority set AND `lastAccessTime > 2000ms` ago
-- Action: `markPendingDispose()` on holder, update ResourceEntry state
-- Timer stops when `_holders` is empty
+### 5.2 Size Alignment Requirements
 
-### 7.4 markPendingDispose Protocol
+Target sizes should avoid odd and unstable dimensions such as `1079` when possible.
 
-To prevent use-after-free crashes (worker isolate still decoding when native memory is freed):
+Recommended target-size rules:
 
-1. Set `_pendingDispose = true` — prevents new decode jobs
-2. If in-flight decode job completes and sees `_pendingDispose`: calls `dispose()`
-3. 500ms fallback timer: if no in-flight job triggers dispose, force-dispose
-4. `dispose()` checks `_disposed` guard to prevent double-free
+1. Start from physical viewport size, not logical size.
+2. Preserve image aspect ratio.
+3. Clamp to source dimensions to avoid unnecessary upscaling.
+4. Align target width/height to a small boundary, preferably 2 or 8 pixels.
+5. Use the aligned target size in cache keys and decoder holder keys.
 
-## 8. ImageDownloader Specification
+Rationale:
 
-### 8.1 Public API
+- More stable cache keys across tiny viewport changes.
+- Fewer odd-width rows in native scaler/upload paths.
+- Lower chance of decoding at a size that does not match the real device-backed display area.
 
-```dart
-// Deduplicated stream — multiple callers share one download
-static Stream<ImageDownloadProgress> loadComicImage(
-  String imageKey, String? sourceKey, String cid, String eid,
-  {CancelToken? cancelToken}
-);
+## 6. Task Lifecycle
 
-// Independent stream — each caller gets its own download
-static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
-  String imageKey, String? sourceKey, String cid, String eid,
-  {CancelToken? cancelToken}
-);
+### 6.1 DownloadTask
 
-// Cancel all in-flight downloads
-static void cancelAllLoadingImages();
+Purpose: fetch original bytes.
+
+Rules:
+
+- Keyed by bare `imageKey`.
+- Can run for `current`, `decode`, and `downloadOnly` pages.
+- Writes successful WebP bytes into L2 cache.
+- Uses `CancelToken` when network work is cancelled.
+
+### 6.2 PrecreateTask
+
+Purpose: create a `DecoderHolder` when bytes already exist.
+
+Rules:
+
+- Keyed by `fullKey` (`imageKey@WxH`).
+- Runs only when policy allows decode.
+- Uses provided bytes or L2 bytes.
+- Must not trigger network fetch by itself.
+
+### 6.3 Task Migration
+
+When the dynamic window changes:
+
+- Active download keys are retained.
+- Active decode keys are retained only if policy still allows decode.
+- Queued stale tasks are cancelled.
+- Running stale tasks are cancelled when cancelable.
+- Priorities are updated for keys that remain active.
+
+## 7. Frame Decode Pipeline
+
+### 7.1 Current Page
+
+The current page is allowed to refill up to its high watermark. The animation loop may wait for a startup watermark before playback starts. If decode cannot keep up, playback may be temporarily slowed within a bounded range.
+
+### 7.2 Background Pages
+
+Background pages may decode only while current buffer level allows it. They must not continue refilling frames after they leave the dynamic decode window.
+
+### 7.3 WorkerPoolScheduler
+
+Rules:
+
+- `DecodePriority.current` is processed before `DecodePriority.next`.
+- Stale generation jobs are rejected before queue insertion.
+- Each native decoder is protected by ctx-hash affinity and `_activeDecoders`.
+
+## 8. Performance Notes
+
+### 8.1 48ms at 1079x806
+
+Treat this as a warning threshold:
+
+- acceptable if it is a rare frame or includes upload
+- too slow if it is the steady-state per-frame decode cost for a 24fps animation
+- definitely too slow if background jobs are running at the same time and current buffer is draining
+
+Mitigations:
+
+- Align target size.
+- Lower target size when source is larger than display needs.
+- Increase startup buffer modestly.
+- Stop background decode/upload below the low water mark.
+- Keep next+ as download-only.
+
+### 8.2 Memory Pressure
+
+Decoded frames are expensive:
+
+```
+width * height * 4 bytes
+1079 * 806 * 4 ~= 3.3 MB per frame
+10 frames ~= 33 MB for one current holder
 ```
 
-### 8.2 SharedStream Dedup
+This is why `next 5 + prev 2` must be conditional on current buffer health. It must not mean "decode and upload every nearby page at once".
 
-- Key: `$imageKey@$sourceKey@$cid@$eid`
-- `_SharedStream` wraps the source stream as a broadcast
-- First caller creates the SharedStream; subsequent callers get the existing stream
-- When all listeners are gone, SharedStream self-disposes
-- CancelToken is shared — canceling cancels for all
+## 9. Future Parameter Model
 
-### 8.3 Download Execution
+A future model can replace table lookup:
 
-- URL resolution: `//` → `https://` prefix
-- Response transformation: `config.onResponse` JS callback (decrypt/unpack)
-- Image modification: `modifyImageWithScript` for custom processing
-- Disk cache: `CacheManager().writeCache()` after successful download
-- Retry: up to 5 times via `config.onLoadFailed` JS callback
-- Progress throttling: max 1 event per 100ms
+```
+action = f(offset, currentBuffer, decodeMs, uploadMs, scrollVelocity, memoryPressure)
+```
 
-## 9. Frame Decode Pipeline (WorkerPoolScheduler)
+Possible action outputs:
 
-Already well-designed; kept unchanged:
+- evict
+- keep
+- downloadOnly
+- decode
+- current
 
-- **Ctx-hash affinity**: `decoder.address % 2` → deterministic worker assignment. Prevents concurrent access to non-thread-safe C state.
-- **Generation check**: `dispatch()` rejects jobs with stale generation BEFORE queue insertion. Prevents wasted work.
-- **DecodePriority**: `current` vs `next` for queue ordering.
+Do not introduce this until telemetry exists. Minimum telemetry:
 
-## 10. Error Handling
+- per-frame decode ms
+- upload ms
+- current buffer length over time
+- dropped/stalled frame count
+- page-change velocity
+- number of active holders
+- estimated decoded-frame memory
 
-### 10.1 Download Errors
-
-- Network error → `onError` callback → `_rejectAll(error)` → TaskScheduler.onTaskFailed
-- Stream closed without bytes → onDone + `!_bytesReceived` → `_rejectAll('Download completed without data')`
-- Cancel → `_rejectAll('Cancelled')`
-
-### 10.2 Decode Errors
-
-- Invalid WebP header → `_loadImageAsync` returns `_ImageResult.error`
-- Decoder creation failure → `ensureHolder` returns null
-- Static decode failure → `_ImageResult.error`
-
-### 10.3 Animation Errors
-
-- Holder disposed during animation → `_reloadAndRestart()` in `_startAnimationLoop`
-- Lifecycle pause (app background) → skip frame, wait 200ms
-
-## 11. Performance Characteristics
-
-| Operation | Complexity | Notes |
-|---|---|---|
-| Entry lookup by fullKey | O(1) | Direct HashMap access |
-| Entry lookup by imageKey | O(1) | Via `_entryKeyIndex` |
-| Policy apply to entry | O(1) | Via `_entryKeyIndex` |
-| Task submit (new) | O(log n) | Priority queue insertion |
-| Task submit (merge) | O(1) | Direct key lookup |
-| Task migration | O(k) | k = number of active tasks (small) |
-| Eviction heartbeat | O(h) | h = number of holders (small, ≤10) |
-| L2 cache check | O(1) | HashMap |
-| Disk cache check | O(1) | Via CacheManager (filesystem) |
-
-## 12. Thread Safety
-
-- **UI thread**: All Dart widget code, ResourceEntry state changes, TaskScheduler operations
-- **Worker isolates**: Frame decode (`animGetFrames`), static WebP decode, file read (Isolate.run for >1MB files)
-- **Ctx-hash affinity**: Same decoder always → same worker → sequential access to non-thread-safe C state
-- **markPendingDispose**: Prevents concurrent access to decoder during disposal
+Until then, the two-table policy is preferred because it is deterministic, inspectable, and easy to tune.

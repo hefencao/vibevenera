@@ -59,63 +59,88 @@ class ResourcePolicy {
   static const _none = ResourcePolicy();
 
   static const _current = ResourcePolicy(
-    allowDownload: true, allowDecode: true, allowGpuUpload: true,
-    downloadPriority: 100, decodePriority: 100,
+    allowDownload: true,
+    allowDecode: true,
+    allowGpuUpload: true,
+    downloadPriority: 100,
+    decodePriority: 100,
   );
 
   static const _near = ResourcePolicy(
-    allowDownload: true, allowDecode: true, allowGpuUpload: true,
-    downloadPriority: 50, decodePriority: 50,
+    allowDownload: true,
+    allowDecode: true,
+    allowGpuUpload: true,
+    downloadPriority: 50,
+    decodePriority: 50,
   );
 
   static const _far = ResourcePolicy(
-    allowDownload: true, allowDecode: false, allowGpuUpload: false,
-    downloadPriority: 20, decodePriority: 0,
+    allowDownload: true,
+    allowDecode: false,
+    allowGpuUpload: false,
+    downloadPriority: 20,
+    decodePriority: 0,
   );
 
-  static const _distant = ResourcePolicy(
-    allowEviction: true,
+  static const _distant = ResourcePolicy(allowEviction: true);
+
+  static const _draggingCurrent = ResourcePolicy(
+    allowDownload: true,
+    allowGpuUpload: true,
+    downloadPriority: 100,
   );
 
-  static ResourcePolicy compute(InteractionState i, PagePriority p) {
-    switch (i) {
-      case InteractionState.dragging:
-        switch (p) {
-          case PagePriority.current:
-            return const ResourcePolicy(
-              allowDownload: true, allowGpuUpload: true,
-              downloadPriority: 100,
-            );
-          case PagePriority.near:
-            return const ResourcePolicy(allowDownload: true, downloadPriority: 30);
-          case PagePriority.far:
-            return const ResourcePolicy(allowDownload: true, downloadPriority: 10);
-          case PagePriority.distant:
-            return _distant;
-        }
-      case InteractionState.jumping:
-        return p == PagePriority.current ? _current : _distant;
-      case InteractionState.settling:
-        switch (p) {
-          case PagePriority.current: return _current;
-          case PagePriority.near:
-            return const ResourcePolicy(
-              allowDownload: true, allowDecode: true,
-              downloadPriority: 40, decodePriority: 40,
-            );
-          case PagePriority.far:
-            return const ResourcePolicy(allowDownload: true, downloadPriority: 15);
-          case PagePriority.distant: return _distant;
-        }
-      case InteractionState.idle:
-        switch (p) {
-          case PagePriority.current: return _current;
-          case PagePriority.near:    return _near;
-          case PagePriority.far:     return _far;
-          case PagePriority.distant: return _distant;
-        }
-    }
-  }
+  static const _draggingNear = ResourcePolicy(
+    allowDownload: true,
+    downloadPriority: 30,
+  );
+
+  static const _draggingFar = ResourcePolicy(
+    allowDownload: true,
+    downloadPriority: 10,
+  );
+
+  static const _settlingNear = ResourcePolicy(
+    allowDownload: true,
+    allowDecode: true,
+    downloadPriority: 40,
+    decodePriority: 40,
+  );
+
+  static const _settlingFar = ResourcePolicy(
+    allowDownload: true,
+    downloadPriority: 15,
+  );
+
+  static const _table = <InteractionState, Map<PagePriority, ResourcePolicy>>{
+    InteractionState.dragging: {
+      PagePriority.current: _draggingCurrent,
+      PagePriority.near: _draggingNear,
+      PagePriority.far: _draggingFar,
+      PagePriority.distant: _distant,
+    },
+    InteractionState.jumping: {
+      PagePriority.current: _current,
+      PagePriority.near: _distant,
+      PagePriority.far: _distant,
+      PagePriority.distant: _distant,
+    },
+    InteractionState.settling: {
+      PagePriority.current: _current,
+      PagePriority.near: _settlingNear,
+      PagePriority.far: _settlingFar,
+      PagePriority.distant: _distant,
+    },
+    InteractionState.idle: {
+      PagePriority.current: _current,
+      PagePriority.near: _near,
+      PagePriority.far: _far,
+      PagePriority.distant: _distant,
+    },
+  };
+
+  static ResourcePolicy compute(InteractionState i, PagePriority p) =>
+      _table[i]?[p] ?? _none;
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -126,7 +151,10 @@ class ResourcePolicy {
 class DownloadState {
   bool inProgress = false;
   Object? lastError;
-  void reset() { inProgress = false; lastError = null; }
+  void reset() {
+    inProgress = false;
+    lastError = null;
+  }
 }
 
 /// Sub-state for the decode phase.
@@ -134,7 +162,11 @@ class DecodeState {
   bool inProgress = false;
   int decodedFrameCount = 0;
   int uploadedFrameCount = 0;
-  void reset() { inProgress = false; decodedFrameCount = 0; uploadedFrameCount = 0; }
+  void reset() {
+    inProgress = false;
+    decodedFrameCount = 0;
+    uploadedFrameCount = 0;
+  }
 }
 
 /// Single source of truth for one image resource.
@@ -160,7 +192,7 @@ class ResourceEntry {
   int executionEpoch = 0;
 
   Uint8List? bytes;
-  dynamic holder;          // DecoderHolder
+  dynamic holder; // DecoderHolder
   Object? error;
 
   final DownloadState download = DownloadState();
@@ -207,8 +239,10 @@ class ResourceEntry {
   }
 
   void logTransition(String from, String to) {
-    debugPrint('[Resource] $_shortKey $from → $to '
-        '(dl=${_policy.allowDownload} dec=${_policy.allowDecode})');
+    debugPrint(
+      '[Resource] $_shortKey $from → $to '
+      '(dl=${_policy.allowDownload} dec=${_policy.allowDecode})',
+    );
   }
 
   String get _shortKey {
@@ -393,7 +427,9 @@ class DownloadExecution {
       if (cacheFile != null && await cacheFile.exists()) {
         final bytes = await cacheFile.readAsBytes();
         if (bytes.isNotEmpty) {
-          debugPrint('[DownloadExec] HIT-CACHE $imageKey (${bytes.length ~/ 1024}KB)');
+          debugPrint(
+            '[DownloadExec] HIT-CACHE $imageKey (${bytes.length ~/ 1024}KB)',
+          );
           return bytes;
         }
       }
@@ -407,31 +443,35 @@ class DownloadExecution {
     debugPrint('[DownloadExec] NETWORK $imageKey');
     final completer = Completer<Uint8List>();
 
-    final sub = ImageDownloader.loadComicImage(
-      imageKey, sourceKey, cid, eid,
-      cancelToken: cancelToken,
-    ).listen(
-      (event) {
-        if (cancelToken?.isCancelled == true) {
-          if (!completer.isCompleted) completer.completeError('Cancelled');
-          return;
-        }
-        if (event.currentBytes > 0 && onProgress != null) {
-          onProgress(event.currentBytes, event.totalBytes);
-        }
-        if (event.imageBytes != null) {
-          if (!completer.isCompleted) completer.complete(event.imageBytes!);
-        }
-      },
-      onError: (e) {
-        if (!completer.isCompleted) completer.completeError(e);
-      },
-      onDone: () {
-        if (!completer.isCompleted) {
-          completer.completeError('Download completed without data');
-        }
-      },
-    );
+    final sub =
+        ImageDownloader.loadComicImage(
+          imageKey,
+          sourceKey,
+          cid,
+          eid,
+          cancelToken: cancelToken,
+        ).listen(
+          (event) {
+            if (cancelToken?.isCancelled == true) {
+              if (!completer.isCompleted) completer.completeError('Cancelled');
+              return;
+            }
+            if (event.currentBytes > 0 && onProgress != null) {
+              onProgress(event.currentBytes, event.totalBytes);
+            }
+            if (event.imageBytes != null) {
+              if (!completer.isCompleted) completer.complete(event.imageBytes!);
+            }
+          },
+          onError: (e) {
+            if (!completer.isCompleted) completer.completeError(e);
+          },
+          onDone: () {
+            if (!completer.isCompleted) {
+              completer.completeError('Download completed without data');
+            }
+          },
+        );
 
     // Propagate cancel
     cancelToken?.whenCancel.then((_) {
@@ -468,11 +508,11 @@ class DownloadTask extends PolicyAwareTask {
     required String eid,
     this.fullKey,
   }) : _exec = DownloadExecution(
-          imageKey: imageKey,
-          sourceKey: sourceKey,
-          cid: cid,
-          eid: eid,
-        );
+         imageKey: imageKey,
+         sourceKey: sourceKey,
+         cid: cid,
+         eid: eid,
+       );
 
   // ── Public API ──────────────────────────────────────────────
 
@@ -517,10 +557,12 @@ class DownloadTask extends PolicyAwareTask {
         onProgress: (current, total) {
           for (final sc in _chunkControllers) {
             if (!sc.isClosed) {
-              sc.add(ImageChunkEvent(
-                cumulativeBytesLoaded: current,
-                expectedTotalBytes: total ?? 0,
-              ));
+              sc.add(
+                ImageChunkEvent(
+                  cumulativeBytesLoaded: current,
+                  expectedTotalBytes: total ?? 0,
+                ),
+              );
             }
           }
         },
@@ -587,6 +629,7 @@ class PrecreateTask extends PolicyAwareTask {
   final DecodedImageCache? cache;
   final int targetWidth, targetHeight;
   final double scale;
+  final Uint8List? providedBytes;
   final String _imageKey;
   final String? _sourceKey;
   final String _cid, _eid;
@@ -607,10 +650,11 @@ class PrecreateTask extends PolicyAwareTask {
     required this.targetWidth,
     required this.targetHeight,
     required this.scale,
-  })  : _imageKey = imageKey,
-        _sourceKey = sourceKey,
-        _cid = cid,
-        _eid = eid;
+    this.providedBytes,
+  }) : _imageKey = imageKey,
+       _sourceKey = sourceKey,
+       _cid = cid,
+       _eid = eid;
 
   /// Register interest in the decoder holder. Returns a Future that
   /// completes with the holder when it's created.
@@ -636,6 +680,7 @@ class PrecreateTask extends PolicyAwareTask {
       targetWidth: targetWidth,
       targetHeight: targetHeight,
       scale: scale,
+      providedBytes: providedBytes,
       onlyIfCached: true,
     );
     // Resolve all waiters
@@ -665,7 +710,8 @@ class _TaskRegistry {
   final Map<String, SchedulerTask> _running = {};
 
   SchedulerTask? find(String key) => _running[key] ?? _queued[key];
-  bool contains(String key) => _running.containsKey(key) || _queued.containsKey(key);
+  bool contains(String key) =>
+      _running.containsKey(key) || _queued.containsKey(key);
   bool isRunning(String key) => _running.containsKey(key);
   bool isQueued(String key) => _queued.containsKey(key);
 
@@ -693,13 +739,15 @@ class _TaskRegistry {
   List<SchedulerTask> get runningTasks => _running.values.toList();
   int get runningCount => _running.length;
 
-  List<SchedulerTask> runningNotIn(Set<String> activeKeys) =>
-      _running.entries
-          .where((e) => !activeKeys.contains(e.key))
-          .map((e) => e.value)
-          .toList();
+  List<SchedulerTask> runningNotIn(Set<String> activeKeys) => _running.entries
+      .where((e) => !activeKeys.contains(e.key))
+      .map((e) => e.value)
+      .toList();
 
-  void clear() { _queued.clear(); _running.clear(); }
+  void clear() {
+    _queued.clear();
+    _running.clear();
+  }
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -801,9 +849,13 @@ class TaskScheduler {
   }
 
   void clear() {
-    for (final t in _queue) { t.cancel(); }
+    for (final t in _queue) {
+      t.cancel();
+    }
     _queue.clear();
-    for (final t in _registry.runningTasks) { t.cancel(); }
+    for (final t in _registry.runningTasks) {
+      t.cancel();
+    }
     _registry.clear();
   }
 
@@ -823,8 +875,7 @@ class TaskScheduler {
 
   // ── Internal ────────────────────────────────────────────────
 
-  void _sortQueue() =>
-      _queue.sort((a, b) => b.priority.compareTo(a.priority));
+  void _sortQueue() => _queue.sort((a, b) => b.priority.compareTo(a.priority));
 
   void _dispatchNext() {
     if (_registry.runningCount >= _maxConcurrent || _queue.isEmpty) return;
@@ -840,10 +891,16 @@ class TaskScheduler {
     });
   }
 
-  void _maybePreempt(SchedulerTask existing, SchedulerTask incoming, int oldPriority) {
+  void _maybePreempt(
+    SchedulerTask existing,
+    SchedulerTask incoming,
+    int oldPriority,
+  ) {
     if (!existing.cancelable) return;
     if (incoming.priority - oldPriority < _preemptionThreshold) return;
-    debugPrint('[TaskScheduler] PREEMPT ${existing.key} ($oldPriority → ${incoming.priority})');
+    debugPrint(
+      '[TaskScheduler] PREEMPT ${existing.key} ($oldPriority → ${incoming.priority})',
+    );
     existing.cancel();
     _queue.remove(existing);
     _registry.remove(existing.key);

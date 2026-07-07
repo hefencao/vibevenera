@@ -405,14 +405,6 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
-            // [ANALYSIS-2] Signal interaction state to policy engine
-            WebPImageProvider.setInteractionState(InteractionState.settling);
-            _settlingTimer?.cancel();
-            _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-              if (mounted) {
-                WebPImageProvider.setInteractionState(InteractionState.idle);
-              }
-            });
             _updateWebPState(i, context);
             context.readerScaffold.update();
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
@@ -486,15 +478,6 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   Future<void> animateToPage(int page) {
     if ((page - controller.page!.round()).abs() > 1) {
-      // [ANALYSIS-2] Jump: only decode the target page
-      WebPImageProvider.setInteractionState(InteractionState.jumping);
-      controller.jumpToPage(page);
-      _settlingTimer?.cancel();
-      _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-        if (mounted) {
-          WebPImageProvider.setInteractionState(InteractionState.idle);
-        }
-      });
       return Future.value();
     }
     return controller.animateToPage(page, duration: const Duration(milliseconds: 200), curve: Curves.ease);
@@ -502,14 +485,6 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   void toPage(int page) {
-    // [ANALYSIS-2] Signal jump to policy engine
-    WebPImageProvider.setInteractionState(InteractionState.jumping);
-    _settlingTimer?.cancel();
-    _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-      if (mounted) {
-        WebPImageProvider.setInteractionState(InteractionState.idle);
-      }
-    });
     controller.jumpToPage(page);
   }
 
@@ -721,14 +696,6 @@ class _ContinuousModeState extends State<_ContinuousMode>
     page = page.clamp(1, reader.maxPage);
     if (page != reader.page) {
       reader.setPage(page);
-      // [ANALYSIS-2] Signal interaction state to policy engine
-      WebPImageProvider.setInteractionState(InteractionState.settling);
-      _settlingTimer?.cancel();
-      _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-        if (mounted) {
-          WebPImageProvider.setInteractionState(InteractionState.idle);
-        }
-      });
       _updateWebPState(page, context);
       context.readerScaffold.update();
     }
@@ -896,18 +863,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
     widget = NotificationListener<ScrollNotification>(
       onNotification: (notification) {
         if (notification is ScrollStartNotification) {
-          // [ANALYSIS-2] User starts dragging — pause decode
-          WebPImageProvider.setInteractionState(InteractionState.dragging);
           delayedSetIsScrolling(true);
         } else if (notification is ScrollEndNotification) {
-          // [ANALYSIS-2] Drag ended — allow decode, defer GPU upload
-          WebPImageProvider.setInteractionState(InteractionState.settling);
-          _settlingTimer?.cancel();
-          _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-            if (mounted) {
-              WebPImageProvider.setInteractionState(InteractionState.idle);
-            }
-          });
           delayedSetIsScrolling(false);
         }
 
@@ -1020,14 +977,6 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void toPage(int page) {
-    // [ANALYSIS-2] Jump: only decode target page
-    WebPImageProvider.setInteractionState(InteractionState.jumping);
-    _settlingTimer?.cancel();
-    _settlingTimer = Timer(const Duration(milliseconds: 300), () {
-      if (mounted) {
-        WebPImageProvider.setInteractionState(InteractionState.idle);
-      }
-    });
     itemScrollController.jumpTo(index: page);
     _futurePosition = null;
   }
@@ -1125,6 +1074,7 @@ void _updateWebPState(int page, BuildContext context) {
 
   final imageCtrl = reader._imageViewController;
   final cache = imageCtrl?.webpCache;
+  final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(context);
 
   WebPImageProvider.onPageChanged(
     currentPageIndex: page - 1,
@@ -1134,6 +1084,16 @@ void _updateWebPState(int page, BuildContext context) {
     eid: reader.eid,
     sourceKey: reader.type.comicSource?.key,
     cache: cache,
+  );
+  PipelineController.instance.setTargetSize(targetWidth, targetHeight);
+  PipelineController.instance.onPageRangeChanged(
+    currentIdx: page - 1,
+    images: images,
+    cid: reader.cid,
+    eid: reader.eid,
+    sourceKey: reader.type.comicSource?.key,
+    cache: cache,
+    preloadCount: appdata.settings["preloadImageCount"] ?? 5,
   );
 }
 

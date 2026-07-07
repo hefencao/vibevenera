@@ -507,6 +507,7 @@ class WorkerPoolScheduler {
   final List<SendPort?> _workerPorts = [null, null];
   final List<bool> _isInitializing = [false, false];
   final List<bool> _workerBusy = [false, false];
+  final Set<int> _activeDecoders = {};
 
   // Round-robin counter for decoder creation (avoids worker 0 bottleneck)
   int _nextDecoderWorker = 0; // ignore: unused_field
@@ -636,7 +637,11 @@ class WorkerPoolScheduler {
         // 单次 FFI 调用批量解码 N 帧，消除 per-frame FFI 往返开销
         final cResults = calloc<Int64>(count * 2);
         final tStart = DateTime.now().microsecondsSinceEpoch;
-        final n = bindings.animGetFrames(ctx, count, cResults);
+        var n = bindings.animGetFrames(ctx, count, cResults);
+        if (n <= 0) {
+          bindings.animReset(ctx);
+          n = bindings.animGetFrames(ctx, count, cResults);
+        }
         final dtTotal = (DateTime.now().microsecondsSinceEpoch - tStart) ~/ 1000;
 
         if (n > 0) {
@@ -708,7 +713,9 @@ class WorkerPoolScheduler {
       for (final w in [0, 1]) {
         if (_workerBusy[w]) continue;
 
-        // Scan queues in priority order for a job matching worker w
+        // Scan queues in priority order for a job matching worker w.
+        // A WebPAnimDecoder is stateful; never run two jobs for the same
+        // native decoder concurrently, even if another worker is idle.
         final queues = [
           (_currentQueue, DecodePriority.current),
           (_nextQueue, DecodePriority.next),
@@ -719,6 +726,7 @@ class WorkerPoolScheduler {
           if (queue.isEmpty) continue;
           // Find first job in this queue whose decoder hashes to worker w
           for (final j in queue) {
+            if (_activeDecoders.contains(j.decoderAddress)) continue;
             if (j.decoderAddress % 2 == w) {
               job = j;
               assignedWorker = w;
@@ -731,18 +739,15 @@ class WorkerPoolScheduler {
 
         // Fallback: if no job hashes to worker w, take any job
         if (job == null) {
-          if (_currentQueue.isNotEmpty) {
-            job = _currentQueue.first;
-            assignedWorker = w;
-            sourceQueue = _currentQueue;
-          } else if (_nextQueue.isNotEmpty) {
-            job = _nextQueue.first;
-            assignedWorker = w;
-            sourceQueue = _nextQueue;
-          } else if (_bgQueue.isNotEmpty) {
-            job = _bgQueue.first;
-            assignedWorker = w;
-            sourceQueue = _bgQueue;
+          for (final (queue, _) in queues) {
+            for (final j in queue) {
+              if (_activeDecoders.contains(j.decoderAddress)) continue;
+              job = j;
+              assignedWorker = w;
+              sourceQueue = queue;
+              break;
+            }
+            if (job != null) break;
           }
         }
 
@@ -752,6 +757,7 @@ class WorkerPoolScheduler {
       if (job == null) break; // no work can be dispatched
 
       sourceQueue!.remove(job);
+      _activeDecoders.add(job.decoderAddress);
 
       final queueWaitUs = DateTime.now().microsecondsSinceEpoch - job.dispatchedAt;
       debugPrint('[WebP-T] w$assignedWorker dequeue wait=${queueWaitUs ~/ 1000}ms '
@@ -759,6 +765,7 @@ class WorkerPoolScheduler {
 
       if (job.generation != _currentGeneration) {
         debugPrint('[WebP-T] w$assignedWorker stale gen=${job.generation} curr=${_currentGeneration}');
+        _activeDecoders.remove(job.decoderAddress);
         job.onComplete([]);
         continue;
       }
@@ -812,6 +819,7 @@ class WorkerPoolScheduler {
       debugPrint('[WebP-Worker] w$workerIndex exception: $e');
       job.onComplete([]);
     } finally {
+      _activeDecoders.remove(job.decoderAddress);
       _workerBusy[workerIndex] = false;
       _scheduleNext();
     }

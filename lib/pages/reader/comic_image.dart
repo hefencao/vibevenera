@@ -138,6 +138,8 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     _completerHandle?.dispose();
     _scrollAwareContext.dispose();
     _replaceImage(info: null);
+    _pendingDispose?.dispose();
+    _pendingDispose = null;
     widget.onDispose?.call(this);
     super.dispose();
   }

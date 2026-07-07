@@ -6,11 +6,11 @@ import 'dart:ffi';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'image_fetch.dart';
+import 'pipeline_controller.dart';
 import 'task_scheduler.dart';
 
 double webpPlaybackSpeed = 1.0;
@@ -39,10 +39,13 @@ enum PageState { current, next, last, precache }
 
 PageState _priorityToPageState(PagePriority p) {
   switch (p) {
-    case PagePriority.current: return PageState.current;
-    case PagePriority.near:    return PageState.next;
+    case PagePriority.current:
+      return PageState.current;
+    case PagePriority.near:
+      return PageState.next;
     case PagePriority.far:
-    case PagePriority.distant: return PageState.precache;
+    case PagePriority.distant:
+      return PageState.precache;
   }
 }
 
@@ -65,6 +68,11 @@ class BufferedFrame {
 // ═══════════════════════════════════════════════════════════════
 
 class DecoderHolder {
+  static const int _lowWatermark = 3;
+  static const int _startupWatermark = 3;
+  static const int _highWatermark = 7;
+  static const int _precacheTarget = 5;
+
   final String key;
   final webp.WebPAnimDecoder decoder;
   final int targetW, targetH;
@@ -88,6 +96,7 @@ class DecoderHolder {
   int decodedFrameCount = 0;
   int uploadedFrameCount = 0;
 
+  bool _decodeInFlight = false;
   bool _isUploading = false;
   List<webp.WebPAnimFrameAddress>? _pendingUploadAddrs;
   Completer<void>? refillSignal;
@@ -108,7 +117,8 @@ class DecoderHolder {
     if (_disposed || _state == newState) return;
     _state = newState;
     lastAccessTime = _nowMs();
-    decoder.setThreadLimit(1);
+    decoder.setThreadLimit(newState == PageState.current ? 2 : 1);
+    _notifyCurrentBuffer();
     _requestFramesIfNeeded();
   }
 
@@ -130,6 +140,7 @@ class DecoderHolder {
       return null;
     }
     final frame = _frameBuffer.removeFirst();
+    _notifyCurrentBuffer();
     _requestFramesIfNeeded();
     return frame;
   }
@@ -138,7 +149,16 @@ class DecoderHolder {
   /// WorkerPoolScheduler directly.
   void _requestFramesIfNeeded() {
     if (_disposed || _pendingDispose) return;
-    if (_policy.allowDecode && _frameBuffer.length < 3) {
+    if (!_policy.allowDecode || !_policy.allowGpuUpload) return;
+    if (_decodeInFlight) return;
+    if (_isUploading) return;
+    if (_pendingUploadAddrs != null) return;
+
+    final target = _state == PageState.current
+        ? _highWatermark
+        : _precacheTarget;
+    final low = _state == PageState.current ? _lowWatermark : 0;
+    if (_frameBuffer.length <= low && _frameBuffer.length < target) {
       onNeedFrames?.call();
     }
   }
@@ -147,59 +167,136 @@ class DecoderHolder {
 
   /// Called by [HolderDecodeService] with decoded frame addresses.
   void onFramesDecoded(List<webp.WebPAnimFrameAddress> frames) {
+    _decodeInFlight = false;
     if (_disposed || _pendingDispose) {
-      for (final f in frames) { webp.nativePoolRelease(f.address); }
+      for (final f in frames) {
+        webp.nativePoolRelease(f.address);
+      }
+      _completeRefillWaiters();
       return;
     }
     if (frames.isEmpty) {
-      if (_pendingDispose) { _pendingDispose = false; dispose(); }
+      if (_pendingDispose) {
+        _pendingDispose = false;
+        dispose();
+      }
+      _completeRefillWaiters();
+      _requestFramesIfNeeded();
+      return;
+    }
+    // Drop frames decoded for a page that's no longer visible.
+    // Without this check, stale frames from previous pages get
+    // uploaded and mixed into the current display → corruption.
+    if (_state != PageState.current &&
+        _dispatchGen != DecoderManager.instance.generation) {
+      for (final f in frames) {
+        webp.nativePoolRelease(f.address);
+      }
+      _completeRefillWaiters();
+      _requestFramesIfNeeded();
       return;
     }
     decodedFrameCount += frames.length;
-    _scheduleUpload(frames, frames.length, frames.first.durationMs,
-        frames.last.durationMs);
+    _scheduleUpload(
+      frames,
+      frames.length,
+      frames.first.durationMs,
+      frames.last.durationMs,
+    );
     _requestFramesIfNeeded();
   }
 
+  /// Generation at the time the last decode was dispatched.
+  int _dispatchGen = 0;
+
   // ── GPU Upload ─────────────────────────────────────────────
 
-  void _scheduleUpload(List<webp.WebPAnimFrameAddress> addrs, int n,
-      int t0, int t1) {
-    if (_isUploading) { _pendingUploadAddrs = addrs; return; }
+  void _scheduleUpload(
+    List<webp.WebPAnimFrameAddress> addrs,
+    int n,
+    int t0,
+    int t1,
+  ) {
+    if (_isUploading) {
+      final old = _pendingUploadAddrs;
+      if (old != null) {
+        for (final f in old) {
+          webp.nativePoolRelease(f.address);
+        }
+      }
+      _pendingUploadAddrs = addrs;
+      return;
+    }
     _doUpload(addrs, n);
   }
 
   Future<void> _doUpload(List<webp.WebPAnimFrameAddress> addrs, int n) async {
     _isUploading = true;
+    final outW = decoder.targetWidth;
+    final outH = decoder.targetHeight;
     for (int i = 0; i < n; i++) {
       if (_disposed || _pendingDispose) {
         _releaseRemainingBuffers(addrs, i);
         break;
       }
       final addr = addrs[i];
-      final len = targetW * targetH * 4;
-      final rgba = Pointer<Uint8>.fromAddress(addr.address).asTypedList(len);
+      final rgba = Pointer<Uint8>.fromAddress(
+        addr.address,
+      ).asTypedList(outW * outH * 4);
       final completer = Completer<BufferedFrame>();
-      ui.decodeImageFromPixels(rgba, targetW, targetH, ui.PixelFormat.rgba8888,
-          (img) { webp.nativePoolRelease(addr.address); completer.complete(BufferedFrame(img, addr.durationMs)); });
+      ui.decodeImageFromPixels(rgba, outW, outH, ui.PixelFormat.rgba8888, (
+        img,
+      ) {
+        webp.nativePoolRelease(addr.address);
+        completer.complete(BufferedFrame(img, addr.durationMs));
+      });
       final frame = await completer.future;
-      if (_disposed || _pendingDispose) { frame.image.dispose(); continue; }
+      if (_disposed || _pendingDispose) {
+        frame.image.dispose();
+        continue;
+      }
       _frameBuffer.add(frame);
       uploadedFrameCount++;
+      _notifyCurrentBuffer();
     }
     _isUploading = false;
-    refillSignal?.complete();
-    refillSignal = null;
+    _completeRefillWaiters();
     if (_pendingUploadAddrs != null) {
       final pending = _pendingUploadAddrs!;
       _pendingUploadAddrs = null;
       _doUpload(pending, pending.length);
+    } else {
+      _requestFramesIfNeeded();
     }
   }
 
-  void _releaseRemainingBuffers(List<webp.WebPAnimFrameAddress> addrs, int from) {
+  void _completeRefillWaiters() {
+    refillSignal?.complete();
+    refillSignal = null;
+  }
+
+  void _releaseRemainingBuffers(
+    List<webp.WebPAnimFrameAddress> addrs,
+    int from,
+  ) {
     for (int i = from; i < addrs.length; i++) {
       webp.nativePoolRelease(addrs[i].address);
+    }
+  }
+
+  void clearBufferedFrames() {
+    for (final f in _frameBuffer) {
+      f.image.dispose();
+    }
+    _frameBuffer.clear();
+    _notifyCurrentBuffer();
+  }
+
+  void _notifyCurrentBuffer() {
+    if (_state == PageState.current) {
+      PipelineController.instance.updateCurrentBufferedFrames(
+        _frameBuffer.length,
+      );
     }
   }
 
@@ -209,18 +306,19 @@ class DecoderHolder {
     if (_disposed) return;
     _disposed = true;
     decoder.dispose();
-    for (final f in _frameBuffer) { f.image.dispose(); }
-    _frameBuffer.clear();
+    clearBufferedFrames();
     onNeedFrames = null;
-    refillSignal?.complete();
-    refillSignal = null;
+    _completeRefillWaiters();
   }
 
   void markPendingDispose() {
     if (_pendingDispose || _disposed) return;
     _pendingDispose = true;
     Future.delayed(const Duration(milliseconds: 500), () {
-      if (_pendingDispose && !_disposed) { _pendingDispose = false; dispose(); }
+      if (_pendingDispose && !_disposed) {
+        _pendingDispose = false;
+        dispose();
+      }
     });
   }
 }
@@ -251,10 +349,19 @@ class HolderDecodeService {
   }
 
   void _requestDecode(DecoderHolder holder) {
+    // Adaptive batch: more when buffer is low, fewer when nearly full.
+    final bufLen = holder.bufferLength;
+    final target = holder.state == PageState.current
+        ? DecoderHolder._highWatermark
+        : DecoderHolder._precacheTarget;
+    final maxBatch = holder.state == PageState.current ? 6 : 4;
+    final refillCount = (target - bufLen).clamp(1, maxBatch);
+    holder._decodeInFlight = true;
+    holder._dispatchGen = _generation;
     final job = webp.DecodeJob(
       generation: _generation,
       decoderAddress: holder.decoder.address,
-      framesToDecode: 3,
+      framesToDecode: refillCount,
       targetW: holder.targetW,
       targetH: holder.targetH,
       onComplete: (frames) => holder.onFramesDecoded(frames),
@@ -319,18 +426,36 @@ class DecoderManager {
   DecoderHolder? getHolder(String key) => _holders[key];
 
   DecoderHolder getOrCreateHolder(
-    String key, webp.WebPAnimDecoder decoder,
-    int tw, int th, double scale,
+    String key,
+    webp.WebPAnimDecoder decoder,
+    int tw,
+    int th,
+    double scale,
   ) {
     _ensureEvictionTimer();
+    final existing = _holders[key];
+    if (existing != null && !existing.disposed) {
+      decoder.dispose();
+      return existing;
+    }
+    if (existing != null) {
+      _holders.remove(key);
+    }
     return _holders.putIfAbsent(key, () {
-      final h = DecoderHolder(key: key, decoder: decoder,
-          targetW: tw, targetH: th, scale: scale);
+      final h = DecoderHolder(
+        key: key,
+        decoder: decoder,
+        targetW: tw,
+        targetH: th,
+        scale: scale,
+      );
       decodeService.attach(h);
       final bk = _baseKey(key);
       if (bk == _currentKey) {
         h.updateState(PageState.current);
-        h.updatePolicy(ResourcePolicy.compute(_interaction, PagePriority.current));
+        h.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.current),
+        );
       } else if (_nextKeys.contains(bk) || _lastKeys.contains(bk)) {
         h.updateState(PageState.next);
         h.updatePolicy(ResourcePolicy.compute(_interaction, PagePriority.near));
@@ -351,26 +476,48 @@ class DecoderManager {
     required Set<String> precacheKeys,
   }) {
     _currentKey = currentKey;
-    _nextKeys..clear()..addAll(nextKeys);
-    _lastKeys..clear()..addAll(lastKeys);
-    _precacheKeys..clear()..addAll(precacheKeys);
+    _nextKeys
+      ..clear()
+      ..addAll(nextKeys);
+    _lastKeys
+      ..clear()
+      ..addAll(lastKeys);
+    _precacheKeys
+      ..clear()
+      ..addAll(precacheKeys);
 
     // Update holder states by matching base keys
     for (final e in _holders.entries) {
       final bk = _baseKey(e.key);
       if (bk == currentKey) {
         e.value.updateState(PageState.current);
+        e.value.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.current),
+        );
       } else if (nextKeys.contains(bk) || lastKeys.contains(bk)) {
         e.value.updateState(PageState.next);
+        e.value.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.near),
+        );
       } else if (precacheKeys.contains(bk)) {
         e.value.updateState(PageState.precache);
+        e.value.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.far),
+        );
       } else {
         e.value.updateState(PageState.precache);
+        e.value.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.distant),
+        );
       }
     }
   }
 
-  void applyPolicyToHolder(String imageKey, ResourcePolicy policy, PagePriority priority) {
+  void applyPolicyToHolder(
+    String imageKey,
+    ResourcePolicy policy,
+    PagePriority priority,
+  ) {
     for (final e in _holders.entries) {
       if (_baseKey(e.key) == imageKey && !e.value.disposed) {
         e.value.updateState(_priorityToPageState(priority));
@@ -383,7 +530,10 @@ class DecoderManager {
   // ── Eviction ───────────────────────────────────────────────
 
   void _ensureEvictionTimer() {
-    _evictionTimer ??= Timer.periodic(const Duration(seconds: 1), (_) => _evictDistant());
+    _evictionTimer ??= Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _evictDistant(),
+    );
   }
 
   void _cancelEvictionTimer() {
@@ -418,10 +568,14 @@ class DecoderManager {
   void clearAll() {
     decodeService.updateGeneration(decodeService.generation + 1);
     _interaction = InteractionState.idle;
-    for (final h in _holders.values) { h.dispose(); }
+    for (final h in _holders.values) {
+      h.dispose();
+    }
     _holders.clear();
     _currentKey = '';
-    _nextKeys.clear(); _lastKeys.clear(); _precacheKeys.clear();
+    _nextKeys.clear();
+    _lastKeys.clear();
+    _precacheKeys.clear();
     _cancelEvictionTimer();
   }
 }
@@ -475,7 +629,10 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       SynchronousFuture<WebPImageProvider>(this);
 
   @override
-  ImageStreamCompleter loadImage(WebPImageProvider key, ImageDecoderCallback decode) {
+  ImageStreamCompleter loadImage(
+    WebPImageProvider key,
+    ImageDecoderCallback decode,
+  ) {
     final chunkEvents = StreamController<ImageChunkEvent>();
     return _WebPImageStreamCompleter(
       _loadImageAsync(chunkEvents: chunkEvents),
@@ -535,23 +692,42 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   Future<Uint8List> _fetchBytes({
     StreamController<ImageChunkEvent>? chunkEvents,
   }) async {
-    return fetchImageBytes(imageKey, sourceKey, cid, eid,
-        chunkEvents: chunkEvents);
+    return fetchImageBytes(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      chunkEvents: chunkEvents,
+    );
   }
 
   /// Step 2: Create animated decoder holder from bytes.
   Future<DecoderHolder?> _createAnimatedHolder(
-      Uint8List bytes, webp.WebPImageInfo info) async {
-    int tw = targetWidth, th = targetHeight;
-    if (tw <= 0) tw = info.width;
-    if (th <= 0) th = info.height;
+    Uint8List bytes,
+    webp.WebPImageInfo info,
+  ) async {
+    // Preserve aspect ratio: compute height from width so the
+    // decoder output dimensions match the requested dimensions.
+    // This ensures targetW×targetH == decoder.targetWidth×decoder.targetHeight.
+    final int tw = targetWidth > 0 ? targetWidth : info.width;
+    final int th = targetWidth > 0
+        ? (tw * info.height / info.width).round()
+        : (targetHeight > 0 ? targetHeight : info.height);
 
     try {
-      final decoder = webp.createAnimDecoder(bytes,
-          targetWidth: tw, targetHeight: th);
+      final decoder = webp.createAnimDecoder(
+        bytes,
+        targetWidth: tw,
+        targetHeight: th,
+      );
       if (decoder == null) return null;
       return DecoderManager.instance.getOrCreateHolder(
-          _fullKey, decoder, tw, th, scale);
+        _fullKey,
+        decoder,
+        tw,
+        th,
+        scale,
+      );
     } catch (_) {
       return null;
     }
@@ -559,9 +735,14 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
   /// Step 3: Decode static WebP to ui.Image.
   Future<ui.Image?> _decodeStatic(
-      Uint8List bytes, webp.WebPImageInfo info) async {
-    final frame = webp.decodeStatic(bytes,
-        targetWidth: targetWidth, targetHeight: targetHeight);
+    Uint8List bytes,
+    webp.WebPImageInfo info,
+  ) async {
+    final frame = webp.decodeStatic(
+      bytes,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+    );
     if (frame == null) return null;
     return _rgbaToUiImage(frame.rgba, frame.width, frame.height);
   }
@@ -616,20 +797,31 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     final info = webp.getInfo(bytes);
     if (info == null || !info.isAnimated) return null;
 
-    int tw = targetWidth, th = targetHeight;
-    if (tw <= 0) tw = info.width;
-    if (th <= 0) th = info.height;
+    final int tw = targetWidth > 0 ? targetWidth : info.width;
+    final int th = targetWidth > 0
+        ? (tw * info.height / info.width).round()
+        : (targetHeight > 0 ? targetHeight : info.height);
 
     try {
-      final decoder = webp.createAnimDecoder(bytes,
-          targetWidth: tw, targetHeight: th);
+      final decoder = webp.createAnimDecoder(
+        bytes,
+        targetWidth: tw,
+        targetHeight: th,
+      );
       if (decoder == null) return null;
 
       // Step 4: Publish holder
       final holder = DecoderManager.instance.getOrCreateHolder(
-          fullKey, decoder, tw, th, scale);
-      debugPrint('[WebP-HOLDER] ${_short(fullKey)} created '
-          '(${bytes.length ~/ 1024}KB)');
+        fullKey,
+        decoder,
+        tw,
+        th,
+        scale,
+      );
+      debugPrint(
+        '[WebP-HOLDER] ${_short(fullKey)} created '
+        '(${bytes.length ~/ 1024}KB)',
+      );
       return holder;
     } catch (_) {
       return null;
@@ -641,7 +833,8 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     return other is WebPImageProvider &&
         imageKey == other.imageKey &&
         sourceKey == other.sourceKey &&
-        cid == other.cid && eid == other.eid &&
+        cid == other.cid &&
+        eid == other.eid &&
         targetWidth == other.targetWidth &&
         targetHeight == other.targetHeight;
   }
@@ -668,77 +861,32 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
     String fk(int i) => (i >= 0 && i < images.length) ? images[i] : '';
     final current = fk(currentPageIndex);
-    final next = {fk(currentPageIndex + 1), fk(currentPageIndex + 2)}
-        .where((k) => k.isNotEmpty).toSet();
-    final last = {fk(currentPageIndex - 1)}.where((k) => k.isNotEmpty).toSet();
-    final precache = {fk(currentPageIndex + 3), fk(currentPageIndex + 4)}
-        .where((k) => k.isNotEmpty).toSet();
+    PipelineController.instance.onWindowChanged =
+        (currentKey, decodeNextKeys, decodePrevKeys, downloadOnlyKeys) {
+          DecoderManager.instance.setPageRange(
+            currentKey: currentKey,
+            nextKeys: decodeNextKeys,
+            lastKeys: decodePrevKeys,
+            precacheKeys: downloadOnlyKeys,
+          );
+
+          if (cache != null) {
+            cache.setActivePages(
+              [
+                currentKey,
+                ...decodeNextKeys,
+                ...decodePrevKeys,
+              ].where((k) => k.isNotEmpty),
+            );
+          }
+        };
 
     DecoderManager.instance.setPageRange(
-      currentKey: current, nextKeys: next,
-      lastKeys: last, precacheKeys: precache,
+      currentKey: current,
+      nextKeys: const <String>{},
+      lastKeys: const <String>{},
+      precacheKeys: const <String>{},
     );
-
-    if (cache != null) {
-      cache.setActivePages(
-        [current, ...next, ...last].where((k) => k.isNotEmpty).toList());
-    }
-
-    // Delegate task scheduling to PipelineController
-    _schedulePreWork(currentPageIndex, images, context, cid, eid, sourceKey, cache);
-  }
-
-  static void _schedulePreWork(
-    int currentPageIndex, List<String> images, BuildContext context,
-    String cid, String eid, String? sourceKey, DecodedImageCache? cache,
-  ) {
-    int targetW = 0, targetH = 0;
-    double scale = 1.0;
-    try {
-      final mq = MediaQuery.of(context);
-      final dpr = mq.devicePixelRatio;
-      targetW = (mq.size.width * dpr).round();
-      targetH = (mq.size.height * dpr).round();
-      scale = 1.0 / dpr;
-    } catch (_) {}
-
-    final interaction = DecoderManager.instance._interaction;
-    final gen = DecoderManager.instance.generation;
-    final count = appdata.settings["preloadImageCount"] ?? 5;
-
-    for (int i = 1; i <= count; i++) {
-      final idx = currentPageIndex + i;
-      if (idx < 0 || idx >= images.length) continue;
-      final imageKey = images[idx];
-      final isLocal = imageKey.startsWith('file://');
-      final fullKey = targetW > 0
-          ? '$imageKey@${targetW}x$targetH' : imageKey;
-
-      // Compute priority
-      final pri = i <= 2 ? PagePriority.near : PagePriority.far;
-      final policy = ResourcePolicy.compute(interaction, pri);
-
-      // Download
-      if (!isLocal && policy.allowDownload) {
-        TaskScheduler.instance.submit(DownloadTask(
-          key: imageKey, imageKey: imageKey, fullKey: fullKey,
-          generation: gen, priority: policy.downloadPriority,
-          cancelable: true,
-          sourceKey: sourceKey, cid: cid, eid: eid,
-        ));
-      }
-
-      // Precreate
-      if (policy.allowDecode) {
-        TaskScheduler.instance.submit(PrecreateTask(
-          key: fullKey, imageKey: imageKey,
-          generation: gen, priority: policy.decodePriority,
-          cancelable: true, cache: cache,
-          sourceKey: sourceKey, cid: cid, eid: eid,
-          targetWidth: targetW, targetHeight: targetH, scale: scale,
-        ));
-      }
-    }
   }
 
   static void clearAll() => DecoderManager.instance.clearAll();
@@ -758,8 +906,9 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
   StreamSubscription<ImageChunkEvent>? _chunkSub;
 
   _WebPImageStreamCompleter(
-    Future<_ImageResult> future, this._provider,
-    {Stream<ImageChunkEvent>? chunkEvents,
+    Future<_ImageResult> future,
+    this._provider, {
+    Stream<ImageChunkEvent>? chunkEvents,
   }) {
     if (chunkEvents != null) {
       _chunkSub = chunkEvents.listen((event) {
@@ -838,11 +987,18 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       } catch (_) {}
 
       if (holder.disposed) {
+        _drainBuffer(holder);
         final nh = await _reloadAndRestart(holder);
-        if (nh != null) { holder = nh; continue; } else { break; }
+        if (nh != null) {
+          holder = nh;
+          continue;
+        } else {
+          break;
+        }
       }
 
-      if (holder.bufferLength < 3 && holder.state == PageState.current) {
+      if (holder.bufferLength < DecoderHolder._startupWatermark &&
+          holder.state == PageState.current) {
         holder.refillSignal ??= Completer<void>();
         await holder.refillSignal!.future;
         continue;
@@ -859,9 +1015,30 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       setImage(ImageInfo(image: frame.image, scale: holder.scale));
       final rawDelay = frame.durationMs <= 0 ? 100 : frame.durationMs;
       final delay = rawDelay.clamp(16, 200);
+      final bufferPressureDelay = _bufferPressureDelay(holder);
       await Future.delayed(
-        Duration(milliseconds: (delay / webpPlaybackSpeed).round()));
+        Duration(
+          milliseconds: (delay * bufferPressureDelay / webpPlaybackSpeed)
+              .round(),
+        ),
+      );
     }
+    // Clear stale frames so they don't corrupt the next page
+    _drainBuffer(initialHolder);
+  }
+
+  double _bufferPressureDelay(DecoderHolder holder) {
+    if (holder.state != PageState.current) return 1.0;
+    final remaining = holder.bufferLength;
+    if (remaining <= 1) return 1.3;
+    if (remaining <= 3) return 1.2;
+    if (remaining <= 5) return 1.1;
+    return 1.0;
+  }
+
+  /// Dispose all frames remaining in a holder's buffer.
+  void _drainBuffer(DecoderHolder h) {
+    h.clearBufferedFrames();
   }
 }
 
@@ -878,8 +1055,13 @@ class _ImageResult {
   final Uint8List? rawBytes;
   final Object? error;
 
-  _ImageResult._({required this.type, this.imageInfo, this.holder,
-      this.rawBytes, this.error});
+  _ImageResult._({
+    required this.type,
+    this.imageInfo,
+    this.holder,
+    this.rawBytes,
+    this.error,
+  });
 
   factory _ImageResult.static(ImageInfo info) =>
       _ImageResult._(type: _ResultType.static, imageInfo: info);

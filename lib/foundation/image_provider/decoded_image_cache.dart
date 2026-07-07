@@ -31,7 +31,7 @@ class DecodedImageCache {
     final entry = _l1[key];
     if (entry == null) return null;
     entry.lastAccess = DateTime.now();
-    return entry.image;
+    return entry.image.clone();
   }
 
   /// 存入 L1，若超出容量则驱逐最久未访问的
@@ -40,7 +40,7 @@ class DecodedImageCache {
     final existing = _l1.remove(key);
     existing?.image.dispose();
 
-    _l1[key] = _L1Entry(image: image, lastAccess: DateTime.now());
+    _l1[key] = _L1Entry(image: image.clone(), lastAccess: DateTime.now());
     _evictL1IfNeeded();
   }
 

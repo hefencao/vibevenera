@@ -1,5 +1,9 @@
 import 'dart:async';
 
+import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
+import 'package:venera/utils/webp_decoder.dart' as webp;
+
+import 'preload_policy.dart';
 import 'task_scheduler.dart';
 
 // ═══════════════════════════════════════════════════════════════
@@ -62,7 +66,9 @@ class ResourceManager {
   }
 
   void forEach(void Function(ResourceEntry) fn) {
-    for (final e in _entries.values) { fn(e); }
+    for (final e in _entries.values) {
+      fn(e);
+    }
   }
 
   /// Release resources for an entry (bytes, holder, frame data).
@@ -75,7 +81,9 @@ class ResourceManager {
     entry.bytes = null;
     entry.download.reset();
     entry.decode.reset();
-    _stateController.add(ResourceEvent(entry.fullKey, ResourceEventType.released));
+    _stateController.add(
+      ResourceEvent(entry.fullKey, ResourceEventType.released),
+    );
   }
 
   void remove(String fullKey) {
@@ -105,9 +113,9 @@ class ResourceManager {
 // ───────────────────────────────────────────────────────────────
 
 enum ResourceEventType {
-  bytesReady,    // Download complete
-  holderReady,   // Decoder created
-  released,      // Resources freed
+  bytesReady, // Download complete
+  holderReady, // Decoder created
+  released, // Resources freed
   policyChanged, // allowDownload/allowDecode changed
 }
 
@@ -128,16 +136,38 @@ class PipelineController {
   final ResourceManager resources = ResourceManager();
   final TaskScheduler _scheduler = TaskScheduler.instance;
 
+  void Function(
+    String currentKey,
+    Set<String> decodeNextKeys,
+    Set<String> decodePrevKeys,
+    Set<String> downloadOnlyKeys,
+  )?
+  onWindowChanged;
+
   InteractionState _interaction = InteractionState.idle;
   int _targetW = 0, _targetH = 0;
+  DecodedImageCache? _cache;
+  int _currentIdx = 0;
+  int _preloadCount = 5;
+  int _currentBufferedFrames = 0;
+  int _windowKey = -1;
+  List<String> _images = const [];
+  String? _sourceKey;
+  String _cid = '';
+  String _eid = '';
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
+  final Set<String> _prevKeys = {};
   final Set<String> _farKeys = {};
+  final Set<String> _keepKeys = {};
 
   // ── Public API ──────────────────────────────────────────────
 
-  void setTargetSize(int w, int h) { _targetW = w; _targetH = h; }
+  void setTargetSize(int w, int h) {
+    _targetW = w;
+    _targetH = h;
+  }
 
   void setInteractionState(InteractionState state) {
     if (_interaction == state) return;
@@ -152,29 +182,86 @@ class PipelineController {
     required String cid,
     required String eid,
     required String? sourceKey,
+    DecodedImageCache? cache,
     int preloadCount = 5,
   }) {
-    String fk(int i) => (i >= 0 && i < images.length) ? images[i] : '';
+    _cache = cache;
+    _currentIdx = currentIdx;
+    _images = images;
+    _cid = cid;
+    _eid = eid;
+    _sourceKey = sourceKey;
+    _preloadCount = preloadCount;
+    _currentBufferedFrames = 0;
+    _windowKey = -1;
 
-    _currentKey = fk(currentIdx);
-    _nearKeys.clear(); _farKeys.clear();
-    for (int i = 1; i <= 2; i++) {
-      final k = fk(currentIdx + i);
+    _applyWindow();
+  }
+
+  void updateCurrentBufferedFrames(int frames) {
+    if (_images.isEmpty) return;
+    final window = DynamicPreloadPolicy.windowFor(
+      currentBufferedFrames: frames,
+      preloadCount: _preloadCount,
+    );
+    if (window.key == _windowKey) return;
+    _currentBufferedFrames = frames;
+    _applyWindow();
+  }
+
+  void _applyWindow() {
+    String fk(int i) => (i >= 0 && i < _images.length) ? _images[i] : '';
+
+    final window = DynamicPreloadPolicy.windowFor(
+      currentBufferedFrames: _currentBufferedFrames,
+      preloadCount: _preloadCount,
+    );
+    _windowKey = window.key;
+
+    _currentKey = fk(_currentIdx);
+    _nearKeys.clear();
+    _prevKeys.clear();
+    _farKeys.clear();
+    _keepKeys.clear();
+
+    final offsets = DynamicPreloadPolicy.offsetsFor(
+      preloadCount: _preloadCount,
+      window: window,
+    );
+
+    for (final offset in offsets.decodeNext) {
+      final k = fk(_currentIdx + offset);
       if (k.isNotEmpty) _nearKeys.add(k);
     }
-    for (int i = 3; i <= preloadCount; i++) {
-      final k = fk(currentIdx + i);
+    for (final offset in offsets.decodePrev) {
+      final k = fk(_currentIdx + offset);
+      if (k.isNotEmpty) _prevKeys.add(k);
+    }
+    for (final offset in offsets.downloadOnlyNext) {
+      final k = fk(_currentIdx + offset);
       if (k.isNotEmpty) _farKeys.add(k);
+    }
+    for (final offset in offsets.keep) {
+      final k = fk(_currentIdx + offset);
+      if (k.isNotEmpty) _keepKeys.add(k);
     }
 
     // Ensure entries exist
-    String fullKey(String k) =>
-        _targetW > 0 ? '$k@${_targetW}x$_targetH' : k;
-    for (final key in {_currentKey, ..._nearKeys, ..._farKeys}) {
+    String fullKey(String k) => _targetW > 0 ? '$k@${_targetW}x$_targetH' : k;
+    for (final key in {
+      _currentKey,
+      ..._nearKeys,
+      ..._prevKeys,
+      ..._farKeys,
+      ..._keepKeys,
+    }) {
       if (key.isEmpty) continue;
       resources.ensure(
-        imageKey: key, fullKey: fullKey(key),
-        sourceKey: sourceKey, cid: cid, eid: eid,
+        imageKey: key,
+        fullKey: fullKey(key),
+        sourceKey: _sourceKey,
+        cid: _cid,
+        eid: _eid,
       );
     }
 
@@ -182,23 +269,46 @@ class PipelineController {
     _refreshPolicies();
 
     // Migrate existing tasks
-    final activeKeys = <String>{_currentKey, ..._nearKeys, ..._farKeys};
+    final activeImageKeys = <String>{
+      _currentKey,
+      ..._nearKeys,
+      ..._prevKeys,
+      ..._farKeys,
+      ..._keepKeys,
+    };
+    final activeTaskKeys = <String>{};
     final newPriorities = <String, int>{};
     resources.forEach((e) {
+      if (activeImageKeys.contains(e.imageKey)) {
+        activeTaskKeys.add(e.imageKey);
+        if (e.policy.allowDecode) {
+          activeTaskKeys.add(e.fullKey);
+        }
+      }
       if (e.policy.downloadPriority > 0) {
         newPriorities[e.imageKey] = e.policy.downloadPriority;
       }
+      if (e.policy.decodePriority > 0) {
+        newPriorities[e.fullKey] = e.policy.decodePriority;
+      }
     });
-    _scheduler.migrateTasks(activeKeys, newPriorities);
+    _scheduler.migrateTasks(activeTaskKeys, newPriorities);
 
     // Submit work
-    _submitWork(sourceKey, cid, eid);
+    _submitWork(_sourceKey, _cid, _eid);
+
+    onWindowChanged?.call(_currentKey, _nearKeys, _prevKeys, {
+      ..._farKeys,
+      ..._keepKeys,
+    });
 
     // Mark distant entries
     resources.forEach((e) {
-      if (!activeKeys.contains(e.imageKey)) {
+      if (!activeImageKeys.contains(e.imageKey)) {
         e.updatePriority(PagePriority.distant);
-        e.updatePolicy(ResourcePolicy.compute(_interaction, PagePriority.distant));
+        e.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.distant),
+        );
       }
     });
   }
@@ -215,8 +325,18 @@ class PipelineController {
     resources.forEach((e) => byKey[e.imageKey] = e);
 
     byKey[_currentKey]?.updatePriority(PagePriority.current);
-    for (final k in _nearKeys) { byKey[k]?.updatePriority(PagePriority.near); }
-    for (final k in _farKeys) { byKey[k]?.updatePriority(PagePriority.far); }
+    for (final k in _nearKeys) {
+      byKey[k]?.updatePriority(PagePriority.near);
+    }
+    for (final k in _prevKeys) {
+      byKey[k]?.updatePriority(PagePriority.near);
+    }
+    for (final k in _farKeys) {
+      byKey[k]?.updatePriority(PagePriority.far);
+    }
+    for (final k in _keepKeys) {
+      byKey[k]?.updatePriority(PagePriority.far);
+    }
   }
 
   void _refreshPolicies() {
@@ -224,14 +344,27 @@ class PipelineController {
     resources.forEach((e) => byKey[e.imageKey] = e);
 
     byKey[_currentKey]?.updatePolicy(
-      ResourcePolicy.compute(_interaction, PagePriority.current));
+      ResourcePolicy.compute(_interaction, PagePriority.current),
+    );
     for (final k in _nearKeys) {
       byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.near));
+        ResourcePolicy.compute(_interaction, PagePriority.near),
+      );
+    }
+    for (final k in _prevKeys) {
+      byKey[k]?.updatePolicy(
+        ResourcePolicy.compute(_interaction, PagePriority.near),
+      );
     }
     for (final k in _farKeys) {
       byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.far));
+        ResourcePolicy.compute(_interaction, PagePriority.far),
+      );
+    }
+    for (final k in _keepKeys) {
+      byKey[k]?.updatePolicy(
+        ResourcePolicy.compute(_interaction, PagePriority.far),
+      );
     }
   }
 
@@ -241,15 +374,23 @@ class PipelineController {
     resources.forEach((entry) => _evaluateEntry(entry, sourceKey, cid, eid));
   }
 
-  void _evaluateEntry(ResourceEntry entry, String? sourceKey,
-      String cid, String eid) {
+  void _evaluateEntry(
+    ResourceEntry entry,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
     _submitDownload(entry, sourceKey, cid, eid);
     _submitDecode(entry, sourceKey, cid, eid);
     _submitEviction(entry);
   }
 
-  void _submitDownload(ResourceEntry entry, String? sourceKey,
-      String cid, String eid) {
+  void _submitDownload(
+    ResourceEntry entry,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
     if (entry.imageKey.startsWith('file://')) return;
     if (!entry.policy.allowDownload) return;
     if (entry.hasBytes) return;
@@ -267,19 +408,29 @@ class PipelineController {
       cid: cid,
       eid: eid,
     );
-    task.register().then((bytes) {
-      entry.bytes = bytes;
-      entry.download.inProgress = false;
-      // Cascade: bytes ready → maybe decode
-      _submitDecode(entry, sourceKey, cid, eid);
-    }).catchError((_) {
-      entry.download.inProgress = false;
-    });
+    task
+        .register()
+        .then((bytes) {
+          entry.bytes = bytes;
+          if (_cache != null && webp.isWebP(bytes)) {
+            _cache!.putL2(entry.imageKey, bytes);
+          }
+          entry.download.inProgress = false;
+          // Cascade: bytes ready → maybe decode
+          _submitDecode(entry, sourceKey, cid, eid);
+        })
+        .catchError((_) {
+          entry.download.inProgress = false;
+        });
     _scheduler.submit(task);
   }
 
-  void _submitDecode(ResourceEntry entry, String? sourceKey,
-      String cid, String eid) {
+  void _submitDecode(
+    ResourceEntry entry,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
     if (!entry.policy.allowDecode) return;
     if (entry.hasHolder) return;
     if (!entry.hasBytes) return;
@@ -298,13 +449,18 @@ class PipelineController {
       targetWidth: _targetW,
       targetHeight: _targetH,
       scale: 1.0,
+      cache: _cache,
+      providedBytes: entry.bytes,
     );
-    task.register().then((holder) {
-      entry.holder = holder;
-      entry.decode.inProgress = false;
-    }).catchError((_) {
-      entry.decode.inProgress = false;
-    });
+    task
+        .register()
+        .then((holder) {
+          entry.holder = holder;
+          entry.decode.inProgress = false;
+        })
+        .catchError((_) {
+          entry.decode.inProgress = false;
+        });
     _scheduler.submit(task);
   }
 
