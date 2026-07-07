@@ -69,7 +69,7 @@ The order is important. `offset == -1` becomes `decode` when `decodePrev >= 1`; 
 | idle | near | yes | yes | yes | 50 | 50 |
 | idle | far | yes | no | no | 20 | 0 |
 | idle | distant | no | no | no | 0 | 0 |
-| dragging | current | yes | no | yes | 100 | 0 |
+| dragging | current | yes | yes | yes | 100 | 100 |
 | dragging | near | yes | no | no | 30 | 0 |
 | dragging | far | yes | no | no | 10 | 0 |
 | dragging | distant | no | no | no | 0 | 0 |
@@ -100,7 +100,7 @@ UI interaction must be decoupled from resource scheduling.
 | State | Usage |
 |---|---|
 | `idle` | Normal matrix row. Dynamic window decides how many pages are active. |
-| `dragging` | Prefer no background decode. Keep UI path light. |
+| `dragging` | Prefer no background decode. Current page decode stays enabled. |
 | `settling` | Transitional row only; must not require a fixed 300ms before current work starts. |
 | `jumping` | Current only; all unrelated work can be evicted/cancelled. |
 

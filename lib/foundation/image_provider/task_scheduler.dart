@@ -29,7 +29,7 @@ import 'webp_image_provider.dart';
 
 enum InteractionState { idle, dragging, jumping, settling }
 
-enum PagePriority { current, near, far, distant }
+enum PagePriority { current, near, far, keep, distant }
 
 /// Explicit task lifecycle state.
 /// [FIX-7] Replaces implicit state spread across Registry + Queue + bool flags.
@@ -82,12 +82,16 @@ class ResourcePolicy {
     decodePriority: 0,
   );
 
+  static const _keep = ResourcePolicy();
+
   static const _distant = ResourcePolicy(allowEviction: true);
 
   static const _draggingCurrent = ResourcePolicy(
     allowDownload: true,
+    allowDecode: true,
     allowGpuUpload: true,
     downloadPriority: 100,
+    decodePriority: 100,
   );
 
   static const _draggingNear = ResourcePolicy(
@@ -117,24 +121,28 @@ class ResourcePolicy {
       PagePriority.current: _draggingCurrent,
       PagePriority.near: _draggingNear,
       PagePriority.far: _draggingFar,
+      PagePriority.keep: _keep,
       PagePriority.distant: _distant,
     },
     InteractionState.jumping: {
       PagePriority.current: _current,
       PagePriority.near: _distant,
       PagePriority.far: _distant,
+      PagePriority.keep: _keep,
       PagePriority.distant: _distant,
     },
     InteractionState.settling: {
       PagePriority.current: _current,
       PagePriority.near: _settlingNear,
       PagePriority.far: _settlingFar,
+      PagePriority.keep: _keep,
       PagePriority.distant: _distant,
     },
     InteractionState.idle: {
       PagePriority.current: _current,
       PagePriority.near: _near,
       PagePriority.far: _far,
+      PagePriority.keep: _keep,
       PagePriority.distant: _distant,
     },
   };

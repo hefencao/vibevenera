@@ -172,8 +172,11 @@ class PipelineController {
   void setInteractionState(InteractionState state) {
     if (_interaction == state) return;
     _interaction = state;
-    _refreshPolicies();
-    // executionEpoch handles running-task cancellation automatically
+    if (_images.isEmpty) {
+      _refreshPolicies();
+    } else {
+      _applyWindow();
+    }
   }
 
   void onPageRangeChanged({
@@ -268,7 +271,6 @@ class PipelineController {
     _assignPriorities();
     _refreshPolicies();
 
-    // Migrate existing tasks
     final activeImageKeys = <String>{
       _currentKey,
       ..._nearKeys,
@@ -276,11 +278,26 @@ class PipelineController {
       ..._farKeys,
       ..._keepKeys,
     };
+
+    // Mark distant entries before migrating/submitting work so stale
+    // pages cannot submit one more task under their previous policy.
+    resources.forEach((e) {
+      if (!activeImageKeys.contains(e.imageKey)) {
+        e.updatePriority(PagePriority.distant);
+        e.updatePolicy(
+          ResourcePolicy.compute(_interaction, PagePriority.distant),
+        );
+      }
+    });
+
+    // Migrate existing tasks
     final activeTaskKeys = <String>{};
     final newPriorities = <String, int>{};
     resources.forEach((e) {
       if (activeImageKeys.contains(e.imageKey)) {
-        activeTaskKeys.add(e.imageKey);
+        if (e.policy.allowDownload) {
+          activeTaskKeys.add(e.imageKey);
+        }
         if (e.policy.allowDecode) {
           activeTaskKeys.add(e.fullKey);
         }
@@ -294,23 +311,14 @@ class PipelineController {
     });
     _scheduler.migrateTasks(activeTaskKeys, newPriorities);
 
-    // Submit work
-    _submitWork(_sourceKey, _cid, _eid);
-
     onWindowChanged?.call(_currentKey, _nearKeys, _prevKeys, {
       ..._farKeys,
       ..._keepKeys,
     });
 
-    // Mark distant entries
-    resources.forEach((e) {
-      if (!activeImageKeys.contains(e.imageKey)) {
-        e.updatePriority(PagePriority.distant);
-        e.updatePolicy(
-          ResourcePolicy.compute(_interaction, PagePriority.distant),
-        );
-      }
-    });
+    // Submit work after holder ranges are published so newly created
+    // holders immediately receive the correct current/near/far policy.
+    _submitWork(_sourceKey, _cid, _eid);
   }
 
   void dispose() {
@@ -335,7 +343,7 @@ class PipelineController {
       byKey[k]?.updatePriority(PagePriority.far);
     }
     for (final k in _keepKeys) {
-      byKey[k]?.updatePriority(PagePriority.far);
+      byKey[k]?.updatePriority(PagePriority.keep);
     }
   }
 
@@ -363,7 +371,7 @@ class PipelineController {
     }
     for (final k in _keepKeys) {
       byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.far),
+        ResourcePolicy.compute(_interaction, PagePriority.keep),
       );
     }
   }

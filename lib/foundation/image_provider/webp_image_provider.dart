@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ui' as ui;
 import 'dart:ffi';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -44,6 +45,7 @@ PageState _priorityToPageState(PagePriority p) {
     case PagePriority.near:
       return PageState.next;
     case PagePriority.far:
+    case PagePriority.keep:
     case PagePriority.distant:
       return PageState.precache;
   }
@@ -68,8 +70,8 @@ class BufferedFrame {
 // ═══════════════════════════════════════════════════════════════
 
 class DecoderHolder {
+  static const int _firstFrameWatermark = 1;
   static const int _lowWatermark = 3;
-  static const int _startupWatermark = 3;
   static const int _highWatermark = 7;
   static const int _precacheTarget = 5;
 
@@ -196,6 +198,13 @@ class DecoderHolder {
       _requestFramesIfNeeded();
       return;
     }
+    if (!_policy.allowGpuUpload) {
+      for (final f in frames) {
+        webp.nativePoolRelease(f.address);
+      }
+      _completeRefillWaiters();
+      return;
+    }
     decodedFrameCount += frames.length;
     _scheduleUpload(
       frames,
@@ -235,7 +244,7 @@ class DecoderHolder {
     final outW = decoder.targetWidth;
     final outH = decoder.targetHeight;
     for (int i = 0; i < n; i++) {
-      if (_disposed || _pendingDispose) {
+      if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
         _releaseRemainingBuffers(addrs, i);
         break;
       }
@@ -251,13 +260,14 @@ class DecoderHolder {
         completer.complete(BufferedFrame(img, addr.durationMs));
       });
       final frame = await completer.future;
-      if (_disposed || _pendingDispose) {
+      if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
         frame.image.dispose();
         continue;
       }
       _frameBuffer.add(frame);
       uploadedFrameCount++;
       _notifyCurrentBuffer();
+      _completeRefillWaitersIfFirstFrameReady();
     }
     _isUploading = false;
     _completeRefillWaiters();
@@ -275,6 +285,13 @@ class DecoderHolder {
     refillSignal = null;
   }
 
+  void _completeRefillWaitersIfFirstFrameReady() {
+    if (_state == PageState.current &&
+        _frameBuffer.length >= _firstFrameWatermark) {
+      _completeRefillWaiters();
+    }
+  }
+
   void _releaseRemainingBuffers(
     List<webp.WebPAnimFrameAddress> addrs,
     int from,
@@ -289,6 +306,18 @@ class DecoderHolder {
       f.image.dispose();
     }
     _frameBuffer.clear();
+    _notifyCurrentBuffer();
+  }
+
+  void resumeFromLifecyclePause() {
+    if (_disposed || _pendingDispose) return;
+    _completeRefillWaiters();
+    requestRefill();
+  }
+
+  void requestRefill() {
+    if (_disposed || _pendingDispose) return;
+    _requestFramesIfNeeded();
     _notifyCurrentBuffer();
   }
 
@@ -618,7 +647,32 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   static (int, int) calculateTargetSize(BuildContext context) {
     final mq = MediaQuery.of(context);
     final dpr = mq.devicePixelRatio;
-    return ((mq.size.width * dpr).round(), (mq.size.height * dpr).round());
+    final width = _alignDecodeDimension((mq.size.width * dpr).round());
+    final height = _alignDecodeDimension((mq.size.height * dpr).round());
+    return (width, height);
+  }
+
+  static int _alignDecodeDimension(int value, {int alignment = 8}) {
+    if (value <= alignment) return math.max(1, value);
+    final aligned = value - (value % alignment);
+    return math.max(alignment, aligned);
+  }
+
+  static (int, int) _resolveDecodeTarget(
+    webp.WebPImageInfo info,
+    int boundWidth,
+    int boundHeight,
+  ) {
+    if (boundWidth <= 0 && boundHeight <= 0) {
+      return (info.width, info.height);
+    }
+
+    final bw = boundWidth > 0 ? boundWidth : info.width;
+    final bh = boundHeight > 0 ? boundHeight : info.height;
+    final scale = math.min(1.0, math.min(bw / info.width, bh / info.height));
+    final tw = _alignDecodeDimension((info.width * scale).round());
+    final th = _alignDecodeDimension((tw * info.height / info.width).round());
+    return (math.min(tw, info.width), math.min(th, info.height));
   }
 
   static bool isLikelyWebP(String imageKey) =>
@@ -706,13 +760,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     Uint8List bytes,
     webp.WebPImageInfo info,
   ) async {
-    // Preserve aspect ratio: compute height from width so the
-    // decoder output dimensions match the requested dimensions.
-    // This ensures targetW×targetH == decoder.targetWidth×decoder.targetHeight.
-    final int tw = targetWidth > 0 ? targetWidth : info.width;
-    final int th = targetWidth > 0
-        ? (tw * info.height / info.width).round()
-        : (targetHeight > 0 ? targetHeight : info.height);
+    final (tw, th) = _resolveDecodeTarget(info, targetWidth, targetHeight);
 
     try {
       final decoder = webp.createAnimDecoder(
@@ -738,11 +786,8 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     Uint8List bytes,
     webp.WebPImageInfo info,
   ) async {
-    final frame = webp.decodeStatic(
-      bytes,
-      targetWidth: targetWidth,
-      targetHeight: targetHeight,
-    );
+    final (tw, th) = _resolveDecodeTarget(info, targetWidth, targetHeight);
+    final frame = webp.decodeStatic(bytes, targetWidth: tw, targetHeight: th);
     if (frame == null) return null;
     return _rgbaToUiImage(frame.rgba, frame.width, frame.height);
   }
@@ -797,10 +842,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     final info = webp.getInfo(bytes);
     if (info == null || !info.isAnimated) return null;
 
-    final int tw = targetWidth > 0 ? targetWidth : info.width;
-    final int th = targetWidth > 0
-        ? (tw * info.height / info.width).round()
-        : (targetHeight > 0 ? targetHeight : info.height);
+    final (tw, th) = _resolveDecodeTarget(info, targetWidth, targetHeight);
 
     try {
       final decoder = webp.createAnimDecoder(
@@ -892,6 +934,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   static void clearAll() => DecoderManager.instance.clearAll();
 
   static void setInteractionState(InteractionState state) {
+    PipelineController.instance.setInteractionState(state);
     DecoderManager.instance.setInteractionState(state);
   }
 }
@@ -900,16 +943,19 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 // 6. ImageStreamCompleter — simple, delegates animation to holder
 // ═══════════════════════════════════════════════════════════════
 
-class _WebPImageStreamCompleter extends ImageStreamCompleter {
+class _WebPImageStreamCompleter extends ImageStreamCompleter
+    with WidgetsBindingObserver {
   final WebPImageProvider _provider;
   bool _disposed = false;
   StreamSubscription<ImageChunkEvent>? _chunkSub;
+  DecoderHolder? _activeHolder;
 
   _WebPImageStreamCompleter(
     Future<_ImageResult> future,
     this._provider, {
     Stream<ImageChunkEvent>? chunkEvents,
   }) {
+    WidgetsBinding.instance.addObserver(this);
     if (chunkEvents != null) {
       _chunkSub = chunkEvents.listen((event) {
         if (!_disposed) reportImageChunkEvent(event);
@@ -920,9 +966,18 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
 
   @override
   void onDisposed() {
+    WidgetsBinding.instance.removeObserver(this);
     _chunkSub?.cancel();
     _disposed = true;
     super.onDisposed();
+  }
+
+  @override
+  void didChangeAppLifecycleState(ui.AppLifecycleState state) {
+    if (_disposed) return;
+    if (state == ui.AppLifecycleState.resumed) {
+      _activeHolder?.resumeFromLifecyclePause();
+    }
   }
 
   void _onResult(_ImageResult result) {
@@ -972,6 +1027,8 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
 
   void _startAnimationLoop(DecoderHolder initialHolder) async {
     DecoderHolder holder = initialHolder;
+    _activeHolder = holder;
+    var hasShownFirstFrame = false;
     while (!_disposed) {
       if (!hasListeners) {
         await Future.delayed(const Duration(milliseconds: 200));
@@ -991,14 +1048,20 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
         final nh = await _reloadAndRestart(holder);
         if (nh != null) {
           holder = nh;
+          _activeHolder = holder;
+          hasShownFirstFrame = false;
           continue;
         } else {
           break;
         }
       }
 
-      if (holder.bufferLength < DecoderHolder._startupWatermark &&
+      final startupWatermark = hasShownFirstFrame
+          ? 0
+          : DecoderHolder._firstFrameWatermark;
+      if (holder.bufferLength < startupWatermark &&
           holder.state == PageState.current) {
+        holder.requestRefill();
         holder.refillSignal ??= Completer<void>();
         await holder.refillSignal!.future;
         continue;
@@ -1013,6 +1076,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       }
 
       setImage(ImageInfo(image: frame.image, scale: holder.scale));
+      hasShownFirstFrame = true;
       final rawDelay = frame.durationMs <= 0 ? 100 : frame.durationMs;
       final delay = rawDelay.clamp(16, 200);
       final bufferPressureDelay = _bufferPressureDelay(holder);
@@ -1024,7 +1088,10 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter {
       );
     }
     // Clear stale frames so they don't corrupt the next page
-    _drainBuffer(initialHolder);
+    if (_activeHolder == holder) {
+      _activeHolder = null;
+    }
+    _drainBuffer(holder);
   }
 
   double _bufferPressureDelay(DecoderHolder holder) {
