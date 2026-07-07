@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' as io;
 import 'dart:typed_data';
 
 import 'package:flutter_qjs/flutter_qjs.dart';
@@ -32,10 +33,7 @@ class ImageRequestConfig {
     this.modifyImage,
   });
 
-  factory ImageRequestConfig.fromMap(
-    String url,
-    Map<String, dynamic>? map,
-  ) {
+  factory ImageRequestConfig.fromMap(String url, Map<String, dynamic>? map) {
     map ??= {};
     return ImageRequestConfig(
       url: (map['url'] ?? url) as String,
@@ -55,7 +53,7 @@ class ImageRequestConfig {
 
 class _SharedStream {
   _SharedStream(this._source, this._onDispose)
-      : _controller = StreamController<ImageDownloadProgress>.broadcast();
+    : _controller = StreamController<ImageDownloadProgress>.broadcast();
 
   final Stream<ImageDownloadProgress> _source;
   final void Function() _onDispose;
@@ -172,8 +170,7 @@ abstract class ImageDownloader {
     }
 
     final shared = _SharedStream(
-      _loadComicImage(imageKey, sourceKey, cid, eid,
-          cancelToken: cancelToken),
+      _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken: cancelToken),
       () => _loadingImages.remove(cacheKey),
     );
     _loadingImages[cacheKey] = shared;
@@ -187,8 +184,13 @@ abstract class ImageDownloader {
     String eid, {
     CancelToken? cancelToken,
   }) {
-    return _loadComicImage(imageKey, sourceKey, cid, eid,
-        cancelToken: cancelToken);
+    return _loadComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      cancelToken: cancelToken,
+    );
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -219,7 +221,8 @@ abstract class ImageDownloader {
     Map<String, dynamic>? rawConfig;
     if (sourceKey != null) {
       final cs = ComicSource.find(sourceKey);
-      rawConfig = (await cs?.getImageLoadingConfig?.call(imageKey, cid, eid)) ?? {};
+      rawConfig =
+          (await cs?.getImageLoadingConfig?.call(imageKey, cid, eid)) ?? {};
     }
 
     var config = ImageRequestConfig.fromMap(imageKey, rawConfig);
@@ -241,7 +244,10 @@ abstract class ImageDownloader {
           config.onLoadFailed?.free();
           rethrow;
         }
-        final newConfig = await _invokeLoadFailed(config.onLoadFailed!, config.url);
+        final newConfig = await _invokeLoadFailed(
+          config.onLoadFailed!,
+          config.url,
+        );
         if (newConfig == null) {
           rethrow;
         }
@@ -297,69 +303,212 @@ abstract class ImageDownloader {
       throw Exception('Not a valid URL: "$requestUrl"');
     }
 
-    final dio = AppDio(BaseOptions(
-      headers: config.headers,
-      method: config.method,
-      responseType: ResponseType.stream,
-    ));
-
-    final req = await dio.request<ResponseBody>(requestUrl,
-        data: config.data, cancelToken: cancelToken);
-    final stream = req.data?.stream ?? (throw Exception('Error: Empty response body.'));
-
-    int? expectedBytes = req.data!.contentLength;
-    if (expectedBytes == -1) {
-      expectedBytes = null;
+    final headers = Map<String, dynamic>.from(config.headers);
+    final hasAcceptEncoding = headers.keys.any(
+      (key) => key.toLowerCase() == 'accept-encoding',
+    );
+    if (!hasAcceptEncoding) {
+      headers['Accept-Encoding'] = 'identity';
     }
 
-    // ── [FIX-BUG-4] Use BytesBuilder instead of List<int> ──────
-    // List<int> stores each byte as a Dart int (8 bytes on 64-bit),
-    // causing ~8x memory overhead. For a 14MB image, this means
-    // ~112MB of memory pressure, triggering aggressive GC and
-    // causing rhttp internal timeouts → RhttpUnknownException.
-    //
-    // BytesBuilder uses a compact internal representation and
-    // pre-allocates capacity when known.
-    final buffer = BytesBuilder(copy: false);
-
-    // ── [FIX-BUG-5] Throttle progress events ──────────────────
-    // Previously, every chunk yielded a progress event. For large
-    // files with many chunks, this flooded the event loop with
-    // thousands of microtasks, blocking UI interactions.
-    //
-    // Now: emit at most 1 progress event per 100ms, plus a final
-    // event when download completes.
-    DateTime lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
-    int lastReportedBytes = 0;
-    const progressIntervalMs = 100;
-
-    await for (final chunk in stream) {
-      buffer.add(chunk);
-
-      if (expectedBytes != null) {
-        final now = DateTime.now();
-        final elapsed = now.difference(lastProgressTime).inMilliseconds;
-        if (elapsed >= progressIntervalMs ||
-            buffer.length == expectedBytes) {
-          lastProgressTime = now;
-          lastReportedBytes = buffer.length;
-          yield ImageDownloadProgress(
-            currentBytes: buffer.length,
-            totalBytes: expectedBytes,
+    final progressEvents = StreamController<ImageDownloadProgress>();
+    final rawFuture = _downloadRawBytes(
+      requestUrl: requestUrl,
+      method: config.method,
+      headers: headers,
+      data: config.data,
+      cancelToken: cancelToken,
+      onProgress: (current, total) {
+        if (!progressEvents.isClosed) {
+          progressEvents.add(
+            ImageDownloadProgress(currentBytes: current, totalBytes: total),
           );
         }
-      }
-    }
+      },
+    ).whenComplete(progressEvents.close);
 
-    // Yield final progress if not already reported
-    if (expectedBytes != null && lastReportedBytes < expectedBytes) {
+    await for (final event in progressEvents.stream) {
+      yield event;
+    }
+    final raw = await rawFuture;
+    final Uint8List data = raw.data;
+
+    if (raw.expectedBytes != null) {
       yield ImageDownloadProgress(
-        currentBytes: buffer.length,
-        totalBytes: expectedBytes,
+        currentBytes: data.length,
+        totalBytes: raw.expectedBytes,
       );
     }
 
-    final Uint8List data = buffer.takeBytes();
+    yield* _finalizeDownloadedImage(
+      data,
+      cacheKey: cacheKey,
+      config: config,
+      enableModifyImage: enableModifyImage,
+    );
+  }
+
+  static Future<({Uint8List data, int? expectedBytes})> _downloadRawBytes({
+    required String requestUrl,
+    required String method,
+    required Map<String, dynamic> headers,
+    required dynamic data,
+    CancelToken? cancelToken,
+    void Function(int current, int? total)? onProgress,
+  }) async {
+    try {
+      return await _downloadRawBytesWithRhttp(
+        requestUrl: requestUrl,
+        method: method,
+        headers: headers,
+        data: data,
+        cancelToken: cancelToken,
+        onProgress: onProgress,
+      );
+    } catch (e) {
+      if (!_shouldFallbackToIoClient(e)) rethrow;
+      return await _downloadRawBytesWithIoClient(
+        requestUrl: requestUrl,
+        method: method,
+        headers: headers,
+        data: data,
+        cancelToken: cancelToken,
+        onProgress: onProgress,
+      );
+    }
+  }
+
+  static Future<({Uint8List data, int? expectedBytes})>
+  _downloadRawBytesWithRhttp({
+    required String requestUrl,
+    required String method,
+    required Map<String, dynamic> headers,
+    required dynamic data,
+    CancelToken? cancelToken,
+    void Function(int current, int? total)? onProgress,
+  }) async {
+    final dio = AppDio(
+      BaseOptions(
+        headers: headers,
+        method: method,
+        responseType: ResponseType.stream,
+      ),
+    );
+
+    final req = await dio.request<ResponseBody>(
+      requestUrl,
+      data: data,
+      cancelToken: cancelToken,
+    );
+    final stream =
+        req.data?.stream ?? (throw Exception('Error: Empty response body.'));
+    final expectedBytes = _normalizeContentLength(req.data!.contentLength);
+    return _readByteStream(
+      stream,
+      expectedBytes: expectedBytes,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  static Future<({Uint8List data, int? expectedBytes})>
+  _downloadRawBytesWithIoClient({
+    required String requestUrl,
+    required String method,
+    required Map<String, dynamic> headers,
+    required dynamic data,
+    CancelToken? cancelToken,
+    void Function(int current, int? total)? onProgress,
+  }) async {
+    var attempts = 0;
+    int? expectedBytes;
+    var buffer = BytesBuilder(copy: false);
+
+    while (attempts < 8) {
+      attempts++;
+      final client = io.HttpClient();
+      client.autoUncompress = false;
+      try {
+        final request = await client.openUrl(method, Uri.parse(requestUrl));
+        request.followRedirects = true;
+        request.maxRedirects = 5;
+        for (final entry in headers.entries) {
+          request.headers.set(entry.key, entry.value.toString());
+        }
+        if (buffer.length > 0) {
+          request.headers.set('Range', 'bytes=${buffer.length}-');
+        }
+        if (data is List<int>) {
+          request.add(data);
+        } else if (data is String) {
+          request.write(data);
+        } else if (data != null) {
+          request.write(data.toString());
+        }
+        final response = await request.close();
+        if (response.statusCode >= 400) {
+          throw Exception('Invalid Status Code: ${response.statusCode}');
+        }
+        if (buffer.length > 0 && response.statusCode != 206) {
+          buffer = BytesBuilder(copy: false);
+        }
+        expectedBytes ??= response.statusCode == 206
+            ? _contentRangeTotal(response.headers.value('content-range'))
+            : _normalizeContentLength(response.contentLength);
+        return await _readByteStream(
+          response,
+          expectedBytes: expectedBytes,
+          cancelToken: cancelToken,
+          sink: buffer,
+          onProgress: onProgress,
+        );
+      } catch (e) {
+        if (expectedBytes != null && buffer.length >= expectedBytes) {
+          return (data: buffer.takeBytes(), expectedBytes: expectedBytes);
+        }
+        if (!_isRetryableBodyClose(e) || attempts >= 8) rethrow;
+      } finally {
+        client.close(force: true);
+      }
+    }
+    return (data: buffer.takeBytes(), expectedBytes: expectedBytes);
+  }
+
+  static Future<({Uint8List data, int? expectedBytes})> _readByteStream(
+    Stream<List<int>> stream, {
+    required int? expectedBytes,
+    CancelToken? cancelToken,
+    BytesBuilder? sink,
+    void Function(int current, int? total)? onProgress,
+  }) async {
+    final buffer = sink ?? BytesBuilder(copy: false);
+    var lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
+    const progressIntervalMs = 100;
+    await for (final chunk in stream) {
+      if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
+      buffer.add(chunk);
+      final loaded = buffer.length;
+      final now = DateTime.now();
+      if (now.difference(lastProgressTime).inMilliseconds >=
+          progressIntervalMs) {
+        lastProgressTime = now;
+        onProgress?.call(loaded, expectedBytes);
+      }
+    }
+    onProgress?.call(buffer.length, expectedBytes);
+    return (
+      data: sink == null ? buffer.takeBytes() : buffer.toBytes(),
+      expectedBytes: expectedBytes,
+    );
+  }
+
+  static Stream<ImageDownloadProgress> _finalizeDownloadedImage(
+    Uint8List data, {
+    required String cacheKey,
+    required ImageRequestConfig config,
+    required bool enableModifyImage,
+  }) async* {
+    var finalData = data;
 
     // Apply onResponse JS transformation (decrypt, unpack, etc.)
     if (config.onResponse != null) {
@@ -368,7 +517,9 @@ abstract class ImageDownloader {
         result = await result;
       }
       if (result is List<int>) {
-        final transformed = result is Uint8List ? result : Uint8List.fromList(result);
+        final transformed = result is Uint8List
+            ? result
+            : Uint8List.fromList(result);
         config.onResponse!.free();
         // Persist to disk cache
         await CacheManager().writeCache(cacheKey, transformed);
@@ -385,7 +536,6 @@ abstract class ImageDownloader {
     }
 
     // Optionally apply modifyImage script
-    Uint8List finalData = data;
     if (enableModifyImage && config.modifyImage != null) {
       finalData = await modifyImageWithScript(data, config.modifyImage);
     }
@@ -399,6 +549,30 @@ abstract class ImageDownloader {
       totalBytes: finalData.length,
       imageBytes: finalData,
     );
+  }
+
+  static int? _normalizeContentLength(int length) =>
+      length >= 0 ? length : null;
+
+  static int? _contentRangeTotal(String? value) {
+    if (value == null) return null;
+    final slash = value.lastIndexOf('/');
+    if (slash < 0 || slash == value.length - 1) return null;
+    return int.tryParse(value.substring(slash + 1));
+  }
+
+  static bool _shouldFallbackToIoClient(Object error) {
+    final text = error.toString();
+    return text.contains('RhttpUnknownException') ||
+        text.contains('error decoding response body') ||
+        _isRetryableBodyClose(error);
+  }
+
+  static bool _isRetryableBodyClose(Object error) {
+    final text = error.toString();
+    return text.contains('Connection closed while receiving data') ||
+        text.contains('Connection reset by peer') ||
+        text.contains('HttpException');
   }
 }
 

@@ -691,12 +691,20 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       max: context.reader.maxPage.clamp(displayPage, 1 << 16).toDouble(),
       reversed: isReversed,
       divisions: (context.reader.maxPage - 1).clamp(2, 1 << 16),
+      onChangeStart: () {
+        WebPImageProvider.setInteractionState(InteractionState.jumping);
+      },
       onChanged: (i) {
         final page = i.toInt();
         if (page == context.reader.page) return;
         context.reader.page = page;
-        context.reader.update();
+        _updateWebPCurrentOnly(page, context);
         context.reader._imageViewController?.toPage(page);
+      },
+      onChangeEnd: () {
+        final page = context.reader.page.clamp(1, context.reader.maxPage);
+        context.reader.update();
+        WebPImageProvider.setInteractionState(InteractionState.idle);
         _updateWebPState(page, context);
       },
     );

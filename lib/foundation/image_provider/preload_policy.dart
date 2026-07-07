@@ -3,13 +3,13 @@ enum PreloadPageClass { current, decode, downloadOnly, keep, evict }
 class DynamicPreloadOffsets {
   final Set<int> decodeNext;
   final Set<int> decodePrev;
-  final Set<int> downloadOnlyNext;
+  final Set<int> downloadOnly;
   final Set<int> keep;
 
   const DynamicPreloadOffsets({
     required this.decodeNext,
     required this.decodePrev,
-    required this.downloadOnlyNext,
+    required this.downloadOnly,
     required this.keep,
   });
 }
@@ -17,15 +17,18 @@ class DynamicPreloadOffsets {
 class DynamicPreloadWindow {
   final int decodeNext;
   final int decodePrev;
-  final int downloadExtraNext;
+  final int downloadNext;
+  final int downloadPrev;
 
   const DynamicPreloadWindow({
     required this.decodeNext,
     required this.decodePrev,
-    required this.downloadExtraNext,
+    required this.downloadNext,
+    required this.downloadPrev,
   });
 
-  int get key => Object.hash(decodeNext, decodePrev, downloadExtraNext);
+  int get key =>
+      Object.hash(decodeNext, decodePrev, downloadNext, downloadPrev);
 }
 
 class WaterLevelRule {
@@ -56,8 +59,10 @@ bool _prevDecode(int offset, DynamicPreloadWindow window) =>
     offset < 0 && -offset <= window.decodePrev;
 
 bool _nextDownload(int offset, DynamicPreloadWindow window) =>
-    offset > window.decodeNext &&
-    offset <= window.decodeNext + window.downloadExtraNext;
+    offset > window.decodeNext && offset <= window.downloadNext;
+
+bool _prevDownload(int offset, DynamicPreloadWindow window) =>
+    offset < -window.decodePrev && -offset <= window.downloadPrev;
 
 bool _lastKeep(int offset, DynamicPreloadWindow _) => offset == -1;
 
@@ -68,7 +73,8 @@ const waterLevelRules = <WaterLevelRule>[
     window: DynamicPreloadWindow(
       decodeNext: 5,
       decodePrev: 2,
-      downloadExtraNext: 2,
+      downloadNext: 9,
+      downloadPrev: 4,
     ),
   ),
   WaterLevelRule(
@@ -77,7 +83,8 @@ const waterLevelRules = <WaterLevelRule>[
     window: DynamicPreloadWindow(
       decodeNext: 3,
       decodePrev: 2,
-      downloadExtraNext: 1,
+      downloadNext: 7,
+      downloadPrev: 3,
     ),
   ),
   WaterLevelRule(
@@ -86,7 +93,8 @@ const waterLevelRules = <WaterLevelRule>[
     window: DynamicPreloadWindow(
       decodeNext: 2,
       decodePrev: 1,
-      downloadExtraNext: 0,
+      downloadNext: 5,
+      downloadPrev: 2,
     ),
   ),
   WaterLevelRule(
@@ -95,7 +103,8 @@ const waterLevelRules = <WaterLevelRule>[
     window: DynamicPreloadWindow(
       decodeNext: 1,
       decodePrev: 0,
-      downloadExtraNext: 0,
+      downloadNext: 4,
+      downloadPrev: 1,
     ),
   ),
   WaterLevelRule(
@@ -104,7 +113,8 @@ const waterLevelRules = <WaterLevelRule>[
     window: DynamicPreloadWindow(
       decodeNext: 0,
       decodePrev: 0,
-      downloadExtraNext: 0,
+      downloadNext: 3,
+      downloadPrev: 1,
     ),
   ),
 ];
@@ -116,6 +126,10 @@ final relativePageRules = <RelativePageRule>[
   RelativePageRule(
     pageClass: PreloadPageClass.downloadOnly,
     matches: _nextDownload,
+  ),
+  RelativePageRule(
+    pageClass: PreloadPageClass.downloadOnly,
+    matches: _prevDownload,
   ),
   RelativePageRule(pageClass: PreloadPageClass.keep, matches: _lastKeep),
 ];
@@ -149,14 +163,16 @@ class DynamicPreloadPolicy {
   static DynamicPreloadOffsets offsetsFor({
     required int preloadCount,
     required DynamicPreloadWindow window,
+    int direction = 1,
   }) {
     final decodeNext = <int>{};
     final decodePrev = <int>{};
-    final downloadOnlyNext = <int>{};
+    final downloadOnly = <int>{};
     final keep = <int>{};
 
     for (int offset = -preloadCount; offset <= preloadCount; offset++) {
-      switch (pageClassFor(offset: offset, window: window)) {
+      final logicalOffset = direction < 0 ? -offset : offset;
+      switch (pageClassFor(offset: logicalOffset, window: window)) {
         case PreloadPageClass.decode:
           if (offset > 0) {
             decodeNext.add(offset);
@@ -165,7 +181,7 @@ class DynamicPreloadPolicy {
           }
           break;
         case PreloadPageClass.downloadOnly:
-          downloadOnlyNext.add(offset);
+          downloadOnly.add(offset);
           break;
         case PreloadPageClass.keep:
           keep.add(offset);
@@ -179,7 +195,7 @@ class DynamicPreloadPolicy {
     return DynamicPreloadOffsets(
       decodeNext: decodeNext,
       decodePrev: decodePrev,
-      downloadOnlyNext: downloadOnlyNext,
+      downloadOnly: downloadOnly,
       keep: keep,
     );
   }

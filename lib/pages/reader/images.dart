@@ -446,7 +446,11 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
-            _updateWebPState(i, context);
+            if (WebPImageProvider.isJumpingInteraction) {
+              _updateWebPCurrentOnly(i, context);
+            } else {
+              _updateWebPState(i, context);
+            }
             context.readerScaffold.update();
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
@@ -752,7 +756,11 @@ class _ContinuousModeState extends State<_ContinuousMode>
     if (page == null) return;
     if (page != reader.page) {
       reader.setPage(page);
-      _updateWebPState(page, context);
+      if (WebPImageProvider.isJumpingInteraction) {
+        _updateWebPCurrentOnly(page, context);
+      } else {
+        _updateWebPState(page, context);
+      }
       context.readerScaffold.update();
     }
   }
@@ -1248,6 +1256,99 @@ void _updateWebPState(int page, BuildContext context) {
     cache: cache,
     preloadCount: appdata.settings["preloadImageCount"] ?? 5,
   );
+  _precacheLocalReaderPages(page, context);
+}
+
+void _updateWebPCurrentOnly(int page, BuildContext context) {
+  final reader = context.reader;
+  final images = reader.images;
+  if (images == null) return;
+
+  final imageCtrl = reader._imageViewController;
+  final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
+    context,
+  );
+  WebPImageProvider.onPageChanged(
+    currentPageIndex: page - 1,
+    images: images,
+    context: context,
+    cid: reader.cid,
+    eid: reader.eid,
+    sourceKey: reader.type.comicSource?.key,
+    cache: imageCtrl?.webpCache,
+  );
+  PipelineController.instance.setTargetSize(targetWidth, targetHeight);
+  PipelineController.instance.onCurrentOnlyChanged(
+    currentIdx: page - 1,
+    images: images,
+    cid: reader.cid,
+    eid: reader.eid,
+    sourceKey: reader.type.comicSource?.key,
+    cache: imageCtrl?.webpCache,
+    preloadCount: appdata.settings["preloadImageCount"] ?? 5,
+  );
+  _precacheLocalReaderPages(page, context, radius: 0);
+}
+
+void _precacheLocalReaderPages(
+  int page,
+  BuildContext context, {
+  int radius = 1,
+}) {
+  final reader = context.reader;
+  final images = reader.images;
+  if (images == null || images.isEmpty) return;
+
+  final pages = <int>{page};
+  for (var i = 1; i <= radius; i++) {
+    pages
+      ..add(page + i)
+      ..add(page - i);
+  }
+
+  for (final p in pages) {
+    for (final imageKey in _imageKeysForReaderPage(reader, p)) {
+      if (!_isLocalImageKey(imageKey)) continue;
+      precacheImage(
+        _createImageProviderFromKey(imageKey, context),
+        context,
+      ).ignore();
+    }
+  }
+}
+
+Iterable<String> _imageKeysForReaderPage(_ReaderState reader, int page) sync* {
+  final images = reader.images;
+  if (images == null || page < 1 || page > reader.maxPage) return;
+
+  if (reader.mode.isContinuous) {
+    final index = page - 1;
+    if (index >= 0 && index < images.length) yield images[index];
+    return;
+  }
+
+  final imagesPerPage = reader.imagesPerPage;
+  int startIndex;
+  int endIndex;
+  if (reader.showSingleImageOnFirstPage()) {
+    if (page == 1) {
+      startIndex = 0;
+      endIndex = 1;
+    } else {
+      startIndex = (page - 2) * imagesPerPage + 1;
+      endIndex = math.min(startIndex + imagesPerPage, images.length);
+    }
+  } else {
+    startIndex = (page - 1) * imagesPerPage;
+    endIndex = math.min(startIndex + imagesPerPage, images.length);
+  }
+  for (var i = startIndex; i < endIndex; i++) {
+    if (i >= 0 && i < images.length) yield images[i];
+  }
+}
+
+bool _isLocalImageKey(String imageKey) {
+  return imageKey.startsWith('file://') || !imageKey.contains('://');
 }
 
 class _SwipeChangeChapterProgress extends StatefulWidget {

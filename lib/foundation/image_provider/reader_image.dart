@@ -11,7 +11,14 @@ import 'reader_image.dart' as image_provider;
 class ReaderImageProvider
     extends BaseImageProvider<image_provider.ReaderImageProvider> {
   /// Image provider for normal image.
-  const ReaderImageProvider(this.imageKey, this.sourceKey, this.cid, this.eid, this.page, {this.enableResize = false});
+  const ReaderImageProvider(
+    this.imageKey,
+    this.sourceKey,
+    this.cid,
+    this.eid,
+    this.page, {
+    this.enableResize = false,
+  });
 
   final String imageKey;
 
@@ -38,7 +45,11 @@ class ReaderImageProvider
     void Function() checkStop,
   ) async {
     return fetchImageBytes(
-      imageKey, sourceKey, cid, eid
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      chunkEvents: chunkEvents,
     );
   }
 
@@ -89,21 +100,27 @@ class ReaderImageProvider
     if (result is Future) {
       var futureResult = await result;
       if (futureResult is Uint8List) return futureResult;
-      if (futureResult is Map) return _extractImageFromMap(futureResult, checkStop);
-      throw Exception('Unexpected processImage result: ${futureResult.runtimeType}');
+      if (futureResult is Map) {
+        return _extractImageFromMap(futureResult, checkStop);
+      }
+      throw Exception(
+        'Unexpected processImage result: ${futureResult.runtimeType}',
+      );
     }
 
     if (result is Map) {
       return _extractImageFromMap(result, checkStop);
     }
 
-    throw Exception('Unexpected processImage result type: ${result.runtimeType}');
+    throw Exception(
+      'Unexpected processImage result type: ${result.runtimeType}',
+    );
   }
 
   /// 从 Map 结构中提取图片字节。
   ///
   /// Map 可包含：
-  ///   - `image`: Uint8List 或 Future<Uint8List>
+  ///   - `image`: Uint8List 或 `Future<Uint8List>`
   ///   - `onCancel`: JSInvokable — 取消回调
   Future<Uint8List> _extractImageFromMap(
     Map result,

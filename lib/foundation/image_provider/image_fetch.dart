@@ -103,11 +103,13 @@ Future<Uint8List> fetchImageBytes(
 
   Uint8List? result;
   await for (final event in stream) {
-    if (chunkEvents != null && !chunkEvents.isClosed && event.totalBytes != null) {
-      chunkEvents.add(ImageChunkEvent(
-        cumulativeBytesLoaded: event.currentBytes,
-        expectedTotalBytes: event.totalBytes!,
-      ));
+    if (chunkEvents != null && !chunkEvents.isClosed) {
+      chunkEvents.add(
+        ImageChunkEvent(
+          cumulativeBytesLoaded: event.currentBytes,
+          expectedTotalBytes: event.totalBytes ?? 0,
+        ),
+      );
     }
     if (event.imageBytes != null) {
       result = event.imageBytes!;
@@ -129,8 +131,8 @@ Future<Uint8List> fetchImageBytesRaw(
   String eid,
 ) async {
   // Check local file first
-    final local = await tryLoadLocalFile(imageKey);
-    if (local != null) return local;
+  final local = await tryLoadLocalFile(imageKey);
+  if (local != null) return local;
 
   // Check disk cache
   final cacheKey = '$imageKey@$sourceKey@$cid@$eid';

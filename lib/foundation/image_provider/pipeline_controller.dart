@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
@@ -148,9 +150,14 @@ class PipelineController {
   int _targetW = 0, _targetH = 0;
   DecodedImageCache? _cache;
   int _currentIdx = 0;
+  int _stableIdx = 0;
+  int _readDirection = 1;
+  bool _hasCurrentIdx = false;
   int _preloadCount = 5;
   int _currentBufferedFrames = 0;
   int _windowKey = -1;
+  int? _provisionalIdx;
+  Timer? _jumpProtectionTimer;
   List<String> _images = const [];
   String? _sourceKey;
   String _cid = '';
@@ -161,6 +168,14 @@ class PipelineController {
   final Set<String> _prevKeys = {};
   final Set<String> _farKeys = {};
   final Set<String> _keepKeys = {};
+  final Map<String, int> _offsetByKey = {};
+
+  static const int _jumpProtectionDistance = 3;
+  static const Duration _jumpProtectionWindow = Duration(milliseconds: 1200);
+  static const int _mobilePrefetchBudgetBytes = 48 * 1024 * 1024;
+  static const int _desktopPrefetchBudgetBytes = 192 * 1024 * 1024;
+  static const int _mobileUnknownPrefetchBytes = 16 * 1024 * 1024;
+  static const int _desktopUnknownPrefetchBytes = 32 * 1024 * 1024;
 
   // ── Public API ──────────────────────────────────────────────
 
@@ -169,13 +184,15 @@ class PipelineController {
     _targetH = h;
   }
 
+  InteractionState get interactionState => _interaction;
+
   void setInteractionState(InteractionState state) {
     if (_interaction == state) return;
     _interaction = state;
     if (_images.isEmpty) {
       _refreshPolicies();
     } else {
-      _applyWindow();
+      _applyWindow(protectJump: _provisionalIdx != null);
     }
   }
 
@@ -188,8 +205,9 @@ class PipelineController {
     DecodedImageCache? cache,
     int preloadCount = 5,
   }) {
+    final contextChanged =
+        !identical(_images, images) || _cid != cid || _eid != eid;
     _cache = cache;
-    _currentIdx = currentIdx;
     _images = images;
     _cid = cid;
     _eid = eid;
@@ -197,8 +215,42 @@ class PipelineController {
     _preloadCount = preloadCount;
     _currentBufferedFrames = 0;
     _windowKey = -1;
+    if (contextChanged) {
+      _hasCurrentIdx = false;
+      _jumpProtectionTimer?.cancel();
+      _provisionalIdx = null;
+    }
 
-    _applyWindow();
+    _setCurrentIndex(currentIdx);
+  }
+
+  void onCurrentOnlyChanged({
+    required int currentIdx,
+    required List<String> images,
+    required String cid,
+    required String eid,
+    required String? sourceKey,
+    DecodedImageCache? cache,
+    int preloadCount = 5,
+  }) {
+    final contextChanged =
+        !identical(_images, images) || _cid != cid || _eid != eid;
+    _cache = cache;
+    _images = images;
+    _cid = cid;
+    _eid = eid;
+    _sourceKey = sourceKey;
+    _preloadCount = preloadCount;
+    _currentBufferedFrames = 0;
+    _windowKey = -1;
+    if (contextChanged || !_hasCurrentIdx) {
+      _hasCurrentIdx = true;
+      _stableIdx = currentIdx;
+      _jumpProtectionTimer?.cancel();
+      _provisionalIdx = null;
+    }
+    _currentIdx = currentIdx;
+    _applyWindow(protectJump: true);
   }
 
   void updateCurrentBufferedFrames(int frames) {
@@ -209,10 +261,45 @@ class PipelineController {
     );
     if (window.key == _windowKey) return;
     _currentBufferedFrames = frames;
+    _applyWindow(protectJump: _provisionalIdx != null);
+  }
+
+  void _setCurrentIndex(int currentIdx) {
+    if (!_hasCurrentIdx) {
+      _hasCurrentIdx = true;
+      _currentIdx = currentIdx;
+      _stableIdx = currentIdx;
+      _provisionalIdx = null;
+      _applyWindow();
+      return;
+    }
+
+    final previousIdx = _currentIdx;
+    _currentIdx = currentIdx;
+    final delta = currentIdx - previousIdx;
+    final isJump = delta.abs() > _jumpProtectionDistance;
+
+    _jumpProtectionTimer?.cancel();
+    if (isJump) {
+      _provisionalIdx = currentIdx;
+      _applyWindow(protectJump: true);
+      _jumpProtectionTimer = Timer(_jumpProtectionWindow, () {
+        if (_provisionalIdx != _currentIdx) return;
+        if (delta != 0) _readDirection = delta > 0 ? 1 : -1;
+        _stableIdx = _currentIdx;
+        _provisionalIdx = null;
+        _applyWindow();
+      });
+      return;
+    }
+
+    if (delta != 0) _readDirection = delta > 0 ? 1 : -1;
+    _stableIdx = currentIdx;
+    _provisionalIdx = null;
     _applyWindow();
   }
 
-  void _applyWindow() {
+  void _applyWindow({bool protectJump = false}) {
     String fk(int i) => (i >= 0 && i < _images.length) ? _images[i] : '';
 
     final window = DynamicPreloadPolicy.windowFor(
@@ -226,27 +313,70 @@ class PipelineController {
     _prevKeys.clear();
     _farKeys.clear();
     _keepKeys.clear();
+    _offsetByKey.clear();
 
     final offsets = DynamicPreloadPolicy.offsetsFor(
       preloadCount: _preloadCount,
       window: window,
+      direction: _readDirection,
     );
 
     for (final offset in offsets.decodeNext) {
       final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) _nearKeys.add(k);
+      if (k.isNotEmpty) {
+        _nearKeys.add(k);
+        _offsetByKey[k] = offset;
+      }
     }
     for (final offset in offsets.decodePrev) {
       final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) _prevKeys.add(k);
+      if (k.isNotEmpty) {
+        _prevKeys.add(k);
+        _offsetByKey[k] = offset;
+      }
     }
-    for (final offset in offsets.downloadOnlyNext) {
+    for (final offset in offsets.downloadOnly) {
       final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) _farKeys.add(k);
+      if (k.isNotEmpty) {
+        _farKeys.add(k);
+        _offsetByKey[k] = offset;
+      }
     }
     for (final offset in offsets.keep) {
       final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) _keepKeys.add(k);
+      if (k.isNotEmpty) {
+        _keepKeys.add(k);
+        _offsetByKey[k] = offset;
+      }
+    }
+    if (_interaction == InteractionState.dragging) {
+      final offset = _readDirection >= 0 ? 1 : -1;
+      final k = fk(_currentIdx + offset);
+      if (k.isNotEmpty) {
+        if (offset > 0) {
+          _nearKeys.add(k);
+        } else {
+          _prevKeys.add(k);
+        }
+        _farKeys.remove(k);
+        _keepKeys.remove(k);
+        _offsetByKey[k] = offset;
+      }
+    }
+    if (_currentKey.isNotEmpty) _offsetByKey[_currentKey] = 0;
+    if (protectJump) {
+      _nearKeys.clear();
+      _prevKeys.clear();
+      _farKeys.clear();
+      _keepKeys.clear();
+      _offsetByKey
+        ..clear()
+        ..[_currentKey] = 0;
+      final stableKey = fk(_stableIdx);
+      if (stableKey.isNotEmpty && stableKey != _currentKey) {
+        _keepKeys.add(stableKey);
+        _offsetByKey[stableKey] = _stableIdx - _currentIdx;
+      }
     }
 
     // Ensure entries exist
@@ -303,7 +433,7 @@ class PipelineController {
         }
       }
       if (e.policy.downloadPriority > 0) {
-        newPriorities[e.imageKey] = e.policy.downloadPriority;
+        newPriorities[e.imageKey] = _downloadRank(e);
       }
       if (e.policy.decodePriority > 0) {
         newPriorities[e.fullKey] = e.policy.decodePriority;
@@ -322,6 +452,8 @@ class PipelineController {
   }
 
   void dispose() {
+    _jumpProtectionTimer?.cancel();
+    _jumpProtectionTimer = null;
     _scheduler.clear();
     resources.dispose();
   }
@@ -351,29 +483,61 @@ class PipelineController {
     final byKey = <String, ResourceEntry>{};
     resources.forEach((e) => byKey[e.imageKey] = e);
 
-    byKey[_currentKey]?.updatePolicy(
-      ResourcePolicy.compute(_interaction, PagePriority.current),
-    );
+    final current = byKey[_currentKey];
+    if (current != null) {
+      current.updatePolicy(_rankedPolicy(current, PagePriority.current));
+    }
     for (final k in _nearKeys) {
-      byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.near),
-      );
+      final entry = byKey[k];
+      if (entry != null) {
+        entry.updatePolicy(_rankedPolicy(entry, PagePriority.near));
+      }
     }
     for (final k in _prevKeys) {
-      byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.near),
-      );
+      final entry = byKey[k];
+      if (entry != null) {
+        entry.updatePolicy(_rankedPolicy(entry, PagePriority.near));
+      }
     }
     for (final k in _farKeys) {
-      byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.far),
-      );
+      final entry = byKey[k];
+      if (entry != null) {
+        entry.updatePolicy(_rankedPolicy(entry, PagePriority.far));
+      }
     }
     for (final k in _keepKeys) {
-      byKey[k]?.updatePolicy(
-        ResourcePolicy.compute(_interaction, PagePriority.keep),
-      );
+      final entry = byKey[k];
+      if (entry != null) {
+        entry.updatePolicy(_rankedPolicy(entry, PagePriority.keep));
+      }
     }
+  }
+
+  ResourcePolicy _rankedPolicy(ResourceEntry entry, PagePriority priority) {
+    final base = ResourcePolicy.compute(_interaction, priority);
+    if (!base.allowDownload) return base;
+    return base.withDownloadPriority(_downloadRank(entry, priority: priority));
+  }
+
+  int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
+    final p = priority ?? entry.priority;
+    final offset = _offsetByKey[entry.imageKey] ?? 1 << 20;
+    final distance = offset.abs();
+    final progressBoost = (entry.download.progress * 20).round();
+
+    final base = switch (p) {
+      PagePriority.current => 1000,
+      PagePriority.near when offset > 0 => 760,
+      PagePriority.near => 720,
+      PagePriority.far when offset > 0 => 520,
+      PagePriority.far => 500,
+      PagePriority.keep => 260,
+      PagePriority.distant => 0,
+    };
+
+    if (base == 0) return 0;
+    final directionBias = offset < 0 ? -8 : 0;
+    return base - distance * 12 + directionBias + progressBoost;
   }
 
   // ── Internal: work submission (split by stage) ──────────────
@@ -399,10 +563,21 @@ class PipelineController {
     String cid,
     String eid,
   ) {
-    if (entry.imageKey.startsWith('file://')) return;
     if (!entry.policy.allowDownload) return;
     if (entry.hasBytes) return;
+    final l2Bytes = _cache?.getL2(entry.imageKey);
+    if (l2Bytes != null) {
+      _publishBytes(entry.imageKey, l2Bytes);
+      return;
+    }
+    for (final peer in resources.getAllForImage(entry.imageKey)) {
+      if (peer.bytes != null) {
+        _publishBytes(entry.imageKey, peer.bytes!);
+        return;
+      }
+    }
     if (entry.download.inProgress) return;
+    if (_prefetchBudgetExceededFor(entry)) return;
 
     entry.download.inProgress = true;
     final task = DownloadTask(
@@ -415,21 +590,28 @@ class PipelineController {
       sourceKey: sourceKey,
       cid: cid,
       eid: eid,
+      onProgress: (current, total) {
+        for (final peer in resources.getAllForImage(entry.imageKey)) {
+          peer.download.updateProgress(current, total);
+        }
+      },
     );
     task
         .register()
         .then((bytes) {
-          entry.bytes = bytes;
+          _publishBytes(entry.imageKey, bytes);
           if (_cache != null && webp.isWebP(bytes)) {
             _cache!.putL2(entry.imageKey, bytes);
           }
-          entry.download.inProgress = false;
           // Cascade: bytes ready → maybe decode
-          _submitDecode(entry, sourceKey, cid, eid);
+          for (final peer in resources.getAllForImage(entry.imageKey)) {
+            _submitDecode(peer, sourceKey, cid, eid);
+          }
         })
         .catchError((_) {
           entry.download.inProgress = false;
         });
+    task.setContext(ExecutionContext(entry));
     _scheduler.submit(task);
   }
 
@@ -443,6 +625,7 @@ class PipelineController {
     if (entry.hasHolder) return;
     if (!entry.hasBytes) return;
     if (entry.decode.inProgress) return;
+    if (entry.decode.isInBackoff) return;
 
     entry.decode.inProgress = true;
     final task = PrecreateTask(
@@ -463,12 +646,17 @@ class PipelineController {
     task
         .register()
         .then((holder) {
+          if (holder == null) {
+            entry.decode.markFailure('No animated WebP holder created');
+            return;
+          }
           entry.holder = holder;
-          entry.decode.inProgress = false;
+          entry.decode.markSuccess();
         })
-        .catchError((_) {
-          entry.decode.inProgress = false;
+        .catchError((e) {
+          entry.decode.markFailure(e);
         });
+    task.setContext(ExecutionContext(entry));
     _scheduler.submit(task);
   }
 
@@ -476,5 +664,54 @@ class PipelineController {
     if (!entry.policy.allowEviction) return;
     if (!entry.hasBytes && !entry.hasHolder) return;
     resources.release(entry);
+  }
+
+  void _publishBytes(String imageKey, Uint8List bytes) {
+    for (final peer in resources.getAllForImage(imageKey)) {
+      peer.bytes = bytes;
+      peer.download.inProgress = false;
+      peer.download.lastError = null;
+    }
+  }
+
+  bool _prefetchBudgetExceededFor(ResourceEntry entry) {
+    if (entry.priority == PagePriority.current ||
+        entry.priority == PagePriority.near) {
+      return false;
+    }
+    final knownSize = entry.bytes?.length ?? entry.download.totalBytes;
+    final budget = _prefetchBudgetBytes;
+    if (knownSize != null && knownSize >= budget ~/ 2) {
+      return _currentPrefetchBytes(excluding: entry.imageKey) > 0;
+    }
+    return _currentPrefetchBytes() >= budget;
+  }
+
+  int _currentPrefetchBytes({String? excluding}) {
+    var total = 0;
+    resources.forEach((entry) {
+      if (entry.imageKey == excluding) return;
+      if (entry.priority == PagePriority.current ||
+          entry.priority == PagePriority.near) {
+        return;
+      }
+      total +=
+          entry.bytes?.length ??
+          entry.download.totalBytes ??
+          (entry.download.inProgress ? _unknownPrefetchBytes : 0);
+    });
+    return total;
+  }
+
+  int get _prefetchBudgetBytes {
+    if (Platform.isAndroid || Platform.isIOS) return _mobilePrefetchBudgetBytes;
+    return _desktopPrefetchBudgetBytes;
+  }
+
+  int get _unknownPrefetchBytes {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return _mobileUnknownPrefetchBytes;
+    }
+    return _desktopUnknownPrefetchBytes;
   }
 }

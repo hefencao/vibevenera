@@ -3,9 +3,8 @@ import 'dart:async';
 import 'package:dio/dio.dart'; // CancelToken
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
-import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
-import 'package:venera/network/images.dart';
+import 'package:venera/foundation/image_provider/image_fetch.dart';
 
 import 'webp_image_provider.dart';
 
@@ -56,6 +55,17 @@ class ResourcePolicy {
     this.decodePriority = 0,
   });
 
+  ResourcePolicy withDownloadPriority(int priority) {
+    return ResourcePolicy(
+      allowDownload: allowDownload,
+      allowDecode: allowDecode,
+      allowGpuUpload: allowGpuUpload,
+      allowEviction: allowEviction,
+      downloadPriority: priority,
+      decodePriority: decodePriority,
+    );
+  }
+
   static const _none = ResourcePolicy();
 
   static const _current = ResourcePolicy(
@@ -96,7 +106,10 @@ class ResourcePolicy {
 
   static const _draggingNear = ResourcePolicy(
     allowDownload: true,
+    allowDecode: true,
+    allowGpuUpload: true,
     downloadPriority: 30,
+    decodePriority: 30,
   );
 
   static const _draggingFar = ResourcePolicy(
@@ -158,10 +171,25 @@ class ResourcePolicy {
 /// Sub-state for the download phase.
 class DownloadState {
   bool inProgress = false;
+  int currentBytes = 0;
+  int? totalBytes;
   Object? lastError;
   void reset() {
     inProgress = false;
+    currentBytes = 0;
+    totalBytes = null;
     lastError = null;
+  }
+
+  void updateProgress(int current, int? total) {
+    currentBytes = current;
+    totalBytes = total == 0 ? null : total;
+  }
+
+  double get progress {
+    final total = totalBytes;
+    if (total == null || total <= 0) return 0;
+    return (currentBytes / total).clamp(0.0, 1.0);
   }
 }
 
@@ -170,10 +198,36 @@ class DecodeState {
   bool inProgress = false;
   int decodedFrameCount = 0;
   int uploadedFrameCount = 0;
+  int failureCount = 0;
+  int lastFailureMs = 0;
+  Object? lastError;
   void reset() {
     inProgress = false;
     decodedFrameCount = 0;
     uploadedFrameCount = 0;
+    failureCount = 0;
+    lastFailureMs = 0;
+    lastError = null;
+  }
+
+  void markFailure(Object error) {
+    inProgress = false;
+    failureCount++;
+    lastFailureMs = DateTime.now().millisecondsSinceEpoch;
+    lastError = error;
+  }
+
+  void markSuccess() {
+    inProgress = false;
+    failureCount = 0;
+    lastFailureMs = 0;
+    lastError = null;
+  }
+
+  bool get isInBackoff {
+    if (failureCount == 0) return false;
+    final delayMs = (1000 * (1 << (failureCount - 1))).clamp(1000, 30000);
+    return DateTime.now().millisecondsSinceEpoch - lastFailureMs < delayMs;
   }
 }
 
@@ -428,66 +482,36 @@ class DownloadExecution {
     CancelToken? cancelToken,
     void Function(int current, int? total)? onProgress,
   }) async {
-    // 1. Disk cache
-    final cacheKey = '$imageKey@$sourceKey@$cid@$eid';
-    try {
-      final cacheFile = await CacheManager().findCache(cacheKey);
-      if (cacheFile != null && await cacheFile.exists()) {
-        final bytes = await cacheFile.readAsBytes();
-        if (bytes.isNotEmpty) {
-          debugPrint(
-            '[DownloadExec] HIT-CACHE $imageKey (${bytes.length ~/ 1024}KB)',
-          );
-          return bytes;
-        }
-      }
-    } catch (e) {
-      debugPrint('[DownloadExec] cache check error: $e');
-    }
-
     if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
 
-    // 2. Network
-    debugPrint('[DownloadExec] NETWORK $imageKey');
-    final completer = Completer<Uint8List>();
-
-    final sub =
-        ImageDownloader.loadComicImage(
-          imageKey,
-          sourceKey,
-          cid,
-          eid,
-          cancelToken: cancelToken,
-        ).listen(
-          (event) {
-            if (cancelToken?.isCancelled == true) {
-              if (!completer.isCompleted) completer.completeError('Cancelled');
-              return;
-            }
-            if (event.currentBytes > 0 && onProgress != null) {
-              onProgress(event.currentBytes, event.totalBytes);
-            }
-            if (event.imageBytes != null) {
-              if (!completer.isCompleted) completer.complete(event.imageBytes!);
-            }
-          },
-          onError: (e) {
-            if (!completer.isCompleted) completer.completeError(e);
-          },
-          onDone: () {
-            if (!completer.isCompleted) {
-              completer.completeError('Download completed without data');
-            }
-          },
-        );
-
-    // Propagate cancel
-    cancelToken?.whenCancel.then((_) {
-      sub.cancel();
-      if (!completer.isCompleted) completer.completeError('Cancelled');
+    final chunkEvents = StreamController<ImageChunkEvent>();
+    final chunkSub = chunkEvents.stream.listen((event) {
+      onProgress?.call(
+        event.cumulativeBytesLoaded,
+        event.expectedTotalBytes == 0 ? null : event.expectedTotalBytes,
+      );
     });
 
-    return completer.future;
+    final fetch = fetchImageBytes(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      chunkEvents: chunkEvents,
+    );
+
+    try {
+      if (cancelToken == null) return await fetch;
+      return await Future.any([
+        fetch,
+        cancelToken.whenCancel.then<Uint8List>((_) {
+          throw Exception('Cancelled');
+        }),
+      ]);
+    } finally {
+      await chunkSub.cancel();
+      await chunkEvents.close();
+    }
   }
 }
 
@@ -503,6 +527,7 @@ class DownloadTask extends PolicyAwareTask {
 
   final List<Completer<Uint8List>> _completers = [];
   final List<StreamController<ImageChunkEvent>> _chunkControllers = [];
+  final List<void Function(int current, int? total)> _progressCallbacks = [];
   CancelToken? _cancelToken;
 
   DownloadTask({
@@ -515,12 +540,15 @@ class DownloadTask extends PolicyAwareTask {
     required String cid,
     required String eid,
     this.fullKey,
+    void Function(int current, int? total)? onProgress,
   }) : _exec = DownloadExecution(
          imageKey: imageKey,
          sourceKey: sourceKey,
          cid: cid,
          eid: eid,
-       );
+       ) {
+    if (onProgress != null) _progressCallbacks.add(onProgress);
+  }
 
   // ── Public API ──────────────────────────────────────────────
 
@@ -563,6 +591,9 @@ class DownloadTask extends PolicyAwareTask {
       final bytes = await _exec.execute(
         cancelToken: _cancelToken,
         onProgress: (current, total) {
+          for (final callback in _progressCallbacks) {
+            callback(current, total);
+          }
           for (final sc in _chunkControllers) {
             if (!sc.isClosed) {
               sc.add(
@@ -599,6 +630,7 @@ class DownloadTask extends PolicyAwareTask {
     _cancelToken?.cancel();
     _cancelToken = null;
     _chunkControllers.clear();
+    _progressCallbacks.clear();
   }
 
   @override
@@ -822,15 +854,15 @@ class TaskScheduler {
     final existing = _registry.find(task.key);
     if (existing != null) {
       final int oldPriority = existing.priority;
+      if (_shouldPreempt(existing, task, oldPriority)) {
+        _maybePreempt(existing, task, oldPriority);
+        return;
+      }
+      _mergeWaiters(existing, task);
       if (task.priority > existing.priority) {
         existing.priority = task.priority;
         existing.cancelable = task.cancelable;
-        if (existing is DownloadTask && task is DownloadTask) {
-          existing._completers.addAll(task._completers);
-          existing._chunkControllers.addAll(task._chunkControllers);
-        }
         _sortQueue();
-        _maybePreempt(existing, task, oldPriority);
       }
       return;
     }
@@ -885,8 +917,31 @@ class TaskScheduler {
 
   void _sortQueue() => _queue.sort((a, b) => b.priority.compareTo(a.priority));
 
+  void _mergeWaiters(SchedulerTask existing, SchedulerTask incoming) {
+    if (existing is DownloadTask && incoming is DownloadTask) {
+      existing._completers.addAll(incoming._completers);
+      existing._chunkControllers.addAll(incoming._chunkControllers);
+      existing._progressCallbacks.addAll(incoming._progressCallbacks);
+    } else if (existing is PrecreateTask && incoming is PrecreateTask) {
+      existing._holderCompleters.addAll(incoming._holderCompleters);
+    }
+  }
+
+  bool _shouldPreempt(
+    SchedulerTask existing,
+    SchedulerTask incoming,
+    int oldPriority,
+  ) {
+    return existing.cancelable &&
+        incoming.priority - oldPriority >= _preemptionThreshold;
+  }
+
   void _dispatchNext() {
-    if (_registry.runningCount >= _maxConcurrent || _queue.isEmpty) return;
+    if (_queue.isEmpty) return;
+    if (_registry.runningCount >= _maxConcurrent) {
+      _preemptLowestRunningFor(_queue.first);
+      if (_registry.runningCount >= _maxConcurrent) return;
+    }
     final task = _queue.removeAt(0);
     _registry.promoteToRunning(task);
     scheduleMicrotask(() {
@@ -904,8 +959,6 @@ class TaskScheduler {
     SchedulerTask incoming,
     int oldPriority,
   ) {
-    if (!existing.cancelable) return;
-    if (incoming.priority - oldPriority < _preemptionThreshold) return;
     debugPrint(
       '[TaskScheduler] PREEMPT ${existing.key} ($oldPriority → ${incoming.priority})',
     );
@@ -916,5 +969,24 @@ class TaskScheduler {
     _queue.add(incoming);
     _sortQueue();
     _dispatchNext();
+  }
+
+  void _preemptLowestRunningFor(SchedulerTask incoming) {
+    SchedulerTask? lowest;
+    for (final task in _registry.runningTasks) {
+      if (!task.cancelable) continue;
+      if (lowest == null || task.priority < lowest.priority) {
+        lowest = task;
+      }
+    }
+    if (lowest == null) return;
+    if (incoming.priority - lowest.priority < _preemptionThreshold) return;
+
+    debugPrint(
+      '[TaskScheduler] PREEMPT-RUNNING ${lowest.key} '
+      '(${lowest.priority} → ${incoming.priority})',
+    );
+    lowest.cancel();
+    _registry.remove(lowest.key);
   }
 }

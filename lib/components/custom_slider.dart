@@ -80,6 +80,8 @@ class CustomSlider extends StatefulWidget {
     required this.divisions,
     required this.onChanged,
     required this.focusNode,
+    this.onChangeStart,
+    this.onChangeEnd,
     this.reversed = false,
     super.key,
   });
@@ -94,6 +96,10 @@ class CustomSlider extends StatefulWidget {
 
   final void Function(double) onChanged;
 
+  final VoidCallback? onChangeStart;
+
+  final VoidCallback? onChangeEnd;
+
   final FocusNode? focusNode;
 
   final bool reversed;
@@ -104,6 +110,7 @@ class CustomSlider extends StatefulWidget {
 
 class _CustomSliderState extends State<CustomSlider> {
   late double value;
+  bool _isChanging = false;
 
   @override
   void initState() {
@@ -134,11 +141,17 @@ class _CustomSliderState extends State<CustomSlider> {
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
                   onTapDown: (details) {
+                    _beginChange();
                     _setFromDx(details.localPosition.dx, constraints.maxWidth);
                   },
+                  onTapUp: (_) => _endChange(),
+                  onTapCancel: _endChange,
+                  onHorizontalDragStart: (_) => _beginChange(),
                   onHorizontalDragUpdate: (details) {
                     _setFromDx(details.localPosition.dx, constraints.maxWidth);
                   },
+                  onHorizontalDragEnd: (_) => _endChange(),
+                  onHorizontalDragCancel: _endChange,
                   child: SizedBox(
                     height: 24,
                     child: Center(
@@ -265,5 +278,17 @@ class _CustomSliderState extends State<CustomSlider> {
       value = next;
     });
     widget.onChanged.call(next);
+  }
+
+  void _beginChange() {
+    if (_isChanging) return;
+    _isChanging = true;
+    widget.onChangeStart?.call();
+  }
+
+  void _endChange() {
+    if (!_isChanging) return;
+    _isChanging = false;
+    widget.onChangeEnd?.call();
   }
 }

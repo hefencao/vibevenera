@@ -701,6 +701,11 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     StreamController<ImageChunkEvent>? chunkEvents,
   }) async {
     try {
+      final existingHolder = DecoderManager.instance.getHolder(_fullKey);
+      if (existingHolder != null && !existingHolder.disposed) {
+        return _ImageResult.animated(existingHolder);
+      }
+
       // L1 cache check (decoded ui.Image in memory)
       if (cache != null) {
         final cached = cache!.getL1(_fullKey);
@@ -937,6 +942,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     PipelineController.instance.setInteractionState(state);
     DecoderManager.instance.setInteractionState(state);
   }
+
+  static bool get isJumpingInteraction =>
+      PipelineController.instance.interactionState == InteractionState.jumping;
 }
 
 // ═══════════════════════════════════════════════════════════════
