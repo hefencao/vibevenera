@@ -50,13 +50,13 @@ class ReaderImageProvider
       cid,
       eid,
       chunkEvents: chunkEvents,
+      debugLabel: 'reader-page:$page',
     );
   }
 
   /// 应用用户自定义 JS 图片处理脚本。
   ///
-  /// [FIX-ARCH-5] 从原来的 5 层嵌套提取为扁平的步骤序列：
-  ///   1. 检查开关 → 2. 验证脚本 → 3. 执行 JS → 4. 解析返回值
+  /// Steps: check setting, validate script, execute JS, parse result.
   Future<Uint8List> _applyCustomImageProcessing(
     Uint8List imageBytes,
     void Function() checkStop,

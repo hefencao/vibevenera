@@ -4,8 +4,6 @@ part of 'reader.dart';
 // _ImageViewControllerMixin — Gallery/Continuous 共享方法
 // ═══════════════════════════════════════════════════════════════
 
-/// [FIX-ARCH-3] 提取 _GalleryModeState 和 _ContinuousModeState 的公共方法。
-///
 /// 两种模式共享 [getImageByOffset]（实现完全相同）。
 mixin _ImageViewControllerMixin implements _ImageViewController {
   /// 由混入此 mixin 的 State 子类提供。
@@ -94,8 +92,8 @@ class _ReaderImagesState extends State<_ReaderImages>
             reader.updateHistory();
           });
         });
-        // [FIX] Trigger initial pre-download after images are loaded.
-        // _updateWebPState in initState was a no-op because images was null.
+        // Trigger initial pre-download after images are loaded; initState may
+        // run before the image list is available.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _updateWebPState(reader.page, context);
         });
@@ -128,7 +126,7 @@ class _ReaderImagesState extends State<_ReaderImages>
             reader.updateHistory();
           });
         });
-        // [FIX] Trigger initial pre-download after images are loaded.
+        // Trigger initial pre-download after images are loaded.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _updateWebPState(reader.page, context);
         });
@@ -240,8 +238,7 @@ class _GalleryModeState extends State<_GalleryMode>
   bool isLongPressing = false;
   int fingers = 0;
 
-  /// [ANALYSIS-2] Timer to transition from settling → idle after
-  /// page change animation completes.
+  /// Timer to transition from settling to idle after page animation completes.
   Timer? _settlingTimer;
 
   /// WebP 三级缓存（生命周期绑定本 State）
@@ -708,13 +705,13 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool delayedIsScrolling = false;
   var imageStates = <State<ComicImage>>{};
 
-  /// [ANALYSIS-2] Timer for settling → idle transition.
+  /// Timer for the settling to idle transition.
   Timer? _settlingTimer;
 
   @override
   final DecodedImageCache webpCache = DecodedImageCache();
 
-  /// [FIX-BUG-7] 使用可取消的 Timer，并在回调中检查 mounted。
+  /// Delayed scrolling state timer. Always cancel before replacing it.
   Timer? _delayedScrollingTimer;
 
   void delayedSetIsScrolling(bool value) {
@@ -890,7 +887,6 @@ class _ContinuousModeState extends State<_ContinuousMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
-            // [FIX-9] 补充 errorBuilder，提供重试能力
             errorBuilder: (_, error, s, retry) {
               return NetworkError(message: error.toString(), retry: retry);
             },

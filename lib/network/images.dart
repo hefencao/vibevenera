@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/image.dart';
 
 import 'app_dio.dart';
@@ -93,12 +94,56 @@ class _SharedStream {
   }
 }
 
+class _DownloadResumeState {
+  BytesBuilder _buffer = BytesBuilder(copy: false);
+  int? expectedBytes;
+
+  int get downloadedBytes => _buffer.length;
+
+  bool get isComplete =>
+      expectedBytes != null && downloadedBytes >= expectedBytes!;
+
+  void add(List<int> chunk) => _buffer.add(chunk);
+
+  void resetDownloadedBytes() {
+    _buffer = BytesBuilder(copy: false);
+  }
+
+  Uint8List takeBytes() => _buffer.takeBytes();
+}
+
+class _RangeNotSupportedException implements Exception {
+  _RangeNotSupportedException(this.offset, this.statusCode, this.url);
+
+  final int offset;
+  final int statusCode;
+  final String url;
+
+  @override
+  String toString() =>
+      'Range request ignored: offset=$offset status=$statusCode url=$url';
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ImageDownloader
 // ═══════════════════════════════════════════════════════════════
 
 abstract class ImageDownloader {
   static final Map<String, _SharedStream> _loadingImages = {};
+  static const _rhttpMaxAttempts = 3;
+  static const _ioMaxAttempts = 3;
+
+  static String _shortDownloadKey(String key) {
+    if (key.length <= 96) return key;
+    return '${key.substring(0, 48)}...${key.substring(key.length - 36)}';
+  }
+
+  static void _warnDownload(String? debugLabel, String message) {
+    Log.warning(
+      'ImageDownloader',
+      '[ImageDownload][${debugLabel ?? 'unknown'}] $message',
+    );
+  }
 
   static void cancelAllLoadingImages() {
     final values = _loadingImages.values.toList();
@@ -161,6 +206,7 @@ abstract class ImageDownloader {
     String cid,
     String eid, {
     CancelToken? cancelToken,
+    String? debugLabel,
   }) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
 
@@ -170,7 +216,14 @@ abstract class ImageDownloader {
     }
 
     final shared = _SharedStream(
-      _loadComicImage(imageKey, sourceKey, cid, eid, cancelToken: cancelToken),
+      _loadComicImage(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+        cancelToken: cancelToken,
+        debugLabel: debugLabel,
+      ),
       () => _loadingImages.remove(cacheKey),
     );
     _loadingImages[cacheKey] = shared;
@@ -183,6 +236,7 @@ abstract class ImageDownloader {
     String cid,
     String eid, {
     CancelToken? cancelToken,
+    String? debugLabel,
   }) {
     return _loadComicImage(
       imageKey,
@@ -190,6 +244,7 @@ abstract class ImageDownloader {
       cid,
       eid,
       cancelToken: cancelToken,
+      debugLabel: debugLabel ?? 'raw',
     );
   }
 
@@ -203,6 +258,7 @@ abstract class ImageDownloader {
     String cid,
     String eid, {
     CancelToken? cancelToken,
+    String? debugLabel,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
 
@@ -230,28 +286,45 @@ abstract class ImageDownloader {
 
     while (true) {
       try {
-        yield* _executeDownload(
+        await for (final event in _executeDownload(
           config: config,
           cacheKey: cacheKey,
           enableModifyImage: true,
           cancelToken: cancelToken,
-        );
+          debugLabel: debugLabel,
+        )) {
+          yield event;
+        }
         config.onLoadFailed?.free();
         return;
       } catch (e) {
-        retry--;
-        if (retry < 0 || config.onLoadFailed == null) {
-          config.onLoadFailed?.free();
-          rethrow;
-        }
-        final newConfig = await _invokeLoadFailed(
-          config.onLoadFailed!,
-          config.url,
+        _warnDownload(
+          debugLabel,
+          'FAIL retryLeft=$retry url=${_shortDownloadKey(config.url)} error=$e',
         );
-        if (newConfig == null) {
-          rethrow;
+        while (true) {
+          retry--;
+          if (retry < 0 || config.onLoadFailed == null) {
+            config.onLoadFailed?.free();
+            rethrow;
+          }
+          final oldUrl = config.url;
+          final newConfig = await _invokeLoadFailed(
+            config.onLoadFailed!,
+            oldUrl,
+          );
+          if (newConfig == null) {
+            rethrow;
+          }
+          final sameUrl = _sameRequestUrl(oldUrl, newConfig.url);
+          _warnDownload(
+            debugLabel,
+            'LOAD_FAILED ${sameUrl ? 'sameUrl-skip' : 'newUrl'} '
+                'retryLeft=$retry url=${_shortDownloadKey(newConfig.url)}',
+          );
+          config = newConfig;
+          if (!sameUrl) break;
         }
-        config = newConfig;
       }
     }
   }
@@ -271,26 +344,21 @@ abstract class ImageDownloader {
     return ImageRequestConfig.fromMap(originalUrl, result);
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  // [FIX-BUG-4 + FIX-BUG-5] Unified download executor
-  //
-  // Key fixes:
-  //   1. Replace List<int> buffer with BytesBuilder → eliminates
-  //      ~8x memory overhead that caused RhttpUnknownException
-  //      on large files (Bug #4).
-  //   2. Throttle progress events to max 1 per 100ms → eliminates
-  //      event-loop flooding that froze UI during downloads
-  //      (Bug #5).
-  //   3. Pre-allocate BytesBuilder capacity when content-length
-  //      is known → eliminates repeated buffer resizes.
-  //   4. Guard against RhttpUnknownException with graceful retry.
-  // ═══════════════════════════════════════════════════════════════
+  static bool _sameRequestUrl(String a, String b) =>
+      _normalizeRequestUrl(a) == _normalizeRequestUrl(b);
+
+  static String _normalizeRequestUrl(String url) =>
+      url.startsWith('//') ? 'https:$url' : url;
+
+  // Downloads image bytes as a stream, reports throttled progress,
+  // and resumes interrupted large bodies with HTTP Range requests.
 
   static Stream<ImageDownloadProgress> _executeDownload({
     required ImageRequestConfig config,
     required String cacheKey,
     bool enableModifyImage = false,
     CancelToken? cancelToken,
+    String? debugLabel,
   }) async* {
     String requestUrl = config.url;
     if (requestUrl.isEmpty) {
@@ -318,6 +386,8 @@ abstract class ImageDownloader {
       headers: headers,
       data: config.data,
       cancelToken: cancelToken,
+      debugLabel: debugLabel,
+      preferLoadFailedOnRangeIgnored: config.onLoadFailed != null,
       onProgress: (current, total) {
         if (!progressEvents.isClosed) {
           progressEvents.add(
@@ -354,8 +424,11 @@ abstract class ImageDownloader {
     required Map<String, dynamic> headers,
     required dynamic data,
     CancelToken? cancelToken,
+    String? debugLabel,
+    required bool preferLoadFailedOnRangeIgnored,
     void Function(int current, int? total)? onProgress,
   }) async {
+    final state = _DownloadResumeState();
     try {
       return await _downloadRawBytesWithRhttp(
         requestUrl: requestUrl,
@@ -363,17 +436,33 @@ abstract class ImageDownloader {
         headers: headers,
         data: data,
         cancelToken: cancelToken,
+        debugLabel: debugLabel,
         onProgress: onProgress,
+        state: state,
       );
     } catch (e) {
-      if (!_shouldFallbackToIoClient(e)) rethrow;
+      if (!_shouldFallbackToIoClient(
+        e,
+        preferLoadFailedOnRangeIgnored: preferLoadFailedOnRangeIgnored,
+      )) {
+        rethrow;
+      }
+      Log.warning(
+        'ImageDownloader',
+        'Dio/rhttp failed, fallback to HttpClient '
+            'label=${debugLabel ?? 'unknown'}; '
+            'downloaded=${state.downloadedBytes} '
+            'expected=${state.expectedBytes}; $e',
+      );
       return await _downloadRawBytesWithIoClient(
         requestUrl: requestUrl,
         method: method,
         headers: headers,
         data: data,
         cancelToken: cancelToken,
+        debugLabel: debugLabel,
         onProgress: onProgress,
+        state: state,
       );
     }
   }
@@ -385,30 +474,104 @@ abstract class ImageDownloader {
     required Map<String, dynamic> headers,
     required dynamic data,
     CancelToken? cancelToken,
+    String? debugLabel,
     void Function(int current, int? total)? onProgress,
+    required _DownloadResumeState state,
   }) async {
-    final dio = AppDio(
-      BaseOptions(
-        headers: headers,
-        method: method,
-        responseType: ResponseType.stream,
-      ),
-    );
+    var attempts = 0;
 
-    final req = await dio.request<ResponseBody>(
-      requestUrl,
-      data: data,
-      cancelToken: cancelToken,
-    );
-    final stream =
-        req.data?.stream ?? (throw Exception('Error: Empty response body.'));
-    final expectedBytes = _normalizeContentLength(req.data!.contentLength);
-    return _readByteStream(
-      stream,
-      expectedBytes: expectedBytes,
-      cancelToken: cancelToken,
-      onProgress: onProgress,
-    );
+    while (attempts < _rhttpMaxAttempts) {
+      attempts++;
+      final requestHeaders = Map<String, dynamic>.from(headers);
+      final resumeOffset = _canResume(method) ? state.downloadedBytes : 0;
+      if (resumeOffset > 0) {
+        requestHeaders['Range'] = 'bytes=$resumeOffset-';
+      }
+
+      try {
+        final dio = AppDio(
+          BaseOptions(
+            headers: requestHeaders,
+            method: method,
+            responseType: ResponseType.stream,
+            extra: const {'disableReceiveTimeout': true},
+          ),
+        );
+
+        final response = await dio.request<ResponseBody>(
+          requestUrl,
+          data: data,
+          cancelToken: cancelToken,
+        );
+
+        final statusCode = response.statusCode ?? 0;
+        if (statusCode >= 400) {
+          throw Exception('Invalid Status Code: $statusCode');
+        }
+
+        final rangeAccepted = resumeOffset == 0 || statusCode == 206;
+        if (!rangeAccepted) {
+          Log.warning(
+            'ImageDownloader',
+            'Dio/rhttp Range ignored: offset=$resumeOffset '
+                'status=$statusCode url=$requestUrl',
+          );
+          throw _RangeNotSupportedException(
+            resumeOffset,
+            statusCode,
+            requestUrl,
+          );
+        }
+
+        final effectiveOffset = rangeAccepted ? resumeOffset : 0;
+        final contentRange = response.headers.value('content-range');
+        final contentRangeStart = _contentRangeStart(contentRange);
+        if (resumeOffset > 0 &&
+            statusCode == 206 &&
+            contentRangeStart != null &&
+            contentRangeStart != resumeOffset) {
+          throw Exception(
+            'Invalid Content-Range start: $contentRangeStart '
+            '(expected $resumeOffset)',
+          );
+        }
+
+        state.expectedBytes = _expectedBytesFromResponse(
+          statusCode: statusCode,
+          contentRange: contentRange,
+          contentLength: response.data?.contentLength ?? -1,
+          resumeOffset: effectiveOffset,
+          fallback: state.expectedBytes,
+        );
+
+        final stream =
+            response.data?.stream ??
+            (throw Exception('Error: Empty response body.'));
+        return await _readByteStream(
+          stream,
+          state: state,
+          cancelToken: cancelToken,
+          onProgress: onProgress,
+        );
+      } catch (e) {
+        if (state.isComplete) {
+          return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+        }
+        if (!_isResumableDownloadError(e) || attempts >= _rhttpMaxAttempts) {
+          rethrow;
+        }
+        Log.warning(
+          'ImageDownloader',
+          'Dio/rhttp resume attempt $attempts failed '
+              'label=${debugLabel ?? 'unknown'}; '
+              'downloaded=${state.downloadedBytes} '
+              'expected=${state.expectedBytes} '
+              'nextRange=${state.downloadedBytes > 0 ? state.downloadedBytes : null}; '
+              '$e',
+        );
+      }
+    }
+    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Future<({Uint8List data, int? expectedBytes})>
@@ -418,13 +581,13 @@ abstract class ImageDownloader {
     required Map<String, dynamic> headers,
     required dynamic data,
     CancelToken? cancelToken,
+    String? debugLabel,
     void Function(int current, int? total)? onProgress,
+    required _DownloadResumeState state,
   }) async {
     var attempts = 0;
-    int? expectedBytes;
-    var buffer = BytesBuilder(copy: false);
 
-    while (attempts < 8) {
+    while (attempts < _ioMaxAttempts) {
       attempts++;
       final client = io.HttpClient();
       client.autoUncompress = false;
@@ -435,8 +598,9 @@ abstract class ImageDownloader {
         for (final entry in headers.entries) {
           request.headers.set(entry.key, entry.value.toString());
         }
-        if (buffer.length > 0) {
-          request.headers.set('Range', 'bytes=${buffer.length}-');
+        final resumeOffset = _canResume(method) ? state.downloadedBytes : 0;
+        if (resumeOffset > 0) {
+          request.headers.set('Range', 'bytes=$resumeOffset-');
         }
         if (data is List<int>) {
           request.add(data);
@@ -449,57 +613,69 @@ abstract class ImageDownloader {
         if (response.statusCode >= 400) {
           throw Exception('Invalid Status Code: ${response.statusCode}');
         }
-        if (buffer.length > 0 && response.statusCode != 206) {
-          buffer = BytesBuilder(copy: false);
+        final rangeAccepted = resumeOffset == 0 || response.statusCode == 206;
+        if (!rangeAccepted) {
+          Log.warning(
+            'ImageDownloader',
+            'HttpClient Range ignored: offset=$resumeOffset '
+                'status=${response.statusCode} url=$requestUrl',
+          );
+          state.resetDownloadedBytes();
         }
-        expectedBytes ??= response.statusCode == 206
-            ? _contentRangeTotal(response.headers.value('content-range'))
-            : _normalizeContentLength(response.contentLength);
+        final effectiveOffset = rangeAccepted ? resumeOffset : 0;
+        state.expectedBytes = _expectedBytesFromResponse(
+          statusCode: response.statusCode,
+          contentRange: response.headers.value('content-range'),
+          contentLength: response.contentLength,
+          resumeOffset: effectiveOffset,
+          fallback: state.expectedBytes,
+        );
         return await _readByteStream(
           response,
-          expectedBytes: expectedBytes,
+          state: state,
           cancelToken: cancelToken,
-          sink: buffer,
           onProgress: onProgress,
         );
       } catch (e) {
-        if (expectedBytes != null && buffer.length >= expectedBytes) {
-          return (data: buffer.takeBytes(), expectedBytes: expectedBytes);
+        if (state.isComplete) {
+          return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
         }
-        if (!_isRetryableBodyClose(e) || attempts >= 8) rethrow;
+        if (!_isResumableDownloadError(e) || attempts >= _ioMaxAttempts) rethrow;
+        Log.warning(
+          'ImageDownloader',
+          'HttpClient resume attempt $attempts failed '
+              'label=${debugLabel ?? 'unknown'}; '
+              'downloaded=${state.downloadedBytes} '
+              'expected=${state.expectedBytes}; $e',
+        );
       } finally {
         client.close(force: true);
       }
     }
-    return (data: buffer.takeBytes(), expectedBytes: expectedBytes);
+    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Future<({Uint8List data, int? expectedBytes})> _readByteStream(
     Stream<List<int>> stream, {
-    required int? expectedBytes,
+    required _DownloadResumeState state,
     CancelToken? cancelToken,
-    BytesBuilder? sink,
     void Function(int current, int? total)? onProgress,
   }) async {
-    final buffer = sink ?? BytesBuilder(copy: false);
     var lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
     const progressIntervalMs = 100;
     await for (final chunk in stream) {
       if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-      buffer.add(chunk);
-      final loaded = buffer.length;
+      state.add(chunk);
+      final loaded = state.downloadedBytes;
       final now = DateTime.now();
       if (now.difference(lastProgressTime).inMilliseconds >=
           progressIntervalMs) {
         lastProgressTime = now;
-        onProgress?.call(loaded, expectedBytes);
+        onProgress?.call(loaded, state.expectedBytes);
       }
     }
-    onProgress?.call(buffer.length, expectedBytes);
-    return (
-      data: sink == null ? buffer.takeBytes() : buffer.toBytes(),
-      expectedBytes: expectedBytes,
-    );
+    onProgress?.call(state.downloadedBytes, state.expectedBytes);
+    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Stream<ImageDownloadProgress> _finalizeDownloadedImage(
@@ -554,6 +730,22 @@ abstract class ImageDownloader {
   static int? _normalizeContentLength(int length) =>
       length >= 0 ? length : null;
 
+  static bool _canResume(String method) => method.toUpperCase() == 'GET';
+
+  static int? _expectedBytesFromResponse({
+    required int? statusCode,
+    required String? contentRange,
+    required int contentLength,
+    required int resumeOffset,
+    required int? fallback,
+  }) {
+    if (statusCode == 206) {
+      return _contentRangeTotal(contentRange) ??
+          (contentLength >= 0 ? resumeOffset + contentLength : fallback);
+    }
+    return _normalizeContentLength(contentLength) ?? fallback;
+  }
+
   static int? _contentRangeTotal(String? value) {
     if (value == null) return null;
     final slash = value.lastIndexOf('/');
@@ -561,18 +753,53 @@ abstract class ImageDownloader {
     return int.tryParse(value.substring(slash + 1));
   }
 
-  static bool _shouldFallbackToIoClient(Object error) {
-    final text = error.toString();
-    return text.contains('RhttpUnknownException') ||
-        text.contains('error decoding response body') ||
-        _isRetryableBodyClose(error);
+  static int? _contentRangeStart(String? value) {
+    if (value == null) return null;
+    final space = value.indexOf(' ');
+    final dash = value.indexOf('-');
+    if (space < 0 || dash <= space + 1) return null;
+    return int.tryParse(value.substring(space + 1, dash));
   }
 
-  static bool _isRetryableBodyClose(Object error) {
+  static bool _shouldFallbackToIoClient(
+    Object error, {
+    required bool preferLoadFailedOnRangeIgnored,
+  }) {
+    if (_isCancelledDownloadError(error)) return false;
+    if (error is _RangeNotSupportedException) {
+      return !preferLoadFailedOnRangeIgnored;
+    }
+    return _isResumableDownloadError(error);
+  }
+
+  static bool _isResumableDownloadError(Object error) {
+    if (_isCancelledDownloadError(error)) return false;
+    if (error is DioException) {
+      return switch (error.type) {
+        DioExceptionType.connectionTimeout ||
+        DioExceptionType.receiveTimeout ||
+        DioExceptionType.sendTimeout ||
+        DioExceptionType.connectionError ||
+        DioExceptionType.unknown => true,
+        _ => false,
+      };
+    }
     final text = error.toString();
     return text.contains('Connection closed while receiving data') ||
         text.contains('Connection reset by peer') ||
-        text.contains('HttpException');
+        text.contains('HttpException') ||
+        text.contains('receive timeout') ||
+        text.contains('Receive Timeout') ||
+        text.contains('Connection Timeout') ||
+        text.contains('RhttpUnknownException') ||
+        text.contains('error decoding response body');
+  }
+
+  static bool _isCancelledDownloadError(Object error) {
+    if (error is DioException) {
+      return error.type == DioExceptionType.cancel;
+    }
+    return error.toString().contains('Cancelled');
   }
 }
 

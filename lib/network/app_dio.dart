@@ -119,7 +119,9 @@ class MyLogInterceptor implements Interceptor {
             }"
     );
     options.connectTimeout = const Duration(seconds: 15);
-    options.receiveTimeout = const Duration(seconds: 15);
+    options.receiveTimeout = options.extra["disableReceiveTimeout"] == true
+        ? null
+        : const Duration(seconds: 15);
     options.sendTimeout = const Duration(seconds: 15);
     handler.next(options);
   }

@@ -116,7 +116,13 @@ class ImageFavoritesProvider
     void Function()? checkStop,
   ) async {
     await for (var progress
-        in ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid)) {
+        in ImageDownloader.loadComicImage(
+          imageKey,
+          sourceKey,
+          cid,
+          eid,
+          debugLabel: 'favorite',
+        )) {
       checkStop?.call();
       if (chunkEvents != null) {
         chunkEvents.add(ImageChunkEvent(

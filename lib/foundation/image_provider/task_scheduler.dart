@@ -498,6 +498,7 @@ class DownloadExecution {
       cid,
       eid,
       chunkEvents: chunkEvents,
+      debugLabel: 'pipeline-download',
     );
 
     try {

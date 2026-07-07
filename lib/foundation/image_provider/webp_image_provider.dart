@@ -757,6 +757,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       cid,
       eid,
       chunkEvents: chunkEvents,
+      debugLabel: 'webp-visible',
     );
   }
 
@@ -832,7 +833,13 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     if (bytes == null) {
       if (onlyIfCached) return null;
       try {
-        final fetched = await fetchImageBytesRaw(imageKey, sourceKey, cid, eid);
+        final fetched = await fetchImageBytes(
+          imageKey,
+          sourceKey,
+          cid,
+          eid,
+          debugLabel: 'webp-holder',
+        );
         bytes = fetched;
         if (cache != null && webp.isWebP(fetched)) {
           cache.putL2(imageKey, fetched);

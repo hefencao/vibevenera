@@ -20,19 +20,14 @@ import 'package:venera/network/images.dart';
 /// For independent streams (like download managers), use
 /// [fetchImageBytesRaw].
 
-/// [FIX-BUG-5] Try to load bytes from local filesystem without
-/// triggering network requests.
-///
 /// Handles both `file://` protocol paths and direct file paths.
 /// Delegates to `File()` — on Android, `_IOOverrides.createFile`
 /// transparently handles SAF paths.
 ///
 /// Returns null if not a local file, needs network loading.
 ///
-/// [FIX-BUG-5] For files > 1MB, use Isolate.run to avoid blocking
-/// the main isolate. File.readAsBytes() is async but the actual
-/// I/O still happens on the main isolate's event loop for large
-/// files, causing UI jank.
+/// For files larger than 1MB, use Isolate.run to avoid blocking
+/// the main isolate during synchronous filesystem work.
 Future<Uint8List?> tryLoadLocalFile(String imageKey) async {
   // 1. Network URL (https://, http://, etc.) → not local
   if (imageKey.contains('://') && !imageKey.startsWith('file://')) {
@@ -74,6 +69,7 @@ Future<Uint8List> fetchImageBytes(
   String cid,
   String eid, {
   StreamController<ImageChunkEvent>? chunkEvents,
+  String? debugLabel,
 }) async {
   // Check local file first
   final local = await tryLoadLocalFile(imageKey);
@@ -99,7 +95,13 @@ Future<Uint8List> fetchImageBytes(
   }
 
   // Network download
-  final stream = ImageDownloader.loadComicImage(imageKey, sourceKey, cid, eid);
+  final stream = ImageDownloader.loadComicImage(
+    imageKey,
+    sourceKey,
+    cid,
+    eid,
+    debugLabel: debugLabel,
+  );
 
   Uint8List? result;
   await for (final event in stream) {
@@ -128,8 +130,9 @@ Future<Uint8List> fetchImageBytesRaw(
   String imageKey,
   String? sourceKey,
   String cid,
-  String eid,
-) async {
+  String eid, {
+  String? debugLabel,
+}) async {
   // Check local file first
   final local = await tryLoadLocalFile(imageKey);
   if (local != null) return local;
@@ -159,6 +162,7 @@ Future<Uint8List> fetchImageBytesRaw(
     sourceKey,
     cid,
     eid,
+    debugLabel: debugLabel ?? 'raw',
   );
 
   Uint8List? result;
