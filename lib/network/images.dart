@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io' as io;
+import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -88,7 +90,11 @@ class _SharedStream {
   void _ensureStarted() {
     _upstreamSub ??= _source.listen(
       (event) {
-        if (event.chunkBytes != null || event.imageBytes != null || event.reset) {
+        if (event.reset) {
+          _history
+            ..clear()
+            ..add(event);
+        } else if (event.chunkBytes != null || event.imageBytes != null) {
           _history.add(event);
         }
         _controller.add(event);
@@ -165,33 +171,273 @@ class _SharedStream {
 }
 
 class _DownloadResumeState {
-  BytesBuilder _buffer = BytesBuilder(copy: false);
+  final BytesBuilder _buffer = BytesBuilder(copy: false);
+  int _baseBytes = 0;
   int? expectedBytes;
+  final _PartialImageCache? partialCache;
+  final String? debugLabel;
+  bool hasReplayedPartial = false;
+  List<Uint8List>? _replayChunks;
+  bool _checkedDeclaredBytes = false;
+  int _pendingPartialBytes = 0;
+  static const _partialFlushBytes = 1024 * 1024;
 
-  int get downloadedBytes => _buffer.length;
+  _DownloadResumeState([this.partialCache, this.debugLabel]);
+
+  int get downloadedBytes => _baseBytes + _buffer.length;
 
   bool get isComplete =>
       expectedBytes != null && downloadedBytes >= expectedBytes!;
 
-  void add(List<int> chunk) => _buffer.add(chunk);
-
-  void resetDownloadedBytes() {
-    _buffer = BytesBuilder(copy: false);
+  Future<void> initFromPartial() async {
+    final sw = Stopwatch()..start();
+    final chunks = await partialCache?.readChunks();
+    if (chunks == null || chunks.isEmpty) return;
+    var len = 0;
+    for (final chunk in chunks) {
+      len += chunk.length;
+    }
+    _baseBytes = len;
+    _replayChunks = chunks;
+    setExpectedBytes(partialCache?.memoryExpectedBytes);
+    setExpectedBytes(_declaredWebPBytesFromChunks(chunks));
+    _checkedDeclaredBytes = downloadedBytes >= 12;
+    debugPrint(
+      '[WebP-Stream][partial] init ${debugLabel ?? ''} '
+      '${chunks.length}c ${downloadedBytes}B mem=${partialCache?.memoryLength ?? 0} '
+      '${sw.elapsedMilliseconds}ms',
+    );
   }
 
-  Uint8List takeBytes() => _buffer.takeBytes();
+  void setExpectedBytes(int? value) {
+    expectedBytes = ImageDownloader._maxExpected(expectedBytes, value);
+    partialCache?.setExpected(expectedBytes);
+  }
+
+  int? _declaredWebPBytesFromChunks(List<Uint8List> chunks) {
+    if (downloadedBytes < 12) return null;
+    final header = Uint8List(12);
+    var copied = 0;
+    for (final chunk in chunks) {
+      final n = math.min(12 - copied, chunk.length);
+      header.setRange(copied, copied + n, chunk);
+      copied += n;
+      if (copied >= 12) break;
+    }
+    return ImageDownloader._declaredWebPBytes(header);
+  }
+
+  Future<void> replayPartial({
+    int fromBytes = 0,
+    void Function(int current, int? total)? onProgress,
+    void Function(int current, int? total, List<int> chunk)? onChunk,
+  }) async {
+    if (hasReplayedPartial || downloadedBytes <= fromBytes) return;
+    hasReplayedPartial = true;
+    final chunks = _replayChunks;
+    final sw = Stopwatch()..start();
+    const chunkSize = 256 * 1024;
+    if (chunks != null) {
+      var builder = BytesBuilder(copy: false);
+      var current = fromBytes;
+      var emitted = 0;
+      Future<void> flush() async {
+        if (builder.length == 0) return;
+        emitted++;
+        onChunk?.call(current, expectedBytes, builder.takeBytes());
+        builder = BytesBuilder(copy: false);
+        if (emitted == 1 || current == downloadedBytes) {
+          onProgress?.call(current, expectedBytes);
+        }
+        if (emitted <= 4 || emitted % 4 == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+      var offset = 0;
+      for (final chunk in chunks) {
+        final end = offset + chunk.length;
+        if (end <= fromBytes) {
+          offset = end;
+          continue;
+        }
+        final start = math.max(0, fromBytes - offset);
+        final data = start == 0 ? chunk : Uint8List.sublistView(chunk, start);
+        builder.add(data);
+        current += data.length;
+        offset = end;
+        if (builder.length >= chunkSize) await flush();
+      }
+      await flush();
+      debugPrint(
+        '[WebP-Stream][partial] replay ${debugLabel ?? ''} '
+        '$fromBytes->$downloadedBytes events=$emitted ${sw.elapsedMilliseconds}ms',
+      );
+      return;
+    }
+    final bytes = _buffer.toBytes();
+    for (var offset = fromBytes; offset < bytes.length; offset += chunkSize) {
+      final end = math.min(offset + chunkSize, bytes.length);
+      onChunk?.call(end, expectedBytes, Uint8List.sublistView(bytes, offset, end));
+      if (offset == 0 || end == bytes.length) onProgress?.call(end, expectedBytes);
+      if (offset <= chunkSize * 4 || offset % (chunkSize * 4) == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    debugPrint(
+      '[WebP-Stream][partial] replay-buffer ${debugLabel ?? ''} '
+      '${downloadedBytes}B ${sw.elapsedMilliseconds}ms',
+    );
+  }
+
+  Future<void> add(List<int> chunk) async {
+    _buffer.add(chunk);
+    if (_baseBytes == 0 && !_checkedDeclaredBytes && _buffer.length >= 12) {
+      _checkedDeclaredBytes = true;
+      setExpectedBytes(ImageDownloader._declaredWebPBytes(_buffer.toBytes()));
+    }
+    final cache = partialCache;
+    if (cache == null || chunk.isEmpty) return;
+    await cache.append(chunk);
+    _pendingPartialBytes += chunk.length;
+    if (_pendingPartialBytes >= _partialFlushBytes) await flushPartial();
+  }
+
+  Future<void> flushPartial() async {
+    _pendingPartialBytes = 0;
+    await partialCache?.flush();
+  }
+
+  Future<void> closePartial() async {
+    _pendingPartialBytes = 0;
+    await partialCache?.close();
+  }
+
+  Future<Uint8List> takeBytes() async {
+    if (_baseBytes > 0) {
+      await closePartial();
+      final bytes = await partialCache?.read();
+      if (bytes != null && bytes.length >= downloadedBytes) {
+        return bytes.length == downloadedBytes
+            ? bytes
+            : Uint8List.sublistView(bytes, 0, downloadedBytes);
+      }
+      throw io.HttpException(
+        'Partial cache missing while assembling resumed body: '
+        '${bytes?.length ?? 0}/$downloadedBytes',
+      );
+    }
+    return _buffer.takeBytes();
+  }
 }
 
-class _RangeNotSupportedException implements Exception {
-  _RangeNotSupportedException(this.offset, this.statusCode, this.url);
+class _PartialImageCache {
+  static final Map<String, _PartialImageMemory> _memory = {};
 
-  final int offset;
-  final int statusCode;
-  final String url;
+  _PartialImageCache(String cacheKey)
+      : file = io.File(
+          '${CacheManager.cachePath}_partial/${md5.convert(cacheKey.codeUnits)}',
+        ),
+        _memoryKey = cacheKey;
+
+  final io.File file;
+  final String _memoryKey;
+  io.IOSink? _sink;
+  bool _dirReady = false;
+  _PartialImageMemory get _mem =>
+      _memory.putIfAbsent(_memoryKey, _PartialImageMemory.new);
+  int get memoryLength => _memory[_memoryKey]?.length ?? 0;
+
+  Future<Uint8List?> read() async {
+    final chunks = await readChunks();
+    if (chunks == null || chunks.isEmpty) return null;
+    final builder = BytesBuilder(copy: false);
+    for (final chunk in chunks) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  Future<List<Uint8List>?> readChunks() async {
+    final mem = _mem;
+    if (mem.length > 0) return mem.snapshot();
+    if (!await file.exists()) return null;
+    final len = await file.length();
+    if (len <= 0) return null;
+    final bytes = await file.readAsBytes();
+    mem.reset();
+    mem.add(bytes);
+    return [bytes];
+  }
+
+  int? get memoryExpectedBytes => _mem.expectedBytes;
+
+  void setExpected(int? expected) {
+    if (expected != null) _mem.expectedBytes = expected;
+  }
+
+  Future<int> length() async {
+    final memLen = _mem.length;
+    if (memLen > 0) return memLen;
+    return await file.exists() ? await file.length() : 0;
+  }
+
+  Future<void> append(List<int> chunk) async {
+    if (chunk.isEmpty) return;
+    _mem.add(Uint8List.sublistView(Uint8List.fromList(chunk)));
+    if (!_dirReady) {
+      await file.parent.create(recursive: true);
+      _dirReady = true;
+    }
+    (_sink ??= file.openWrite(mode: io.FileMode.append)).add(chunk);
+  }
+
+  Future<void> flush() async {
+    await _sink?.flush();
+  }
+
+  Future<void> close() async {
+    final sink = _sink;
+    if (sink == null) return;
+    _sink = null;
+    await sink.close();
+  }
+
+  Future<void> clear() async {
+    await close();
+    _memory.remove(_memoryKey);
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
+}
+
+class _PartialImageMemory {
+  final chunks = <Uint8List>[];
+  int length = 0;
+  int? expectedBytes;
+
+  void add(Uint8List chunk) {
+    if (chunk.isEmpty) return;
+    chunks.add(chunk);
+    length += chunk.length;
+  }
+
+  List<Uint8List> snapshot() => List<Uint8List>.unmodifiable(chunks);
+
+  void reset() {
+    chunks.clear();
+    length = 0;
+    expectedBytes = null;
+  }
+}
+
+class _IncompleteWebPException implements Exception {
+  _IncompleteWebPException(this.actual, this.expected);
+  final int actual;
+  final int expected;
 
   @override
-  String toString() =>
-      'Range request ignored: offset=$offset status=$statusCode url=$url';
+  String toString() => 'Incomplete WebP body: $actual/$expected bytes';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -230,6 +476,32 @@ abstract class ImageDownloader {
       shared.cancel();
     }
     _loadingImages.clear();
+  }
+
+  static bool isIncompleteWebPBytes(List<int> data) {
+    final declared = _declaredWebPBytes(data);
+    return declared != null && data.length < declared;
+  }
+
+  static int? _declaredWebPBytes(List<int> data) {
+    if (data.length < 12) return null;
+    if (data[0] != 0x52 || data[1] != 0x49 || data[2] != 0x46 ||
+        data[3] != 0x46 || data[8] != 0x57 || data[9] != 0x45 ||
+        data[10] != 0x42 || data[11] != 0x50) {
+      return null;
+    }
+    final payload = data[4] |
+        (data[5] << 8) |
+        (data[6] << 16) |
+        (data[7] << 24);
+    return payload + 8;
+  }
+
+  static void _validateCompleteImageBytes(List<int> data) {
+    final declared = _declaredWebPBytes(data);
+    if (declared != null && data.length < declared) {
+      throw _IncompleteWebPException(data.length, declared);
+    }
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -286,6 +558,9 @@ abstract class ImageDownloader {
     String eid, {
     CancelToken? cancelToken,
     String? debugLabel,
+    int? resumeFromBytes,
+    int? resumeExpectedBytes,
+    bool replayPartial = true,
   }) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final joined = joinLoadingComicImage(
@@ -306,6 +581,9 @@ abstract class ImageDownloader {
         eid,
         cancelToken: requestCancel,
         debugLabel: debugLabel,
+        resumeFromBytes: resumeFromBytes,
+        resumeExpectedBytes: resumeExpectedBytes,
+        replayPartial: replayPartial,
       ),
       () => _loadingImages.remove(cacheKey),
       requestCancel,
@@ -332,6 +610,16 @@ abstract class ImageDownloader {
       );
     }
     return existing.stream;
+  }
+
+  static bool isLoadingComicImage(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    return _loadingImages.containsKey(cacheKey);
   }
 
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
@@ -363,6 +651,9 @@ abstract class ImageDownloader {
     String eid, {
     CancelToken? cancelToken,
     String? debugLabel,
+    int? resumeFromBytes,
+    int? resumeExpectedBytes,
+    bool replayPartial = true,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     _throwIfCancelled(cancelToken);
@@ -373,12 +664,17 @@ abstract class ImageDownloader {
     if (cached != null) {
       final data = await cached.readAsBytes();
       _throwIfCancelled(cancelToken);
-      yield ImageDownloadProgress(
-        currentBytes: data.length,
-        totalBytes: data.length,
-        imageBytes: data,
-      );
-      return;
+      if (isIncompleteWebPBytes(data)) {
+        await CacheManager().delete(cacheKey);
+      } else {
+        unawaited(_PartialImageCache(cacheKey).clear());
+        yield ImageDownloadProgress(
+          currentBytes: data.length,
+          totalBytes: data.length,
+          imageBytes: data,
+        );
+        return;
+      }
     }
 
     Map<String, dynamic>? rawConfig;
@@ -391,6 +687,10 @@ abstract class ImageDownloader {
 
     var config = ImageRequestConfig.fromMap(imageKey, rawConfig);
     var retry = 5;
+    var sameUrlRetry = 1;
+    var shouldReplayPartial = replayPartial;
+    var resumeOffset = resumeFromBytes;
+    var resumeExpected = resumeExpectedBytes;
 
     while (true) {
       try {
@@ -402,6 +702,9 @@ abstract class ImageDownloader {
           cancelToken: cancelToken,
           debugLabel: debugLabel,
           debugKey: imageKey,
+          replayPartial: shouldReplayPartial,
+          resumeFromBytes: resumeOffset,
+          resumeExpectedBytes: resumeExpected,
         )) {
           yield event;
         }
@@ -412,6 +715,17 @@ abstract class ImageDownloader {
           debugLabel,
           'FAIL retryLeft=$retry url=${_shortDownloadKey(config.url)} error=$e',
         );
+        if (sameUrlRetry > 0 && _isSameUrlRetryable(e)) {
+          sameUrlRetry--;
+          shouldReplayPartial = false;
+          resumeOffset = null;
+          resumeExpected = null;
+          _warnDownload(
+            debugLabel,
+            'RETRY sameUrl left=$sameUrlRetry url=${_shortDownloadKey(config.url)}',
+          );
+          continue;
+        }
         while (true) {
           retry--;
           if (retry < 0 || config.onLoadFailed == null) {
@@ -434,7 +748,12 @@ abstract class ImageDownloader {
                 'retryLeft=$retry url=${_shortDownloadKey(newConfig.url)}',
           );
           config = newConfig;
-          if (!sameUrl) break;
+          if (!sameUrl) {
+            shouldReplayPartial = false;
+            resumeOffset = null;
+            resumeExpected = null;
+            break;
+          }
         }
       }
     }
@@ -475,6 +794,9 @@ abstract class ImageDownloader {
     CancelToken? cancelToken,
     String? debugLabel,
     String? debugKey,
+    bool replayPartial = true,
+    int? resumeFromBytes,
+    int? resumeExpectedBytes,
   }) async* {
     String requestUrl = config.url;
     if (requestUrl.isEmpty) {
@@ -540,12 +862,15 @@ abstract class ImageDownloader {
       try {
         return await _downloadRawBytes(
           requestUrl: requestUrl,
+          cacheKey: cacheKey,
           method: config.method,
           headers: headers,
           data: config.data,
           cancelToken: cancelToken,
           debugLabel: debugLabel,
-          preferLoadFailedOnRangeIgnored: config.onLoadFailed != null,
+          replayPartial: replayPartial,
+          resumeFromBytes: resumeFromBytes,
+          resumeExpectedBytes: resumeExpectedBytes,
           onProgress: (current, total) {
             if (!progressEvents.isClosed) {
               progressEvents.add(
@@ -560,18 +885,6 @@ abstract class ImageDownloader {
             pendingTotal = total;
             if (pendingChunk.length >= 64 * 1024) flushPendingChunk();
           },
-          onReset: () {
-            flushPendingChunk();
-            if (!progressEvents.isClosed) {
-              progressEvents.add(
-                const ImageDownloadProgress(
-                  currentBytes: 0,
-                  totalBytes: null,
-                  reset: true,
-                ),
-              );
-            }
-          },
         );
       } finally {
         flushPendingChunk();
@@ -584,6 +897,12 @@ abstract class ImageDownloader {
     }
     final raw = await rawFuture;
     final Uint8List data = raw.data;
+    final declared = _declaredWebPBytes(data);
+    if (declared != null && data.length < declared) {
+      throw io.HttpException(
+        'Connection closed while receiving data: ${data.length}/$declared',
+      );
+    }
     if (streamDebug) {
       debugPrint('[WebP-Stream][download] RAW-DONE key=$key bytes=${data.length}');
     }
@@ -605,17 +924,48 @@ abstract class ImageDownloader {
 
   static Future<({Uint8List data, int? expectedBytes})> _downloadRawBytes({
     required String requestUrl,
+    required String cacheKey,
     required String method,
     required Map<String, dynamic> headers,
     required dynamic data,
     CancelToken? cancelToken,
     String? debugLabel,
-    required bool preferLoadFailedOnRangeIgnored,
+    required bool replayPartial,
+    int? resumeFromBytes,
+    int? resumeExpectedBytes,
     void Function(int current, int? total)? onProgress,
     void Function(int current, int? total, List<int> chunk)? onChunk,
-    void Function()? onReset,
   }) async {
-    final state = _DownloadResumeState();
+    final state = _DownloadResumeState(
+      _PartialImageCache(cacheKey),
+      debugLabel,
+    );
+    await state.initFromPartial();
+    state.setExpectedBytes(resumeExpectedBytes);
+    if (replayPartial) {
+      await state.replayPartial(onProgress: onProgress, onChunk: onChunk);
+    } else if (resumeFromBytes != null) {
+      if (state.downloadedBytes < resumeFromBytes) {
+        debugPrint(
+          '[WebP-Stream][partial] miss ${debugLabel ?? ''} '
+          'cache=${state.downloadedBytes} holder=$resumeFromBytes',
+        );
+      } else if (state.downloadedBytes > resumeFromBytes) {
+        await state.replayPartial(
+          fromBytes: resumeFromBytes,
+          onProgress: onProgress,
+          onChunk: onChunk,
+        );
+      } else {
+        onProgress?.call(state.downloadedBytes, state.expectedBytes);
+      }
+    } else {
+      onProgress?.call(state.downloadedBytes, state.expectedBytes);
+    }
+    if (state.isComplete) {
+      await state.closePartial();
+      return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+    }
     try {
       return await _downloadRawBytesWithRhttp(
         requestUrl: requestUrl,
@@ -629,12 +979,7 @@ abstract class ImageDownloader {
         state: state,
       );
     } catch (e) {
-      if (!_shouldFallbackToIoClient(
-        e,
-        preferLoadFailedOnRangeIgnored: preferLoadFailedOnRangeIgnored,
-      )) {
-        rethrow;
-      }
+      if (!_isResumableDownloadError(e)) rethrow;
       Log.warning(
         'ImageDownloader',
         'Dio/rhttp failed, fallback to HttpClient '
@@ -651,7 +996,6 @@ abstract class ImageDownloader {
         debugLabel: debugLabel,
         onProgress: onProgress,
         onChunk: onChunk,
-        onReset: onReset,
         state: state,
       );
     }
@@ -705,12 +1049,7 @@ abstract class ImageDownloader {
           Log.warning(
             'ImageDownloader',
             'Dio/rhttp Range ignored: offset=$resumeOffset '
-                'status=$statusCode url=$requestUrl',
-          );
-          throw _RangeNotSupportedException(
-            resumeOffset,
-            statusCode,
-            requestUrl,
+                'status=$statusCode skip-prefix url=$requestUrl',
           );
         }
 
@@ -742,12 +1081,13 @@ abstract class ImageDownloader {
           stream,
           state: state,
           cancelToken: cancelToken,
+          skipPrefixBytes: rangeAccepted ? 0 : resumeOffset,
           onProgress: onProgress,
           onChunk: onChunk,
         );
       } catch (e) {
         if (state.isComplete) {
-          return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+          return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
         }
         if (!_isResumableDownloadError(e) || attempts >= _rhttpMaxAttempts) {
           rethrow;
@@ -763,7 +1103,7 @@ abstract class ImageDownloader {
         );
       }
     }
-    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Future<({Uint8List data, int? expectedBytes})>
@@ -776,7 +1116,6 @@ abstract class ImageDownloader {
     String? debugLabel,
     void Function(int current, int? total)? onProgress,
     void Function(int current, int? total, List<int> chunk)? onChunk,
-    void Function()? onReset,
     required _DownloadResumeState state,
   }) async {
     var attempts = 0;
@@ -812,10 +1151,8 @@ abstract class ImageDownloader {
           Log.warning(
             'ImageDownloader',
             'HttpClient Range ignored: offset=$resumeOffset '
-                'status=${response.statusCode} url=$requestUrl',
+                'status=${response.statusCode} skip-prefix url=$requestUrl',
           );
-          state.resetDownloadedBytes();
-          onReset?.call();
         }
         final effectiveOffset = rangeAccepted ? resumeOffset : 0;
         state.expectedBytes = _expectedBytesFromResponse(
@@ -829,12 +1166,13 @@ abstract class ImageDownloader {
           response,
           state: state,
           cancelToken: cancelToken,
+          skipPrefixBytes: rangeAccepted ? 0 : resumeOffset,
           onProgress: onProgress,
           onChunk: onChunk,
         );
       } catch (e) {
         if (state.isComplete) {
-          return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+          return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
         }
         if (!_isResumableDownloadError(e) || attempts >= _ioMaxAttempts) rethrow;
         Log.warning(
@@ -848,32 +1186,58 @@ abstract class ImageDownloader {
         client.close(force: true);
       }
     }
-    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Future<({Uint8List data, int? expectedBytes})> _readByteStream(
     Stream<List<int>> stream, {
     required _DownloadResumeState state,
     CancelToken? cancelToken,
+    int skipPrefixBytes = 0,
     void Function(int current, int? total)? onProgress,
     void Function(int current, int? total, List<int> chunk)? onChunk,
   }) async {
     var lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
+    var skip = skipPrefixBytes;
     const progressIntervalMs = 100;
-    await for (final chunk in stream) {
-      if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-      state.add(chunk);
-      final loaded = state.downloadedBytes;
-      onChunk?.call(loaded, state.expectedBytes, chunk);
-      final now = DateTime.now();
-      if (now.difference(lastProgressTime).inMilliseconds >=
-          progressIntervalMs) {
-        lastProgressTime = now;
-        onProgress?.call(loaded, state.expectedBytes);
+    try {
+      await for (final chunk in stream) {
+        if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
+        List<int> data = chunk;
+        if (skip > 0) {
+          if (chunk.length <= skip) {
+            skip -= chunk.length;
+            onProgress?.call(state.downloadedBytes, state.expectedBytes);
+            continue;
+          }
+          data = Uint8List.sublistView(
+            chunk is Uint8List ? chunk : Uint8List.fromList(chunk),
+            skip,
+          );
+          skip = 0;
+        }
+        await state.add(data);
+        final loaded = state.downloadedBytes;
+        onChunk?.call(loaded, state.expectedBytes, data);
+        final now = DateTime.now();
+        if (now.difference(lastProgressTime).inMilliseconds >=
+            progressIntervalMs) {
+          lastProgressTime = now;
+          onProgress?.call(loaded, state.expectedBytes);
+        }
       }
+    } finally {
+      await state.closePartial();
+    }
+    if (state.expectedBytes != null &&
+        state.downloadedBytes < state.expectedBytes!) {
+      throw io.HttpException(
+        'Connection closed while receiving data: '
+        '${state.downloadedBytes}/${state.expectedBytes}',
+      );
     }
     onProgress?.call(state.downloadedBytes, state.expectedBytes);
-    return (data: state.takeBytes(), expectedBytes: state.expectedBytes);
+    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
   }
 
   static Stream<ImageDownloadProgress> _finalizeDownloadedImage(
@@ -894,8 +1258,10 @@ abstract class ImageDownloader {
         final transformed = result is Uint8List
             ? result
             : Uint8List.fromList(result);
+        _validateCompleteImageBytes(transformed);
         config.onResponse!.free();
         _writeCacheInBackground(cacheKey, transformed);
+        await _PartialImageCache(cacheKey).clear();
         yield ImageDownloadProgress(
           currentBytes: transformed.length,
           totalBytes: transformed.length,
@@ -910,10 +1276,13 @@ abstract class ImageDownloader {
 
     // Optionally apply modifyImage script
     if (enableModifyImage && config.modifyImage != null) {
+      _validateCompleteImageBytes(data);
       finalData = await modifyImageWithScript(data, config.modifyImage);
     }
 
+    _validateCompleteImageBytes(finalData);
     _writeCacheInBackground(cacheKey, finalData);
+    await _PartialImageCache(cacheKey).clear();
 
     // Yield final complete event with image bytes
     yield ImageDownloadProgress(
@@ -944,10 +1313,17 @@ abstract class ImageDownloader {
     required int? fallback,
   }) {
     if (statusCode == 206) {
-      return _contentRangeTotal(contentRange) ??
-          (contentLength >= 0 ? resumeOffset + contentLength : fallback);
+      final total = _contentRangeTotal(contentRange) ??
+          (contentLength >= 0 ? resumeOffset + contentLength : null);
+      return _maxExpected(total, fallback);
     }
-    return _normalizeContentLength(contentLength) ?? fallback;
+    return _maxExpected(_normalizeContentLength(contentLength), fallback);
+  }
+
+  static int? _maxExpected(int? a, int? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a > b ? a : b;
   }
 
   static int? _contentRangeTotal(String? value) {
@@ -965,19 +1341,14 @@ abstract class ImageDownloader {
     return int.tryParse(value.substring(space + 1, dash));
   }
 
-  static bool _shouldFallbackToIoClient(
-    Object error, {
-    required bool preferLoadFailedOnRangeIgnored,
-  }) {
-    if (_isCancelledDownloadError(error)) return false;
-    if (error is _RangeNotSupportedException) {
-      return !preferLoadFailedOnRangeIgnored;
-    }
-    return _isResumableDownloadError(error);
-  }
+  static bool _isSameUrlRetryable(Object error) =>
+      error is _IncompleteWebPException ||
+      (error is io.HttpException &&
+          error.message.contains('Connection closed while receiving data'));
 
   static bool _isResumableDownloadError(Object error) {
     if (_isCancelledDownloadError(error)) return false;
+    if (error is _IncompleteWebPException) return true;
     if (error is DioException) {
       return switch (error.type) {
         DioExceptionType.connectionTimeout ||

@@ -126,6 +126,8 @@ int webp_anim_stream_decoder_append(
 
 void webp_anim_stream_decoder_reset_input(WebPAnimStreamContext* ctx);
 
+void webp_anim_stream_decoder_restart_playback(WebPAnimStreamContext* ctx);
+
 int webp_anim_stream_decoder_get_info(
     WebPAnimStreamContext* ctx,
     int* canvas_width, int* canvas_height,

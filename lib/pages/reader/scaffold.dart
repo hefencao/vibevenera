@@ -271,13 +271,13 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
   }
 
   Color _downloadProgressColor(double bytesPerSecond) {
-    const base = 64 * 1024.0;
-    const max = 2 * 1024 * 1024.0;
+    const base = 128 * 1024.0;
+    const max = 8 * 1024 * 1024.0;
     final t = (math.log(1 + bytesPerSecond / base) / math.log(1 + max / base))
         .clamp(0.0, 1.0);
-    return t < 0.5
-        ? Color.lerp(Colors.red, Colors.amber, t * 2)!
-        : Color.lerp(Colors.amber, Colors.green, (t - 0.5) * 2)!;
+    return t < 0.7
+        ? Color.lerp(Colors.red, Colors.amber, t / 0.7)!
+        : Color.lerp(Colors.amber, Colors.green, (t - 0.7) / 0.3)!;
   }
 
   bool isLiked() {

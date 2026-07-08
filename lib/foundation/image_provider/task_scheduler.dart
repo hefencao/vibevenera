@@ -419,7 +419,7 @@ abstract class PolicyAwareTask extends SchedulerTask {
     final ctx = _ctx;
     if (ctx == null || !permissionValid(ctx)) {
       debugPrint('[Task] CANCEL-POLICY $key (permission revoked)');
-      _finish(false);
+      cancel();
       TaskScheduler.instance.onTaskCompleted(this);
       return;
     }
@@ -626,8 +626,11 @@ class DownloadTask extends PolicyAwareTask {
       // [FIX-9] Check context still valid after async gap
       if (!ctx.downloadAllowed) {
         debugPrint('[DownloadTask] CANCEL-POLICY-RUNTIME $key');
-        _rejectAll('Policy changed mid-download');
-        return;
+        if (isCancelled) {
+          _rejectAll('Policy changed mid-download');
+          TaskScheduler.instance.onTaskFailed(this);
+          return;
+        }
       }
 
       debugPrint('[DownloadTask] DONE $key (${bytes.length ~/ 1024}KB)');
@@ -850,9 +853,15 @@ class _MigrationManager {
     // 2. Update priorities before running-task cancellation/preemption checks.
     registry.updatePriorities(newPriorities);
 
-    // 3. Cancel running tasks not in active set
+    // 3. Decode/precreate work outside the active set is disposable. Running
+    // downloads are different: if a slot is already occupied and there is no
+    // stronger task waiting, cancelling wastes bandwidth and hurts the common
+    // "look a few pages ahead then come back" path. Keep them running; normal
+    // scheduler preemption below will still cancel the lowest ranked download
+    // when a high-priority current/near task needs the slot.
     for (final t in registry.runningNotIn(activeKeys)) {
       if (!t.cancelable) continue;
+      if (t is DownloadTask) continue;
       debugPrint('[Migration] CANCEL-RUNNING ${t.key}');
       t.cancel();
       registry.remove(t.key);
@@ -930,6 +939,12 @@ class TaskScheduler {
   }
 
   int get pendingCount => _queue.length + _registry.runningCount;
+  bool hasTask(String key) => _registry.contains(key);
+  int get maxConcurrent => _maxConcurrent;
+  int get runningCount => _registry.runningCount;
+  int get runningDownloadCount =>
+      _registry.runningTasks.whereType<DownloadTask>().length;
+  int get queuedDownloadCount => _queue.whereType<DownloadTask>().length;
 
   // ── Callbacks ───────────────────────────────────────────────
 
@@ -964,6 +979,7 @@ class TaskScheduler {
     SchedulerTask incoming,
     int oldPriority,
   ) {
+    if (existing is DownloadTask && incoming is DownloadTask) return false;
     return existing.cancelable &&
         incoming.priority - oldPriority >= _preemptionThreshold;
   }

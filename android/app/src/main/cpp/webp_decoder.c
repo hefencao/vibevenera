@@ -733,7 +733,10 @@ int webp_anim_stream_decoder_append(WebPAnimStreamContext* ctx,
                                     int is_final) {
     if (!ctx) return 0;
     pthread_mutex_lock(&ctx->mutex);
-    if (is_final) ctx->is_final = 1;
+    if (is_final) {
+        ctx->is_final = 1;
+        ctx->demux_dirty = 1;
+    }
     if (data && size > 0) {
         size_t need = ctx->size + size;
         if (need > ctx->capacity) {
@@ -762,6 +765,14 @@ void webp_anim_stream_decoder_reset_input(WebPAnimStreamContext* ctx) {
     if (ctx->demux) { WebPDemuxDelete(ctx->demux); ctx->demux = NULL; }
     ctx->size = 0; ctx->is_final = 0; ctx->demux_state = WEBP_DEMUX_PARSE_ERROR;
     ctx->demux_dirty = 1;
+    ctx->current_frame_num = 0; ctx->current_loop = 0; ctx->prev_dispose = -1;
+    if (ctx->composite_canvas) memset(ctx->composite_canvas, 0, (size_t)ctx->target_w * ctx->target_h * 4);
+    pthread_mutex_unlock(&ctx->mutex);
+}
+
+void webp_anim_stream_decoder_restart_playback(WebPAnimStreamContext* ctx) {
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->mutex);
     ctx->current_frame_num = 0; ctx->current_loop = 0; ctx->prev_dispose = -1;
     if (ctx->composite_canvas) memset(ctx->composite_canvas, 0, (size_t)ctx->target_w * ctx->target_h * 4);
     pthread_mutex_unlock(&ctx->mutex);

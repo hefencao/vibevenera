@@ -98,6 +98,11 @@ class DecodedImageCache {
 
   bool hasL2(String key) => _l2.containsKey(key);
 
+  void evictL2(String key) {
+    _l2.remove(key);
+    _l2Order.remove(key);
+  }
+
   // ─── L3 ───
 
   Uint8List? getL3(String key) => _l3[key];

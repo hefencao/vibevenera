@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
@@ -77,13 +78,14 @@ class ResourceManager {
 
   /// Release resources for an entry (bytes, holder, frame data).
   void release(ResourceEntry entry) {
+    final keepDownload = entry.download.inProgress;
     final holder = entry.holder;
     if (holder != null) {
       // holder.dispose() is called by DecoderManager eviction
       entry.holder = null;
     }
     entry.bytes = null;
-    entry.download.reset();
+    if (!keepDownload) entry.download.reset();
     entry.decode.reset();
     _stateController.add(
       ResourceEvent(entry.fullKey, ResourceEventType.released),
@@ -494,7 +496,7 @@ class PipelineController {
           activeTaskKeys.add(e.fullKey);
         }
       }
-      if (e.policy.downloadPriority > 0) {
+      if (e.policy.downloadPriority > 0 || e.download.inProgress) {
         newPriorities[e.imageKey] = _downloadRank(e);
       }
       if (e.policy.decodePriority > 0) {
@@ -543,6 +545,9 @@ class PipelineController {
   }) {
     _publishDownloadProgress(imageKey, current, total, done: done);
   }
+
+  bool hasStreamDecodeAttached(String fullKey) =>
+      _streamDecodeAttached.contains(fullKey);
 
   // ── Internal: priorities & policies ────────────────────────
 
@@ -607,9 +612,22 @@ class PipelineController {
 
   int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
     final p = priority ?? entry.priority;
-    final offset = _offsetByKey[entry.imageKey] ?? 1 << 20;
+    final offset = _offsetByKey[entry.imageKey] ?? _offsetFor(entry.imageKey);
     final distance = offset.abs();
-    final progressBoost = (entry.download.progress * 20).round();
+    final progress = entry.download.progress;
+    final p2 = progress * progress;
+    final progressBoost = (progress * 32 + p2 * 160 + p2 * p2 * 260).round();
+    final runningDownloads = _scheduler.runningDownloadCount;
+    final queuedDownloads = _scheduler.queuedDownloadCount;
+    final freeDownloadSlots =
+        math.max(0, _scheduler.maxConcurrent - runningDownloads);
+    final inProgressBoost = entry.download.inProgress
+        ? 80 + freeDownloadSlots * 16
+        : 0;
+    final hasPressure = runningDownloads + queuedDownloads >= _scheduler.maxConcurrent;
+    final pressurePenalty = p == PagePriority.distant && hasPressure
+        ? (runningDownloads + queuedDownloads - _scheduler.maxConcurrent + 1) * 24
+        : 0;
 
     final base = switch (p) {
       PagePriority.current => 1000,
@@ -618,12 +636,33 @@ class PipelineController {
       PagePriority.far when offset > 0 => 520,
       PagePriority.far => 500,
       PagePriority.keep => 260,
+      PagePriority.distant when entry.download.inProgress => 180,
       PagePriority.distant => 0,
     };
 
     if (base == 0) return 0;
     final directionBias = offset < 0 ? -8 : 0;
-    return base - distance * 12 + directionBias + progressBoost;
+    final raw = base -
+        distance * 12 +
+        directionBias +
+        inProgressBoost +
+        progressBoost -
+        pressurePenalty;
+    final cap = switch (p) {
+      PagePriority.current => 2000,
+      PagePriority.near when offset > 0 => 940,
+      PagePriority.near => 900,
+      PagePriority.far when offset > 0 => 700,
+      PagePriority.far => 680,
+      PagePriority.keep => 660,
+      PagePriority.distant => 660,
+    };
+    return raw.clamp(1, cap).toInt();
+  }
+
+  int _offsetFor(String imageKey) {
+    final idx = _images.indexOf(imageKey);
+    return idx < 0 ? 1 << 20 : idx - _currentIdx;
   }
 
   // ── Internal: work submission (split by stage) ──────────────
@@ -681,8 +720,28 @@ class PipelineController {
       }
     }
     if (entry.download.inProgress) {
-      _attachStreamDecodeToRunningDownload(entry, sourceKey, cid, eid);
-      return;
+      final attached = _attachStreamDecodeToRunningDownload(
+        entry,
+        sourceKey,
+        cid,
+        eid,
+      );
+      if (attached ||
+          _scheduler.hasTask(entry.imageKey) ||
+          ImageDownloader.isLoadingComicImage(
+            entry.imageKey,
+            sourceKey,
+            cid,
+            eid,
+          )) {
+        return;
+      }
+      debugPrint('[WebP-Stream][pipeline] STALE-DOWNLOAD ${entry.imageKey}');
+      entry.download.inProgress = false;
+      DecoderManager.instance
+          .getHolder(entry.fullKey)
+          ?.markStreamDownloadClosed(StateError('stale pipeline download'));
+      _detachStreamDecode(entry.fullKey);
     }
     if (_prefetchBudgetExceededFor(entry)) return;
 
@@ -733,19 +792,43 @@ class PipelineController {
   ) {
     if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return null;
     if (!_streamDecodeAttached.add(entry.fullKey)) return null;
-    webp.WebPAnimDecoder? decoder;
-    dynamic holder;
+    final existingHolder = DecoderManager.instance.getHolder(entry.fullKey);
+    DecoderHolder? holder = existingHolder != null &&
+            !existingHolder.disposed &&
+            existingHolder.decoder.isStreaming &&
+            !existingHolder.decoder.streamIsComplete
+        ? existingHolder
+        : null;
+    webp.WebPAnimDecoder? decoder = holder?.decoder;
+    var appendedUntil = holder?.streamLoadedBytes ?? 0;
     var chunkCount = 0;
     var lastDebugBytes = 0;
     var lastFrameCount = -1;
     var stopped = false;
+    var completed = false;
     debugPrint(
       '[WebP-Stream][pipeline] START key=${entry.imageKey} '
       'priority=${entry.priority} full=${entry.fullKey}',
     );
+    if (holder != null) {
+      for (final peer in resources.getAllForImage(entry.imageKey)) {
+        if (peer.fullKey == entry.fullKey) {
+          peer.holder = holder;
+          peer.decode.markSuccess();
+        }
+      }
+    }
     void dispose() {
       _streamDecodeAttached.remove(entry.fullKey);
       final d = decoder;
+      if (holder != null &&
+          !completed &&
+          d != null &&
+          !d.isDisposed &&
+          d.isStreaming &&
+          !d.streamIsComplete) {
+        holder!.markStreamDownloadClosed(StateError('pipeline stream detached'));
+      }
       if (holder == null && d != null && !d.isDisposed) d.dispose();
     }
     void onEvent(ImageDownloadProgress event) {
@@ -765,6 +848,9 @@ class PipelineController {
         debugPrint('[WebP-Stream][pipeline] RESET ${entry.imageKey}');
         decoder!.resetStreamInput();
         holder?.clearBufferedFrames();
+        holder?.updateStreamTransfer(0, null, reset: true);
+        holder?.resetStreamPlaybackState();
+        appendedUntil = 0;
       }
       final chunk = event.chunkBytes;
       if (chunk != null) {
@@ -774,17 +860,29 @@ class PipelineController {
         );
         final d = decoder;
         if (d == null || d.isDisposed) return;
+        final chunkEnd = event.currentBytes;
+        final chunkStart = chunkEnd - chunk.length;
+        if (chunkEnd <= appendedUntil) {
+          holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
+          holder?.markStreamActive();
+          if (canDecode) holder?.requestRefill();
+          return;
+        }
+        final data = chunkStart < appendedUntil
+            ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
+            : chunk;
+        appendedUntil = chunkEnd;
         chunkCount++;
         if (chunkCount <= 3 ||
             event.currentBytes - lastDebugBytes >= 1024 * 1024) {
           lastDebugBytes = event.currentBytes;
           debugPrint(
             '[WebP-Stream][pipeline] chunk#$chunkCount '
-            '+${chunk.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
+            '+${data.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
             '${entry.imageKey}',
           );
         }
-        final ready = d.appendStreamChunk(chunk);
+        final ready = d.appendStreamChunk(data);
         if (ready && d.frameCount != lastFrameCount) {
           lastFrameCount = d.frameCount;
           debugPrint(
@@ -812,26 +910,38 @@ class PipelineController {
             d.targetHeight,
             1.0,
           );
+          holder!.updateStreamTransfer(event.currentBytes, event.totalBytes);
+          holder!.markStreamActive();
           for (final peer in resources.getAllForImage(entry.imageKey)) {
             if (peer.fullKey == entry.fullKey) {
               peer.holder = holder;
               peer.decode.markSuccess();
             }
           }
-          if (canDecode) holder.requestRefill();
+          if (canDecode) holder?.requestRefill();
           debugPrint('[WebP-Stream][pipeline] HOLDER ${entry.imageKey}');
         } else {
+          holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
+          holder?.markStreamActive();
           if (canDecode) holder?.requestRefill();
         }
       }
       if (event.imageBytes != null) {
+        completed = true;
+        holder?.updateStreamTransfer(
+          event.imageBytes!.length,
+          event.imageBytes!.length,
+        );
         debugPrint(
           '[WebP-Stream][pipeline] FINAL ${event.imageBytes!.length}B '
           'holder=${holder != null} ${entry.imageKey}',
         );
         final d = decoder;
         if (d != null && !d.isDisposed) {
-          d.appendStreamChunk(Uint8List(0), isFinal: true);
+          d.appendStreamChunk(
+            appendedUntil == 0 ? event.imageBytes! : Uint8List(0),
+            isFinal: true,
+          );
           if (canDecode) holder?.requestRefill();
           if (holder == null) d.dispose();
         }
@@ -840,14 +950,17 @@ class PipelineController {
     return (onEvent: onEvent, dispose: dispose);
   }
 
-  void _attachStreamDecodeToRunningDownload(
+  bool _attachStreamDecodeToRunningDownload(
     ResourceEntry entry,
     String? sourceKey,
     String cid,
     String eid,
   ) {
-    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return;
-    if (entry.hasHolder || _streamDecodeAttached.contains(entry.fullKey)) return;
+    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return false;
+    if (_streamDecodeAttached.contains(entry.fullKey)) {
+      return true;
+    }
+    if (entry.hasHolder) return false;
     final stream = ImageDownloader.joinLoadingComicImage(
       entry.imageKey,
       sourceKey,
@@ -857,10 +970,10 @@ class PipelineController {
     );
     if (stream == null) {
       debugPrint('[WebP-Stream][pipeline] ATTACH skip no-shared ${entry.imageKey}');
-      return;
+      return false;
     }
     final streamDecode = _streamDecodeOnDownload(entry);
-    if (streamDecode == null) return;
+    if (streamDecode == null) return true;
     late StreamSubscription<ImageDownloadProgress> sub;
     sub = stream.listen(
       (event) {
@@ -884,6 +997,7 @@ class PipelineController {
     _streamDecodeSubs[entry.fullKey] = sub;
     _streamDecodeDisposers[entry.fullKey] = streamDecode.dispose;
     debugPrint('[WebP-Stream][pipeline] ATTACH running ${entry.imageKey}');
+    return true;
   }
 
   void _detachStreamDecode(String fullKey) {
@@ -998,6 +1112,8 @@ class PipelineController {
     if (old != null && now > old.ms && current >= old.bytes) {
       final instant = (current - old.bytes) * 1000.0 / (now - old.ms);
       speed = speed <= 0 ? instant : speed * 0.7 + instant * 0.3;
+    } else if (old != null && current < old.bytes) {
+      speed = 0;
     }
     _progressSamples[imageKey] = _ProgressSample(current, now, speed);
     if (imageKey != _currentKey) return;

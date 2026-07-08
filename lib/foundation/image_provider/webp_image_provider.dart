@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
@@ -102,11 +103,20 @@ class DecoderHolder {
   int lastAccessTime = 0;
   int decodedFrameCount = 0;
   int uploadedFrameCount = 0;
+  int streamLoadedBytes = 0;
+  int? streamExpectedBytes;
   int _streamEmptyDecodeCount = 0;
   int _lastStreamDecodeLogMs = 0;
+  bool _streamFailed = false;
+  bool _streamDownloadClosed = false;
+  Object? streamError;
+  bool get streamFailed => _streamFailed;
+  bool get streamNeedsResume =>
+      _streamDownloadClosed && decoder.isStreaming && !decoder.streamIsComplete;
 
   bool _decodeInFlight = false;
   bool _isUploading = false;
+  int _decodeToken = 0;
   Completer<void>? refillSignal;
 
   /// Callback set by [HolderDecodeService]. Called when the holder
@@ -180,7 +190,13 @@ class DecoderHolder {
   // ── Decode callback (called by HolderDecodeService) ─────────
 
   /// Called by [HolderDecodeService] with decoded frame addresses.
-  void onFramesDecoded(List<webp.WebPAnimFrameAddress> frames) {
+  void onFramesDecoded(List<webp.WebPAnimFrameAddress> frames, int token) {
+    if (token != _decodeToken) {
+      for (final f in frames) {
+        webp.nativePoolRelease(f.address);
+      }
+      return;
+    }
     _decodeInFlight = false;
     if (_disposed || _pendingDispose) {
       for (final f in frames) {
@@ -205,6 +221,17 @@ class DecoderHolder {
             '[WebP-Stream][decode] empty#$_streamEmptyDecodeCount '
             'frames=${decoder.frameCount} buf=$bufferLength raw=${_rawFrameQueue.length} '
             '$shortKey',
+          );
+        }
+        if (_streamEmptyDecodeCount >= 6 &&
+            decoder.streamIsComplete &&
+            queuedFrameCount == 0 &&
+            _streamMayDecodeMore) {
+          markStreamFailed(StateError('stream decode stalled after final'));
+        } else if (_streamMayDecodeMore) {
+          Future.delayed(
+            Duration(milliseconds: _streamEmptyDecodeCount <= 2 ? 0 : 50),
+            requestRefill,
           );
         }
         return;
@@ -244,6 +271,21 @@ class DecoderHolder {
     _pumpUpload();
     _requestFramesIfNeeded();
   }
+
+  bool get _streamMayDecodeMore {
+    if (!decoder.isStreaming || !decoder.streamIsComplete) return false;
+    final frames = decoder.frameCount;
+    if (frames <= 0) return false;
+    final loops = decoder.loopCount;
+    return loops <= 0 || decodedFrameCount < frames * loops;
+  }
+
+  bool get _streamAtAvailableEnd =>
+      decoder.isStreaming &&
+      !decoder.streamIsComplete &&
+      decoder.frameCount > 0 &&
+      decodedFrameCount >= decoder.frameCount &&
+      queuedFrameCount == 0;
 
   /// Generation at the time the last decode was dispatched.
   int _dispatchGen = 0;
@@ -323,6 +365,66 @@ class DecoderHolder {
     _notifyCurrentBuffer();
   }
 
+  void resetStreamPlaybackState() {
+    if (!decoder.isStreaming) return;
+    decodedFrameCount = 0;
+    uploadedFrameCount = 0;
+    _streamEmptyDecodeCount = 0;
+    _lastStreamDecodeLogMs = 0;
+    markStreamActive();
+    _completeRefillWaiters();
+  }
+
+  void updateStreamTransfer(int current, int? total, {bool reset = false}) {
+    if (reset) {
+      streamLoadedBytes = 0;
+      streamExpectedBytes = null;
+      return;
+    }
+    if (current > streamLoadedBytes) streamLoadedBytes = current;
+    streamExpectedBytes = total ?? streamExpectedBytes;
+  }
+
+  bool restartAvailableStreamPlayback({int minFrames = 3}) {
+    if (_disposed || _pendingDispose || !decoder.isStreaming) return false;
+    if (decoder.streamIsComplete || decoder.frameCount < minFrames) return false;
+    if (queuedFrameCount > 0 || _isUploading) return false;
+    final cancelInFlight = _decodeInFlight;
+    if (cancelInFlight) {
+      DecoderManager.instance.decodeService.invalidatePendingDecodes(this);
+      _decodeInFlight = false;
+    }
+    _decodeToken++;
+    decoder.restartStreamPlayback();
+    resetStreamPlaybackState();
+    requestRefill();
+    if (cancelInFlight) {
+      debugPrint('[WebP-Stream][visible] REPLAY-CANCEL-DECODE $shortKey');
+    }
+    return true;
+  }
+
+  void markStreamActive() {
+    _streamFailed = false;
+    _streamDownloadClosed = false;
+    streamError = null;
+  }
+
+  void markStreamDownloadClosed(Object reason) {
+    if (_disposed || _pendingDispose) return;
+    _streamDownloadClosed = true;
+    streamError = reason;
+    _completeRefillWaiters();
+  }
+
+  void markStreamFailed(Object error) {
+    if (_disposed || _pendingDispose) return;
+    _streamFailed = true;
+    _streamDownloadClosed = false;
+    streamError = error;
+    _completeRefillWaiters();
+  }
+
   void resumeFromLifecyclePause() {
     if (_disposed || _pendingDispose) return;
     _completeRefillWaiters();
@@ -349,6 +451,7 @@ class DecoderHolder {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _decodeToken++;
     decoder.dispose();
     clearBufferedFrames();
     onNeedFrames = null;
@@ -386,6 +489,9 @@ class HolderDecodeService {
     _pool.updateGeneration(gen);
   }
 
+  void invalidatePendingDecodes(DecoderHolder holder) =>
+      _pool.invalidateDecoder(holder.decoder.address);
+
   /// Attach decode driving to a holder. The holder will call back
   /// via [onNeedFrames] when it needs more frames decoded.
   void attach(DecoderHolder holder) {
@@ -402,14 +508,16 @@ class HolderDecodeService {
     final refillCount = (target - bufLen).clamp(1, maxBatch);
     holder._decodeInFlight = true;
     holder._dispatchGen = _generation;
+    final token = holder._decodeToken;
     final job = webp.DecodeJob(
       generation: _generation,
       decoderAddress: holder.decoder.address,
+      decoderEpoch: _pool.decoderEpoch(holder.decoder.address),
       isStreaming: holder.decoder.isStreaming,
       framesToDecode: refillCount,
       targetW: holder.targetW,
       targetH: holder.targetH,
-      onComplete: (frames) => holder.onFramesDecoded(frames),
+      onComplete: (frames) => holder.onFramesDecoded(frames, token),
     );
     _pool.dispatch(
       job,
@@ -727,15 +835,29 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
   Future<_ImageResult> _loadImageAsync({
     StreamController<ImageChunkEvent>? chunkEvents,
+    bool forceNetwork = false,
+    bool disableStreaming = false,
   }) async {
     try {
       final existingHolder = DecoderManager.instance.getHolder(_fullKey);
-      if (existingHolder != null && !existingHolder.disposed) {
+      if (!forceNetwork &&
+          !disableStreaming &&
+          existingHolder != null &&
+          !existingHolder.disposed) {
+        if (existingHolder.decoder.isStreaming) {
+          debugPrint(
+            '[WebP-Stream][visible] REUSE-HOLDER ${existingHolder.shortKey} '
+            'frames=${existingHolder.decoder.frameCount} decoded=${existingHolder.decodedFrameCount} '
+            'buf=${existingHolder.bufferLength} raw=${existingHolder.queuedFrameCount - existingHolder.bufferLength} '
+            'closed=${existingHolder.streamNeedsResume} failed=${existingHolder.streamFailed} '
+            'loaded=${existingHolder.streamLoadedBytes}/${existingHolder.streamExpectedBytes ?? -1}',
+          );
+        }
         return _ImageResult.animated(existingHolder);
       }
 
       // L1 cache check (decoded ui.Image in memory)
-      if (cache != null) {
+      if (!forceNetwork && cache != null) {
         final cached = cache!.getL1(_fullKey);
         if (cached != null) {
           return _ImageResult.static(ImageInfo(image: cached, scale: scale));
@@ -744,21 +866,31 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
 
       // Get bytes — check L2 cache first, then network / local file.
       Uint8List bytes;
-      if (cache?.hasL2(imageKey) == true) {
-        bytes = cache!.getL2(imageKey)!;
+      if (forceNetwork) {
+        cache?.evictL2(imageKey);
+        await CacheManager().delete('$imageKey@$sourceKey@$cid@$eid');
+      }
+      if (!forceNetwork && cache?.hasL2(imageKey) == true) {
+        final cached = cache!.getL2(imageKey)!;
+        if (ImageDownloader.isIncompleteWebPBytes(cached)) {
+          cache!.evictL2(imageKey);
+          bytes = Uint8List(0);
+        } else {
+          bytes = cached;
+        }
       } else {
-        final cachedBytes = await tryReadFromCache(
-          imageKey,
-          sourceKey,
-          cid,
-          eid,
-        );
+        bytes = Uint8List(0);
+      }
+      if (bytes.isEmpty) {
+        final cachedBytes = forceNetwork
+            ? null
+            : await tryReadFromCache(imageKey, sourceKey, cid, eid);
         if (cachedBytes != null) {
           bytes = cachedBytes;
         } else {
-          final progressive = await _tryLoadAnimatedStreaming(
-            chunkEvents: chunkEvents,
-          );
+          final progressive = disableStreaming
+              ? null
+              : await _tryLoadAnimatedStreaming(chunkEvents: chunkEvents);
           if (progressive?.holder != null) {
             return _ImageResult.animated(
               progressive!.holder!,
@@ -829,6 +961,11 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       debugLabel: 'webp-stream:$imageKey',
     ).listen(
       (event) {
+        if (event.reset) {
+          holder?.updateStreamTransfer(0, null, reset: true);
+        } else {
+          holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
+        }
         PipelineController.instance.publishExternalDownloadProgress(
           imageKey,
           event.currentBytes,
@@ -849,6 +986,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
           debugPrint('[WebP-Stream][visible] RESET ${_short(_fullKey)}');
           decoder.resetStreamInput();
           holder?.clearBufferedFrames();
+          holder?.resetStreamPlaybackState();
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
@@ -893,6 +1031,8 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
               decoder.targetHeight,
               scale,
             );
+            holder!.updateStreamTransfer(event.currentBytes, event.totalBytes);
+            holder!.markStreamActive();
             PipelineController.instance.publishExternalHolder(
               imageKey,
               _fullKey,
@@ -912,6 +1052,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         final bytes = event.imageBytes;
         if (bytes != null) {
           finalBytes = bytes;
+          holder?.updateStreamTransfer(bytes.length, bytes.length);
           debugPrint(
             '[WebP-Stream][visible] FINAL ${bytes.length}B '
             'holder=${holder != null} ${_short(_fullKey)}',
@@ -931,6 +1072,12 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       },
       onError: (e) {
         debugPrint('[WebP-Stream][visible] ERROR ${_short(_fullKey)} $e');
+        final h = holder;
+        if (h != null && h.decoder.isStreaming && !h.decoder.streamIsComplete) {
+          h.markStreamDownloadClosed(e);
+        } else {
+          h?.markStreamFailed(e);
+        }
         if (!completer.isCompleted) completer.complete(null);
         if (holder == null && !decoder.isDisposed) decoder.dispose();
       },
@@ -939,6 +1086,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
           '[WebP-Stream][visible] DONE holder=${holder != null} '
           'final=${finalBytes?.length ?? 0} ${_short(_fullKey)}',
         );
+        if (holder != null && finalBytes == null) {
+          holder!.markStreamDownloadClosed(StateError('stream ended without final bytes'));
+        }
         if (!completer.isCompleted) {
           final bytes = finalBytes;
           completer.complete(bytes == null
@@ -968,11 +1118,39 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     if (!decoder.isStreaming || decoder.isDisposed || decoder.streamIsComplete) {
       return null;
     }
-    debugPrint('[WebP-Stream][visible] RESUME ${_short(_fullKey)}');
-    decoder.resetStreamInput();
-    holder.clearBufferedFrames();
+    final resumeFromBytes = holder.streamLoadedBytes;
+    final attachedByPipeline =
+        PipelineController.instance.hasStreamDecodeAttached(_fullKey);
+    final resumeExistingInput = resumeFromBytes > 0;
+    var appendedUntil = resumeExistingInput ? resumeFromBytes : 0;
+    debugPrint(
+      '[WebP-Stream][visible] RESUME ${_short(_fullKey)} '
+      'offset=$resumeFromBytes keep=$resumeExistingInput '
+      'attached=$attachedByPipeline',
+    );
+    if (attachedByPipeline) {
+      holder.markStreamActive();
+      holder.requestRefill();
+      return null;
+    }
+    if (resumeExistingInput) {
+      final restarted = holder.restartAvailableStreamPlayback(minFrames: 1);
+      debugPrint(
+        '[WebP-Stream][visible] RESUME-RESTART ${_short(_fullKey)} '
+        'ok=$restarted frames=${decoder.frameCount} decoded=${holder.decodedFrameCount} '
+        'buf=${holder.bufferLength} '
+        'raw=${holder.queuedFrameCount - holder.bufferLength} '
+        'inFlight=${holder._decodeInFlight} uploading=${holder._isUploading}',
+      );
+    } else {
+      decoder.resetStreamInput();
+      holder.clearBufferedFrames();
+      holder.resetStreamPlaybackState();
+    }
     var chunkCount = 0;
     var lastDebugBytes = 0;
+    var completed = false;
+    var closedByPolicy = false;
     late StreamSubscription<ImageDownloadProgress> sub;
     sub = ImageDownloader.loadComicImage(
       imageKey,
@@ -980,15 +1158,25 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       cid,
       eid,
       debugLabel: 'webp-resume:$imageKey',
+      resumeFromBytes: resumeExistingInput ? resumeFromBytes : null,
+      resumeExpectedBytes: holder.streamExpectedBytes,
+      replayPartial: !resumeExistingInput,
     ).listen(
       (event) {
+        if (event.reset) {
+          holder.updateStreamTransfer(0, null, reset: true);
+        } else {
+          holder.updateStreamTransfer(event.currentBytes, event.totalBytes);
+        }
         PipelineController.instance.publishExternalDownloadProgress(
           imageKey,
           event.currentBytes,
           event.totalBytes,
           done: event.imageBytes != null,
         );
+        holder.markStreamActive();
         if (!DecoderManager.instance.isActiveImageKey(imageKey)) {
+          closedByPolicy = true;
           sub.cancel();
           onDone?.call();
           return;
@@ -996,28 +1184,41 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         if (event.reset && !decoder.isDisposed) {
           decoder.resetStreamInput();
           holder.clearBufferedFrames();
+          holder.resetStreamPlaybackState();
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
+          final chunkEnd = event.currentBytes;
+          final chunkStart = chunkEnd - chunk.length;
+          if (chunkEnd <= appendedUntil) return;
+          final data = chunkStart < appendedUntil
+              ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
+              : chunk;
+          appendedUntil = chunkEnd;
           chunkCount++;
           if (chunkCount <= 3 ||
               event.currentBytes - lastDebugBytes >= 1024 * 1024) {
             lastDebugBytes = event.currentBytes;
             debugPrint(
               '[WebP-Stream][visible] resume-chunk#$chunkCount '
-              '+${chunk.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
+              '+${data.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
               '${_short(_fullKey)}',
             );
           }
-          final ready = decoder.appendStreamChunk(chunk);
+          final ready = decoder.appendStreamChunk(data);
           if (ready) holder.requestRefill();
         }
         final bytes = event.imageBytes;
         if (bytes != null) {
+          completed = true;
+          holder.updateStreamTransfer(bytes.length, bytes.length);
           if (cache != null && webp.isWebP(bytes)) cache!.putL2(imageKey, bytes);
           PipelineController.instance.publishExternalBytes(imageKey, bytes);
           if (!decoder.isDisposed) {
-            decoder.appendStreamChunk(chunkCount == 0 ? bytes : Uint8List(0), isFinal: true);
+            decoder.appendStreamChunk(
+              appendedUntil == 0 ? bytes : Uint8List(0),
+              isFinal: true,
+            );
           }
           holder.requestRefill();
           onDone?.call();
@@ -1025,9 +1226,15 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       },
       onError: (e) {
         debugPrint('[WebP-Stream][visible] RESUME-ERROR ${_short(_fullKey)} $e');
+        holder.markStreamDownloadClosed(e);
         onDone?.call();
       },
-      onDone: onDone,
+      onDone: () {
+        if (!completed && !closedByPolicy) {
+          holder.markStreamDownloadClosed(StateError('resume ended without final bytes'));
+        }
+        onDone?.call();
+      },
       cancelOnError: false,
     );
     return sub;
@@ -1326,12 +1533,31 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
     });
   }
 
-  Future<DecoderHolder?> _reloadAndRestart(DecoderHolder oldHolder) async {
+  Future<DecoderHolder?> _reloadAndRestart(
+    DecoderHolder oldHolder, {
+    bool forceNetwork = false,
+    bool forceFullDecode = false,
+  }) async {
     if (_disposed) return null;
     try {
-      final result = await _provider._loadImageAsync();
+      await _progressiveSub?.cancel();
+      _progressiveSub = null;
+      if (forceNetwork) {
+        _provider.cache?.evictL2(_provider.imageKey);
+        await CacheManager().delete(
+          '${_provider.imageKey}@${_provider.sourceKey}@${_provider.cid}@${_provider.eid}',
+        );
+      }
+      oldHolder.dispose();
+      final result = await _provider._loadImageAsync(
+        forceNetwork: forceNetwork,
+        disableStreaming: forceFullDecode,
+      );
       if (_disposed) return null;
-      if (result.type == _ResultType.animated) return result.holder;
+      if (result.type == _ResultType.animated) {
+        _progressiveSub = result.progressiveSub;
+        return result.holder;
+      }
       if (result.type == _ResultType.static) setImage(result.imageInfo!);
     } catch (_) {
       // Reload failed silently; animation will stop.
@@ -1343,6 +1569,8 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
     DecoderHolder holder = initialHolder;
     _activeHolder = holder;
     var hasShownFirstFrame = false;
+    var nullFrameWaits = 0;
+    var resumeStartedAt = 0;
     while (!_disposed) {
       if (!hasListeners) {
         await Future.delayed(const Duration(milliseconds: 200));
@@ -1379,19 +1607,64 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
           holder = nh;
           _activeHolder = holder;
           hasShownFirstFrame = false;
+          nullFrameWaits = 0;
           continue;
         } else {
           break;
         }
       }
 
-      if (_progressiveSub == null &&
-          holder.decoder.isStreaming &&
-          !holder.decoder.streamIsComplete) {
+      final pipelineAttached =
+          PipelineController.instance.hasStreamDecodeAttached(holder.key);
+      if (holder.streamNeedsResume && _progressiveSub == null && !pipelineAttached) {
+        debugPrint(
+          '[WebP-Stream][visible] RESUME-CLOSED ${holder.shortKey} '
+          'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
+          'buf=${holder.bufferLength} loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1} '
+          '${holder.streamError}',
+        );
         _progressiveSub = _provider._resumeStreamingIntoHolder(
           holder,
           onDone: () => _progressiveSub = null,
         );
+        resumeStartedAt = _nowMs();
+      } else if (holder.streamFailed) {
+        debugPrint(
+          '[WebP-Stream][visible] RELOAD failed-stream ${holder.shortKey} '
+          '${holder.streamError}',
+        );
+        final canUseFinalBytes =
+            holder.decoder.isStreaming && holder.decoder.streamIsComplete;
+        final nh = await _reloadAndRestart(
+          holder,
+          forceNetwork: !canUseFinalBytes,
+          forceFullDecode: canUseFinalBytes,
+        );
+        if (nh != null) {
+          holder = nh;
+          _activeHolder = holder;
+          hasShownFirstFrame = false;
+          nullFrameWaits = 0;
+          continue;
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
+
+      if (_progressiveSub == null &&
+          holder.decoder.isStreaming &&
+          !holder.decoder.streamIsComplete) {
+        if (pipelineAttached) {
+          holder.markStreamActive();
+          holder.requestRefill();
+        } else {
+          _progressiveSub = _provider._resumeStreamingIntoHolder(
+            holder,
+            onDone: () => _progressiveSub = null,
+          );
+          resumeStartedAt = _nowMs();
+        }
+        holder.requestRefill();
       }
 
       final startupWatermark = hasShownFirstFrame
@@ -1410,17 +1683,54 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
 
       final frame = holder.consumeFrame();
       if (frame == null) {
+        nullFrameWaits++;
+        final currentHolder = holder.state == PageState.current;
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            !holder.decoder.streamIsComplete &&
+            holder._streamAtAvailableEnd &&
+            nullFrameWaits >= (hasShownFirstFrame ? 1 : 3) &&
+            holder.restartAvailableStreamPlayback()) {
+          debugPrint('[WebP-Stream][visible] REPLAY-PARTIAL ${holder.shortKey}');
+          hasShownFirstFrame = false;
+          nullFrameWaits = 0;
+          continue;
+        }
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            !holder.decoder.streamIsComplete &&
+            _progressiveSub != null &&
+            nullFrameWaits >= 30 &&
+            _nowMs() - resumeStartedAt > 1500) {
+          debugPrint(
+            '[WebP-Stream][visible] WAIT-DOWNLOAD ${holder.shortKey} '
+            'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
+            'buf=${holder.bufferLength} raw=${holder.queuedFrameCount - holder.bufferLength} '
+            'inFlight=${holder._decodeInFlight} uploading=${holder._isUploading} '
+            'loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1}',
+          );
+          nullFrameWaits = 0;
+        }
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            holder.decoder.streamIsComplete &&
+            nullFrameWaits >= 6 &&
+            holder._streamMayDecodeMore) {
+          holder.markStreamFailed(StateError('stream ended before all frames'));
+          continue;
+        }
         if (holder.disposed) continue;
         holder.refillSignal ??= Completer<void>();
         await Future.any([
           holder.refillSignal!.future,
-          Future.delayed(const Duration(milliseconds: 200)),
+          Future.delayed(Duration(milliseconds: currentHolder ? 200 : 800)),
         ]);
         continue;
       }
 
       setImage(ImageInfo(image: frame.image, scale: holder.scale));
       hasShownFirstFrame = true;
+      nullFrameWaits = 0;
       final rawDelay = frame.durationMs <= 0 ? 100 : frame.durationMs;
       final delay = rawDelay.clamp(16, 200);
       final bufferPressureDelay = _bufferPressureDelay(holder);
@@ -1431,11 +1741,9 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
         ),
       );
     }
-    // Clear stale frames so they don't corrupt the next page
     if (_activeHolder == holder) {
       _activeHolder = null;
     }
-    _drainBuffer(holder);
   }
 
   double _bufferPressureDelay(DecoderHolder holder) {

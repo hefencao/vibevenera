@@ -60,6 +60,23 @@ Future<Uint8List?> tryLoadLocalFile(String imageKey) async {
   }
 }
 
+Future<Uint8List?> _readValidCacheFile(
+  String cacheKey,
+  File cacheFile,
+) async {
+  final fileSize = await cacheFile.length();
+  final path = cacheFile.path;
+  final bytes = fileSize > 1024 * 1024
+      ? await Isolate.run(() => File(path).readAsBytesSync())
+      : await cacheFile.readAsBytes();
+  if (bytes.isEmpty) return null;
+  if (ImageDownloader.isIncompleteWebPBytes(bytes)) {
+    await CacheManager().delete(cacheKey);
+    return null;
+  }
+  return bytes;
+}
+
 /// Fetch image bytes from network with per-key deduplication.
 ///
 /// If multiple requests come in for the same imageKey while a
@@ -83,15 +100,8 @@ Future<Uint8List> fetchImageBytes(
   try {
     final cacheFile = await CacheManager().findCache(cacheKey);
     if (cacheFile != null && await cacheFile.exists()) {
-      final fileSize = await cacheFile.length();
-
-      if (fileSize > 1024 * 1024) {
-        final path = cacheFile.path;
-        return await Isolate.run(() => File(path).readAsBytesSync());
-      }
-
-      final bytes = await cacheFile.readAsBytes();
-      if (bytes.isNotEmpty) return bytes;
+      final bytes = await _readValidCacheFile(cacheKey, cacheFile);
+      if (bytes != null) return bytes;
     }
   } catch (e) {
     Log.error('Disk cache check failed for $imageKey', e);
@@ -173,15 +183,8 @@ Future<Uint8List> fetchImageBytesRaw(
   try {
     final cacheFile = await CacheManager().findCache(cacheKey);
     if (cacheFile != null && await cacheFile.exists()) {
-      final fileSize = await cacheFile.length();
-
-      if (fileSize > 1024 * 1024) {
-        final path = cacheFile.path;
-        return await Isolate.run(() => File(path).readAsBytesSync());
-      }
-
-      final bytes = await cacheFile.readAsBytes();
-      if (bytes.isNotEmpty) return bytes;
+      final bytes = await _readValidCacheFile(cacheKey, cacheFile);
+      if (bytes != null) return bytes;
     }
   } catch (e) {
     Log.error('Disk cache check failed for $imageKey', e);
@@ -223,15 +226,8 @@ Future<Uint8List?> tryReadFromCache(
   try {
     final cacheFile = await CacheManager().findCache(cacheKey);
     if (cacheFile != null && await cacheFile.exists()) {
-      final fileSize = await cacheFile.length();
-
-      if (fileSize > 1024 * 1024) {
-        final path = cacheFile.path;
-        return await Isolate.run(() => File(path).readAsBytesSync());
-      }
-
-      final bytes = await cacheFile.readAsBytes();
-      if (bytes.isNotEmpty) return bytes;
+      final bytes = await _readValidCacheFile(cacheKey, cacheFile);
+      if (bytes != null) return bytes;
     }
   } catch (e) {
     Log.error('Disk cache check failed for $imageKey', e);

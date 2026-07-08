@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
@@ -188,6 +187,13 @@ typedef _WebPAnimStreamDecoderResetInputDart = void Function(
   Pointer<Void> ctx,
 );
 
+typedef _WebPAnimStreamDecoderRestartPlaybackNative = Void Function(
+  Pointer<Void> ctx,
+);
+typedef _WebPAnimStreamDecoderRestartPlaybackDart = void Function(
+  Pointer<Void> ctx,
+);
+
 typedef _WebPAnimStreamDecoderGetInfoNative = Int32 Function(
   Pointer<Void> ctx,
   Pointer<Int32> canvasWidth,
@@ -317,6 +323,7 @@ class _WebPBindings {
   late final _WebPAnimStreamDecoderNewDart streamNew;
   late final _WebPAnimStreamDecoderAppendDart streamAppend;
   late final _WebPAnimStreamDecoderResetInputDart streamResetInput;
+  late final _WebPAnimStreamDecoderRestartPlaybackDart streamRestartPlayback;
   late final _WebPAnimStreamDecoderGetInfoDart streamGetInfo;
   late final _WebPAnimStreamDecoderGetFramesDart streamGetFrames;
   late final _WebPAnimStreamDecoderSetThreadLimitDart streamSetThreadLimit;
@@ -356,6 +363,8 @@ class _WebPBindings {
         _WebPAnimStreamDecoderAppendDart>('webp_anim_stream_decoder_append');
     streamResetInput = _lib.lookupFunction<_WebPAnimStreamDecoderResetInputNative,
         _WebPAnimStreamDecoderResetInputDart>('webp_anim_stream_decoder_reset_input');
+    streamRestartPlayback = _lib.lookupFunction<_WebPAnimStreamDecoderRestartPlaybackNative,
+        _WebPAnimStreamDecoderRestartPlaybackDart>('webp_anim_stream_decoder_restart_playback');
     streamGetInfo = _lib.lookupFunction<_WebPAnimStreamDecoderGetInfoNative,
         _WebPAnimStreamDecoderGetInfoDart>('webp_anim_stream_decoder_get_info');
     streamGetFrames = _lib.lookupFunction<_WebPAnimStreamDecoderGetFramesNative,
@@ -557,6 +566,7 @@ enum DecodePriority {
 class DecodeJob {
   final int generation;
   final int decoderAddress;
+  final int decoderEpoch;
   final bool isStreaming;
   final int framesToDecode;
   final int targetW;
@@ -567,6 +577,7 @@ class DecodeJob {
   DecodeJob({
     required this.generation,
     required this.decoderAddress,
+    this.decoderEpoch = 0,
     this.isStreaming = false,
     required this.framesToDecode,
     required this.targetW,
@@ -611,6 +622,7 @@ class WorkerPoolScheduler {
   final List<bool> _isInitializing = [false, false];
   final List<bool> _workerBusy = [false, false];
   final Set<int> _activeDecoders = {};
+  final Map<int, int> _decoderEpochs = {};
 
   // Round-robin counter for decoder creation (avoids worker 0 bottleneck)
   int _nextDecoderWorker = 0; // ignore: unused_field
@@ -618,6 +630,19 @@ class WorkerPoolScheduler {
   void updateGeneration(int newGen) {
     _currentGeneration = newGen;
   }
+
+  int decoderEpoch(int decoderAddress) => _decoderEpochs[decoderAddress] ?? 0;
+
+  void invalidateDecoder(int decoderAddress) {
+    _decoderEpochs[decoderAddress] = decoderEpoch(decoderAddress) + 1;
+    _currentQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
+    _nextQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
+    _bgQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
+  }
+
+  bool _isStale(DecodeJob job) =>
+      job.generation != _currentGeneration ||
+      job.decoderEpoch != decoderEpoch(job.decoderAddress);
 
   /// 在 Worker Isolate 中异步创建解码器，主线程零 C 堆开销。
   /// 使用 round-robin 分配 worker，避免单个 worker 成为瓶颈。
@@ -771,9 +796,10 @@ class WorkerPoolScheduler {
     // [ANALYSIS-2] Reject stale jobs immediately — before they ever
     // enter the queue. Previously the generation check happened
     // AFTER the worker had already done the decode work.
-    if (job.generation != _currentGeneration) {
+    if (_isStale(job)) {
       debugPrint('[WebP-T] dispatch REJECT stale gen=${job.generation} '
-          'curr=$_currentGeneration addr=${job.decoderAddress & 0xFFFF}');
+          'curr=$_currentGeneration epoch=${job.decoderEpoch}/${decoderEpoch(job.decoderAddress)} '
+          'addr=${job.decoderAddress & 0xFFFF}');
       job.onComplete([]);
       return;
     }
@@ -869,8 +895,9 @@ class WorkerPoolScheduler {
       debugPrint('[WebP-T] w$assignedWorker dequeue wait=${queueWaitUs ~/ 1000}ms '
           'n=${job.framesToDecode} addr=${job.decoderAddress & 0xFFFF} gen=${job.generation}');
 
-      if (job.generation != _currentGeneration) {
-        debugPrint('[WebP-T] w$assignedWorker stale gen=${job.generation} curr=${_currentGeneration}');
+      if (_isStale(job)) {
+        debugPrint('[WebP-T] w$assignedWorker stale gen=${job.generation} curr=$_currentGeneration '
+            'epoch=${job.decoderEpoch}/${decoderEpoch(job.decoderAddress)}');
         _activeDecoders.remove(job.decoderAddress);
         job.onComplete([]);
         continue;
@@ -900,7 +927,7 @@ class WorkerPoolScheduler {
 
       if (result is Int64List) {
         final n = result.length ~/ 2;
-        if (job.generation == _currentGeneration) {
+        if (!_isStale(job)) {
           final List<WebPAnimFrameAddress> frames = [];
           for (int i = 0; i < result.length; i += 2) {
             frames.add(WebPAnimFrameAddress(
@@ -1026,6 +1053,11 @@ class WebPAnimDecoder {
   void resetStreamInput() {
     _checkNotDisposed();
     if (isStreaming) _bindings.streamResetInput(_ctx);
+  }
+
+  void restartStreamPlayback() {
+    _checkNotDisposed();
+    if (isStreaming) _bindings.streamRestartPlayback(_ctx);
   }
 
   bool refreshStreamInfo() {
