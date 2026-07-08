@@ -697,8 +697,7 @@ abstract class ImageDownloader {
             ? result
             : Uint8List.fromList(result);
         config.onResponse!.free();
-        // Persist to disk cache
-        await CacheManager().writeCache(cacheKey, transformed);
+        _writeCacheInBackground(cacheKey, transformed);
         yield ImageDownloadProgress(
           currentBytes: transformed.length,
           totalBytes: transformed.length,
@@ -716,14 +715,21 @@ abstract class ImageDownloader {
       finalData = await modifyImageWithScript(data, config.modifyImage);
     }
 
-    // Persist to disk cache
-    await CacheManager().writeCache(cacheKey, finalData);
+    _writeCacheInBackground(cacheKey, finalData);
 
     // Yield final complete event with image bytes
     yield ImageDownloadProgress(
       currentBytes: finalData.length,
       totalBytes: finalData.length,
       imageBytes: finalData,
+    );
+  }
+
+  static void _writeCacheInBackground(String cacheKey, List<int> data) {
+    unawaited(
+      CacheManager().writeCache(cacheKey, data).catchError((e, s) {
+        Log.warning('ImageDownloader', 'Cache write failed: $cacheKey; $e');
+      }),
     );
   }
 

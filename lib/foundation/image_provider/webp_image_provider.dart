@@ -88,7 +88,9 @@ class DecoderHolder {
   ResourcePolicy get policy => _policy;
 
   final Queue<BufferedFrame> _frameBuffer = Queue();
+  final Queue<webp.WebPAnimFrameAddress> _rawFrameQueue = Queue();
   int get bufferLength => _frameBuffer.length;
+  int get queuedFrameCount => _frameBuffer.length + _rawFrameQueue.length;
 
   bool _disposed = false;
   bool get disposed => _disposed;
@@ -100,7 +102,6 @@ class DecoderHolder {
 
   bool _decodeInFlight = false;
   bool _isUploading = false;
-  List<webp.WebPAnimFrameAddress>? _pendingUploadAddrs;
   Completer<void>? refillSignal;
 
   /// Callback set by [HolderDecodeService]. Called when the holder
@@ -121,6 +122,7 @@ class DecoderHolder {
     lastAccessTime = _nowMs();
     decoder.setThreadLimit(newState == PageState.current ? 2 : 1);
     _notifyCurrentBuffer();
+    _pumpUpload();
     _requestFramesIfNeeded();
   }
 
@@ -131,6 +133,8 @@ class DecoderHolder {
       return;
     }
     _policy = newPolicy;
+    if (!_policy.allowGpuUpload) _clearRawFrames();
+    _pumpUpload();
     _requestFramesIfNeeded();
   }
 
@@ -143,6 +147,7 @@ class DecoderHolder {
     }
     final frame = _frameBuffer.removeFirst();
     _notifyCurrentBuffer();
+    _pumpUpload();
     _requestFramesIfNeeded();
     return frame;
   }
@@ -153,14 +158,16 @@ class DecoderHolder {
     if (_disposed || _pendingDispose) return;
     if (!_policy.allowDecode || !_policy.allowGpuUpload) return;
     if (_decodeInFlight) return;
-    if (_isUploading) return;
-    if (_pendingUploadAddrs != null) return;
 
     final target = _state == PageState.current
         ? _highWatermark
         : _precacheTarget;
     final low = _state == PageState.current ? _lowWatermark : 0;
-    if (_frameBuffer.length <= low && _frameBuffer.length < target) {
+    final queued = queuedFrameCount;
+    final shouldRefill = _state == PageState.current
+        ? queued < target
+        : _frameBuffer.length <= low && queued < target;
+    if (shouldRefill) {
       onNeedFrames?.call();
     }
   }
@@ -206,12 +213,8 @@ class DecoderHolder {
       return;
     }
     decodedFrameCount += frames.length;
-    _scheduleUpload(
-      frames,
-      frames.length,
-      frames.first.durationMs,
-      frames.last.durationMs,
-    );
+    _rawFrameQueue.addAll(frames);
+    _pumpUpload();
     _requestFramesIfNeeded();
   }
 
@@ -220,62 +223,48 @@ class DecoderHolder {
 
   // ── GPU Upload ─────────────────────────────────────────────
 
-  void _scheduleUpload(
-    List<webp.WebPAnimFrameAddress> addrs,
-    int n,
-    int t0,
-    int t1,
-  ) {
-    if (_isUploading) {
-      final old = _pendingUploadAddrs;
-      if (old != null) {
-        for (final f in old) {
-          webp.nativePoolRelease(f.address);
-        }
-      }
-      _pendingUploadAddrs = addrs;
-      return;
-    }
-    _doUpload(addrs, n);
+  void _pumpUpload() {
+    if (_isUploading || _disposed || _pendingDispose) return;
+    if (!_policy.allowGpuUpload || _rawFrameQueue.isEmpty) return;
+    _doUpload();
   }
 
-  Future<void> _doUpload(List<webp.WebPAnimFrameAddress> addrs, int n) async {
+  Future<void> _doUpload() async {
     _isUploading = true;
     final outW = decoder.targetWidth;
     final outH = decoder.targetHeight;
-    for (int i = 0; i < n; i++) {
-      if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
-        _releaseRemainingBuffers(addrs, i);
-        break;
+    try {
+      while (_rawFrameQueue.isNotEmpty) {
+        if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
+          _clearRawFrames();
+          break;
+        }
+        final addr = _rawFrameQueue.removeFirst();
+        final rgba = Pointer<Uint8>.fromAddress(
+          addr.address,
+        ).asTypedList(outW * outH * 4);
+        final completer = Completer<BufferedFrame>();
+        ui.decodeImageFromPixels(rgba, outW, outH, ui.PixelFormat.rgba8888, (
+          img,
+        ) {
+          webp.nativePoolRelease(addr.address);
+          completer.complete(BufferedFrame(img, addr.durationMs));
+        });
+        final frame = await completer.future;
+        if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
+          frame.image.dispose();
+          continue;
+        }
+        _frameBuffer.add(frame);
+        uploadedFrameCount++;
+        _notifyCurrentBuffer();
+        _completeRefillWaitersIfFirstFrameReady();
+        _requestFramesIfNeeded();
       }
-      final addr = addrs[i];
-      final rgba = Pointer<Uint8>.fromAddress(
-        addr.address,
-      ).asTypedList(outW * outH * 4);
-      final completer = Completer<BufferedFrame>();
-      ui.decodeImageFromPixels(rgba, outW, outH, ui.PixelFormat.rgba8888, (
-        img,
-      ) {
-        webp.nativePoolRelease(addr.address);
-        completer.complete(BufferedFrame(img, addr.durationMs));
-      });
-      final frame = await completer.future;
-      if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
-        frame.image.dispose();
-        continue;
-      }
-      _frameBuffer.add(frame);
-      uploadedFrameCount++;
-      _notifyCurrentBuffer();
-      _completeRefillWaitersIfFirstFrameReady();
-    }
-    _isUploading = false;
-    _completeRefillWaiters();
-    if (_pendingUploadAddrs != null) {
-      final pending = _pendingUploadAddrs!;
-      _pendingUploadAddrs = null;
-      _doUpload(pending, pending.length);
-    } else {
+    } finally {
+      _isUploading = false;
+      _completeRefillWaiters();
+      if (_rawFrameQueue.isNotEmpty) _pumpUpload();
       _requestFramesIfNeeded();
     }
   }
@@ -292,12 +281,9 @@ class DecoderHolder {
     }
   }
 
-  void _releaseRemainingBuffers(
-    List<webp.WebPAnimFrameAddress> addrs,
-    int from,
-  ) {
-    for (int i = from; i < addrs.length; i++) {
-      webp.nativePoolRelease(addrs[i].address);
+  void _clearRawFrames() {
+    while (_rawFrameQueue.isNotEmpty) {
+      webp.nativePoolRelease(_rawFrameQueue.removeFirst().address);
     }
   }
 
@@ -306,6 +292,7 @@ class DecoderHolder {
       f.image.dispose();
     }
     _frameBuffer.clear();
+    _clearRawFrames();
     _notifyCurrentBuffer();
   }
 
@@ -317,6 +304,7 @@ class DecoderHolder {
 
   void requestRefill() {
     if (_disposed || _pendingDispose) return;
+    _pumpUpload();
     _requestFramesIfNeeded();
     _notifyCurrentBuffer();
   }
@@ -379,7 +367,7 @@ class HolderDecodeService {
 
   void _requestDecode(DecoderHolder holder) {
     // Adaptive batch: more when buffer is low, fewer when nearly full.
-    final bufLen = holder.bufferLength;
+    final bufLen = holder.queuedFrameCount;
     final target = holder.state == PageState.current
         ? DecoderHolder._highWatermark
         : DecoderHolder._precacheTarget;
