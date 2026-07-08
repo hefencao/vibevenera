@@ -140,15 +140,27 @@ class DynamicPreloadPolicy {
   static DynamicPreloadWindow windowFor({
     required int currentBufferedFrames,
     required int preloadCount,
+  }) => waterLevelRules[ruleIndexFor(
+        currentBufferedFrames: currentBufferedFrames,
+        preloadCount: preloadCount,
+      )].window;
+
+  static int ruleIndexFor({
+    required int currentBufferedFrames,
+    required int preloadCount,
   }) {
-    for (final rule in waterLevelRules) {
+    for (var i = 0; i < waterLevelRules.length; i++) {
+      final rule = waterLevelRules[i];
       if (currentBufferedFrames >= rule.minBufferedFrames &&
           preloadCount >= rule.minPreloadCount) {
-        return rule.window;
+        return i;
       }
     }
-    return waterLevelRules.last.window;
+    return waterLevelRules.length - 1;
   }
+
+  static DynamicPreloadWindow windowAt(int index) =>
+      waterLevelRules[index.clamp(0, waterLevelRules.length - 1)].window;
 
   static PreloadPageClass pageClassFor({
     required int offset,

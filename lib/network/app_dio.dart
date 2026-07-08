@@ -229,7 +229,7 @@ class RHttpAdapter implements HttpClientAdapter {
       options.headers['User-Agent'] = "venera/v${App.version}";
     }
 
-    var res = await rhttp.Rhttp.request(
+    final request = rhttp.Rhttp.request(
       method: rhttp.HttpMethod(options.method),
       url: options.uri.toString(),
       settings: await settings,
@@ -243,6 +243,18 @@ class RHttpAdapter implements HttpClientAdapter {
         ),
       ),
     );
+    final Object res = cancelFuture == null
+        ? await request
+        : await Future.any<Object>([
+            request,
+            cancelFuture.then<Object>((_) {
+              throw DioException(
+                requestOptions: options,
+                type: DioExceptionType.cancel,
+                message: "Request cancelled",
+              );
+            }),
+          ]);
     if (res is! rhttp.HttpStreamResponse) {
       throw Exception("Invalid response type: ${res.runtimeType}");
     }

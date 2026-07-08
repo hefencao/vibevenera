@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'package:dio/dio.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/log.dart';
@@ -70,6 +71,8 @@ Future<Uint8List> fetchImageBytes(
   String eid, {
   StreamController<ImageChunkEvent>? chunkEvents,
   String? debugLabel,
+  void Function(ImageDownloadProgress event)? onEvent,
+  CancelToken? cancelToken,
 }) async {
   // Check local file first
   final local = await tryLoadLocalFile(imageKey);
@@ -101,10 +104,31 @@ Future<Uint8List> fetchImageBytes(
     cid,
     eid,
     debugLabel: debugLabel,
+    cancelToken: cancelToken,
   );
 
-  Uint8List? result;
-  await for (final event in stream) {
+  final result = await _listenImageStream(
+    stream,
+    chunkEvents: chunkEvents,
+    onEvent: onEvent,
+    cancelToken: cancelToken,
+    imageKey: imageKey,
+  );
+  if (result == null) throw Exception('Load failed: $imageKey');
+  return result;
+}
+
+Future<Uint8List?> _listenImageStream(
+  Stream<ImageDownloadProgress> stream, {
+  StreamController<ImageChunkEvent>? chunkEvents,
+  void Function(ImageDownloadProgress event)? onEvent,
+  CancelToken? cancelToken,
+  required String imageKey,
+}) {
+  final c = Completer<Uint8List?>();
+  late StreamSubscription<ImageDownloadProgress> sub;
+  sub = stream.listen((event) {
+    onEvent?.call(event);
     if (chunkEvents != null && !chunkEvents.isClosed) {
       chunkEvents.add(
         ImageChunkEvent(
@@ -114,12 +138,19 @@ Future<Uint8List> fetchImageBytes(
       );
     }
     if (event.imageBytes != null) {
-      result = event.imageBytes!;
-      break;
+      if (!c.isCompleted) c.complete(event.imageBytes!);
+      sub.cancel();
     }
-  }
-  if (result == null) throw Exception('Load failed: $imageKey');
-  return result;
+  }, onError: (e, s) {
+    if (!c.isCompleted) c.completeError(e, s);
+  }, onDone: () {
+    if (!c.isCompleted) c.complete(null);
+  });
+  cancelToken?.whenCancel.then((_) {
+    sub.cancel();
+    if (!c.isCompleted) c.completeError(Exception('Cancelled: $imageKey'));
+  });
+  return c.future;
 }
 
 /// Fetch image bytes without deduplication (raw stream).

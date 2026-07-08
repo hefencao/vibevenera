@@ -37,6 +37,7 @@ uint8_t* webp_decode_scaled(const uint8_t* data, size_t size,
  * 不透明句柄，管理 WebPDemuxer + 目标尺寸合成画布。
  */
 typedef struct WebPAnimContext WebPAnimContext;
+typedef struct WebPAnimStreamContext WebPAnimStreamContext;
 
 /**
  * 创建动画解码器。
@@ -112,6 +113,34 @@ void webp_anim_decoder_set_thread_limit(WebPAnimContext* ctx, int use_threads);
  * 返回当前存活的解码器数量（调试内存泄漏）。
  */
 int webp_anim_decoder_alive_count(void);
+
+/* ─── 流式动画解码：下载过程中追加字节并解码已完整帧 ─── */
+
+WebPAnimStreamContext* webp_anim_stream_decoder_new(
+    int target_width, int target_height);
+
+int webp_anim_stream_decoder_append(
+    WebPAnimStreamContext* ctx,
+    const uint8_t* data, size_t size,
+    int is_final);
+
+void webp_anim_stream_decoder_reset_input(WebPAnimStreamContext* ctx);
+
+int webp_anim_stream_decoder_get_info(
+    WebPAnimStreamContext* ctx,
+    int* canvas_width, int* canvas_height,
+    int* frame_count, int* loop_count,
+    int* actual_width, int* actual_height,
+    int* is_animated, int* is_ready, int* is_final);
+
+int webp_anim_stream_decoder_get_frames(
+    WebPAnimStreamContext* ctx, int count,
+    int64_t* out_results);
+
+void webp_anim_stream_decoder_set_thread_limit(
+    WebPAnimStreamContext* ctx, int use_threads);
+
+void webp_anim_stream_decoder_delete(WebPAnimStreamContext* ctx);
 
 /* ─── 帧信息提取（用于并行解码） ─── */
 

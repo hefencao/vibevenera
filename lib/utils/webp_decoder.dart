@@ -159,6 +159,77 @@ typedef _WebPAnimDecoderSetThreadLimitDart = void Function(
 typedef _WebPAnimDecoderAliveCountNative = Int32 Function();
 typedef _WebPAnimDecoderAliveCountDart = int Function();
 
+typedef _WebPAnimStreamDecoderNewNative = Pointer<Void> Function(
+  Int32 targetWidth,
+  Int32 targetHeight,
+);
+typedef _WebPAnimStreamDecoderNewDart = Pointer<Void> Function(
+  int targetWidth,
+  int targetHeight,
+);
+
+typedef _WebPAnimStreamDecoderAppendNative = Int32 Function(
+  Pointer<Void> ctx,
+  Pointer<Uint8> data,
+  Uint64 size,
+  Int32 isFinal,
+);
+typedef _WebPAnimStreamDecoderAppendDart = int Function(
+  Pointer<Void> ctx,
+  Pointer<Uint8> data,
+  int size,
+  int isFinal,
+);
+
+typedef _WebPAnimStreamDecoderResetInputNative = Void Function(
+  Pointer<Void> ctx,
+);
+typedef _WebPAnimStreamDecoderResetInputDart = void Function(
+  Pointer<Void> ctx,
+);
+
+typedef _WebPAnimStreamDecoderGetInfoNative = Int32 Function(
+  Pointer<Void> ctx,
+  Pointer<Int32> canvasWidth,
+  Pointer<Int32> canvasHeight,
+  Pointer<Int32> frameCount,
+  Pointer<Int32> loopCount,
+  Pointer<Int32> actualWidth,
+  Pointer<Int32> actualHeight,
+  Pointer<Int32> isAnimated,
+  Pointer<Int32> isReady,
+  Pointer<Int32> isFinal,
+);
+typedef _WebPAnimStreamDecoderGetInfoDart = int Function(
+  Pointer<Void> ctx,
+  Pointer<Int32> canvasWidth,
+  Pointer<Int32> canvasHeight,
+  Pointer<Int32> frameCount,
+  Pointer<Int32> loopCount,
+  Pointer<Int32> actualWidth,
+  Pointer<Int32> actualHeight,
+  Pointer<Int32> isAnimated,
+  Pointer<Int32> isReady,
+  Pointer<Int32> isFinal,
+);
+
+typedef _WebPAnimStreamDecoderGetFramesNative = Int32 Function(
+  Pointer<Void> ctx, Int32 count, Pointer<Int64> outResults);
+typedef _WebPAnimStreamDecoderGetFramesDart = int Function(
+  Pointer<Void> ctx, int count, Pointer<Int64> outResults);
+
+typedef _WebPAnimStreamDecoderSetThreadLimitNative = Void Function(
+  Pointer<Void> ctx,
+  Int32 useThreads,
+);
+typedef _WebPAnimStreamDecoderSetThreadLimitDart = void Function(
+  Pointer<Void> ctx,
+  int useThreads,
+);
+
+typedef _WebPAnimStreamDecoderDeleteNative = Void Function(Pointer<Void> ctx);
+typedef _WebPAnimStreamDecoderDeleteDart = void Function(Pointer<Void> ctx);
+
 typedef _WebPInitNativeNative = Void Function();
 typedef _WebPInitNativeDart = void Function();
 
@@ -243,6 +314,13 @@ class _WebPBindings {
   late final _WebPAnimDecoderDeleteDart animDelete;
   late final _WebPAnimDecoderSetThreadLimitDart animSetThreadLimit;
   late final _WebPAnimDecoderAliveCountDart animAliveCount;
+  late final _WebPAnimStreamDecoderNewDart streamNew;
+  late final _WebPAnimStreamDecoderAppendDart streamAppend;
+  late final _WebPAnimStreamDecoderResetInputDart streamResetInput;
+  late final _WebPAnimStreamDecoderGetInfoDart streamGetInfo;
+  late final _WebPAnimStreamDecoderGetFramesDart streamGetFrames;
+  late final _WebPAnimStreamDecoderSetThreadLimitDart streamSetThreadLimit;
+  late final _WebPAnimStreamDecoderDeleteDart streamDelete;
   late final _WebPFreeBufferDart freeBuffer;
   late final _WebPNativePoolAcquireDart poolAcquire;
   late final _WebPInitNativeDart initNative;
@@ -272,6 +350,20 @@ class _WebPBindings {
         _WebPAnimDecoderSetThreadLimitDart>('webp_anim_decoder_set_thread_limit');
     animAliveCount = _lib.lookupFunction<_WebPAnimDecoderAliveCountNative,
         _WebPAnimDecoderAliveCountDart>('webp_anim_decoder_alive_count');
+    streamNew = _lib.lookupFunction<_WebPAnimStreamDecoderNewNative,
+        _WebPAnimStreamDecoderNewDart>('webp_anim_stream_decoder_new');
+    streamAppend = _lib.lookupFunction<_WebPAnimStreamDecoderAppendNative,
+        _WebPAnimStreamDecoderAppendDart>('webp_anim_stream_decoder_append');
+    streamResetInput = _lib.lookupFunction<_WebPAnimStreamDecoderResetInputNative,
+        _WebPAnimStreamDecoderResetInputDart>('webp_anim_stream_decoder_reset_input');
+    streamGetInfo = _lib.lookupFunction<_WebPAnimStreamDecoderGetInfoNative,
+        _WebPAnimStreamDecoderGetInfoDart>('webp_anim_stream_decoder_get_info');
+    streamGetFrames = _lib.lookupFunction<_WebPAnimStreamDecoderGetFramesNative,
+        _WebPAnimStreamDecoderGetFramesDart>('webp_anim_stream_decoder_get_frames');
+    streamSetThreadLimit = _lib.lookupFunction<_WebPAnimStreamDecoderSetThreadLimitNative,
+        _WebPAnimStreamDecoderSetThreadLimitDart>('webp_anim_stream_decoder_set_thread_limit');
+    streamDelete = _lib.lookupFunction<_WebPAnimStreamDecoderDeleteNative,
+        _WebPAnimStreamDecoderDeleteDart>('webp_anim_stream_decoder_delete');
     freeBuffer = _lib.lookupFunction<_WebPFreeBufferNative, _WebPFreeBufferDart>(
         'webp_free_buffer');
     initNative = _lib.lookupFunction<_WebPInitNativeNative,
@@ -443,6 +535,15 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
   }
 }
 
+WebPAnimDecoder? createStreamingAnimDecoder({
+  required int targetWidth,
+  required int targetHeight,
+}) {
+  final ctx = _bind.streamNew(targetWidth, targetHeight);
+  if (ctx == Pointer.fromAddress(0)) return null;
+  return WebPAnimDecoder._stream(bindings: _bind, ctx: ctx);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 高能效渲染引擎：调度器与解码器
 // ═══════════════════════════════════════════════════════════════
@@ -456,6 +557,7 @@ enum DecodePriority {
 class DecodeJob {
   final int generation;
   final int decoderAddress;
+  final bool isStreaming;
   final int framesToDecode;
   final int targetW;
   final int targetH;
@@ -465,6 +567,7 @@ class DecodeJob {
   DecodeJob({
     required this.generation,
     required this.decoderAddress,
+    this.isStreaming = false,
     required this.framesToDecode,
     required this.targetW,
     required this.targetH,
@@ -626,6 +729,7 @@ class WorkerPoolScheduler {
       final replyPort = data[0] as SendPort;
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
+      final isStreaming = data.length > 6 && data[6] == true;
 
       try {
         if (decoderAddress == 0) {
@@ -637,8 +741,10 @@ class WorkerPoolScheduler {
         // 单次 FFI 调用批量解码 N 帧，消除 per-frame FFI 往返开销
         final cResults = calloc<Int64>(count * 2);
         final tStart = DateTime.now().microsecondsSinceEpoch;
-        var n = bindings.animGetFrames(ctx, count, cResults);
-        if (n <= 0) {
+        var n = isStreaming
+            ? bindings.streamGetFrames(ctx, count, cResults)
+            : bindings.animGetFrames(ctx, count, cResults);
+        if (n <= 0 && !isStreaming) {
           bindings.animReset(ctx);
           n = bindings.animGetFrames(ctx, count, cResults);
         }
@@ -786,7 +892,7 @@ class WorkerPoolScheduler {
     try {
       final replyPort = ReceivePort();
       port.send([replyPort.sendPort, job.decoderAddress, job.framesToDecode,
-                 job.targetW, job.targetH, job.generation]);
+                 job.targetW, job.targetH, job.generation, job.isStreaming]);
 
       final result = await replyPort.first;
       replyPort.close();
@@ -829,15 +935,18 @@ class WorkerPoolScheduler {
 class WebPAnimDecoder {
   final _WebPBindings _bindings;
   final Pointer<Void> _ctx;
-  final Pointer<Uint8> _nativeData;
+  final Pointer<Uint8>? _nativeData;
+  final bool isStreaming;
   bool _disposed = false;
 
-  final int canvasWidth;
-  final int canvasHeight;
-  final int targetWidth;
-  final int targetHeight;
-  final int frameCount;
-  final int loopCount;
+  int canvasWidth;
+  int canvasHeight;
+  int targetWidth;
+  int targetHeight;
+  int frameCount;
+  int loopCount;
+  bool streamIsAnimated = true;
+  bool streamIsComplete = false;
 
   WebPAnimDecoder._({
     required _WebPBindings bindings,
@@ -851,7 +960,8 @@ class WebPAnimDecoder {
     required this.targetHeight,
   })  : _bindings = bindings,
         _ctx = ctx,
-        _nativeData = nativeData;
+        _nativeData = nativeData,
+        isStreaming = false;
 
   /// 从 Worker Isolate 返回的原始地址重建解码器（主线程零 C 堆分配）
   WebPAnimDecoder._fromWorker({
@@ -866,23 +976,120 @@ class WebPAnimDecoder {
     required this.targetHeight,
   })  : _bindings = bindings,
         _ctx = Pointer.fromAddress(ctxAddress),
-        _nativeData = Pointer.fromAddress(nativeDataAddress);
+        _nativeData = Pointer.fromAddress(nativeDataAddress),
+        isStreaming = false;
+
+  WebPAnimDecoder._stream({
+    required _WebPBindings bindings,
+    required Pointer<Void> ctx,
+  })  : _bindings = bindings,
+        _ctx = ctx,
+        _nativeData = null,
+        isStreaming = true,
+        canvasWidth = 0,
+        canvasHeight = 0,
+        targetWidth = 0,
+        targetHeight = 0,
+        frameCount = 0,
+        loopCount = 0;
 
   int get address => _ctx.address;
+  bool get isDisposed => _disposed;
 
   bool get hasMoreFrames {
     _checkNotDisposed();
+    if (isStreaming) return true;
     return _bindings.animHasMore(_ctx) != 0;
   }
 
   void setThreadLimit(int useThreads) {
     _checkNotDisposed();
-    _bindings.animSetThreadLimit(_ctx, useThreads);
+    if (isStreaming) {
+      _bindings.streamSetThreadLimit(_ctx, useThreads);
+    } else {
+      _bindings.animSetThreadLimit(_ctx, useThreads);
+    }
+  }
+
+  bool appendStreamChunk(Uint8List data, {bool isFinal = false}) {
+    _checkNotDisposed();
+    if (!isStreaming) return false;
+    final nativeData = data._asNative();
+    try {
+      _bindings.streamAppend(_ctx, nativeData, data.length, isFinal ? 1 : 0);
+      return refreshStreamInfo();
+    } finally {
+      nativeData._free();
+    }
+  }
+
+  void resetStreamInput() {
+    _checkNotDisposed();
+    if (isStreaming) _bindings.streamResetInput(_ctx);
+  }
+
+  bool refreshStreamInfo() {
+    _checkNotDisposed();
+    if (!isStreaming) return true;
+    final cW = calloc<Int32>(), cH = calloc<Int32>();
+    final fC = calloc<Int32>(), lC = calloc<Int32>();
+    final aW = calloc<Int32>(), aH = calloc<Int32>();
+    final animated = calloc<Int32>();
+    final ready = calloc<Int32>(), done = calloc<Int32>();
+    try {
+      _bindings.streamGetInfo(
+        _ctx,
+        cW,
+        cH,
+        fC,
+        lC,
+        aW,
+        aH,
+        animated,
+        ready,
+        done,
+      );
+      if (ready.value != 0) {
+        canvasWidth = cW.value;
+        canvasHeight = cH.value;
+        frameCount = fC.value;
+        loopCount = lC.value;
+        targetWidth = aW.value;
+        targetHeight = aH.value;
+        streamIsAnimated = animated.value != 0;
+        streamIsComplete = done.value != 0;
+        return true;
+      }
+      return false;
+    } finally {
+      calloc.free(cW); calloc.free(cH); calloc.free(fC); calloc.free(lC);
+      calloc.free(aW); calloc.free(aH); calloc.free(animated);
+      calloc.free(ready); calloc.free(done);
+    }
   }
 
   WebPAnimFrame? getNextFrame() {
     _checkNotDisposed();
     if (!hasMoreFrames) return null;
+    if (isStreaming) {
+      final results = calloc<Int64>(2);
+      try {
+        final n = _bindings.streamGetFrames(_ctx, 1, results);
+        if (n <= 0) return null;
+        final address = results[0];
+        final duration = results[1];
+        final rgbaPtr = Pointer<Uint8>.fromAddress(address);
+        final rgba = rgbaPtr.asTypedList(targetWidth * targetHeight * 4);
+        final copy = Uint8List.fromList(rgba);
+        nativePoolRelease(address);
+        return WebPAnimFrame(
+          rgba: copy,
+          durationMs: duration,
+        );
+      } finally {
+        calloc.free(results);
+      }
+    }
     final durationMs = calloc<Int32>();
     try {
       final rgbaPtr = _bindings.animGetFrame(_ctx, durationMs);
@@ -900,16 +1107,20 @@ class WebPAnimDecoder {
 
   void reset() {
     _checkNotDisposed();
-    _bindings.animReset(_ctx);
+    if (!isStreaming) _bindings.animReset(_ctx);
   }
 
   void dispose() {
     if (_disposed) return;
     _disposed = true;
-    _bindings.animDelete(_ctx);
+    if (isStreaming) {
+      _bindings.streamDelete(_ctx);
+    } else {
+      _bindings.animDelete(_ctx);
+    }
     final alive = _bindings.animAliveCount();
     debugPrint('[WebP] -decoder ($alive remain)');
-    _nativeData._free();
+    _nativeData?._free();
   }
 
   void _checkNotDisposed() {

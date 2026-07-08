@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
+import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'preload_policy.dart';
@@ -156,12 +158,17 @@ class PipelineController {
   int _preloadCount = 5;
   int _currentBufferedFrames = 0;
   int _windowKey = -1;
+  int _windowRuleIndex = -1;
   int? _provisionalIdx;
   Timer? _jumpProtectionTimer;
   List<String> _images = const [];
   String? _sourceKey;
   String _cid = '';
   String _eid = '';
+  final Set<String> _streamDecodeAttached = {};
+  final Map<String, StreamSubscription<ImageDownloadProgress>>
+  _streamDecodeSubs = {};
+  final Map<String, void Function()> _streamDecodeDisposers = {};
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -215,6 +222,7 @@ class PipelineController {
     _preloadCount = preloadCount;
     _currentBufferedFrames = 0;
     _windowKey = -1;
+    _windowRuleIndex = -1;
     if (contextChanged) {
       _hasCurrentIdx = false;
       _jumpProtectionTimer?.cancel();
@@ -243,6 +251,7 @@ class PipelineController {
     _preloadCount = preloadCount;
     _currentBufferedFrames = 0;
     _windowKey = -1;
+    _windowRuleIndex = -1;
     if (contextChanged || !_hasCurrentIdx) {
       _hasCurrentIdx = true;
       _stableIdx = currentIdx;
@@ -255,12 +264,24 @@ class PipelineController {
 
   void updateCurrentBufferedFrames(int frames) {
     if (_images.isEmpty) return;
-    final window = DynamicPreloadPolicy.windowFor(
+    final nextRule = DynamicPreloadPolicy.ruleIndexFor(
       currentBufferedFrames: frames,
       preloadCount: _preloadCount,
     );
-    if (window.key == _windowKey) return;
+    if (_windowRuleIndex >= 0 && nextRule > _windowRuleIndex) {
+      final min = waterLevelRules[_windowRuleIndex].minBufferedFrames;
+      if (frames >= (min - 2).clamp(0, min)) {
+        _currentBufferedFrames = frames;
+        return;
+      }
+    }
+    final window = DynamicPreloadPolicy.windowAt(nextRule);
+    if (window.key == _windowKey) {
+      _currentBufferedFrames = frames;
+      return;
+    }
     _currentBufferedFrames = frames;
+    _windowRuleIndex = nextRule;
     _applyWindow(protectJump: _provisionalIdx != null);
   }
 
@@ -302,10 +323,13 @@ class PipelineController {
   void _applyWindow({bool protectJump = false}) {
     String fk(int i) => (i >= 0 && i < _images.length) ? _images[i] : '';
 
-    final window = DynamicPreloadPolicy.windowFor(
-      currentBufferedFrames: _currentBufferedFrames,
-      preloadCount: _preloadCount,
-    );
+    if (_windowRuleIndex < 0) {
+      _windowRuleIndex = DynamicPreloadPolicy.ruleIndexFor(
+        currentBufferedFrames: _currentBufferedFrames,
+        preloadCount: _preloadCount,
+      );
+    }
+    final window = DynamicPreloadPolicy.windowAt(_windowRuleIndex);
     _windowKey = window.key;
 
     _currentKey = fk(_currentIdx);
@@ -365,15 +389,11 @@ class PipelineController {
     }
     if (_currentKey.isNotEmpty) _offsetByKey[_currentKey] = 0;
     if (protectJump) {
-      _nearKeys.clear();
-      _prevKeys.clear();
-      _farKeys.clear();
-      _keepKeys.clear();
-      _offsetByKey
-        ..clear()
-        ..[_currentKey] = 0;
       final stableKey = fk(_stableIdx);
       if (stableKey.isNotEmpty && stableKey != _currentKey) {
+        _nearKeys.remove(stableKey);
+        _prevKeys.remove(stableKey);
+        _farKeys.remove(stableKey);
         _keepKeys.add(stableKey);
         _offsetByKey[stableKey] = _stableIdx - _currentIdx;
       }
@@ -419,6 +439,7 @@ class PipelineController {
         );
       }
     });
+    _detachInactiveStreamDecoders(activeImageKeys);
 
     // Migrate existing tasks
     final activeTaskKeys = <String>{};
@@ -456,6 +477,19 @@ class PipelineController {
     _jumpProtectionTimer = null;
     _scheduler.clear();
     resources.dispose();
+  }
+
+  void publishExternalHolder(String imageKey, String fullKey, dynamic holder) {
+    for (final peer in resources.getAllForImage(imageKey)) {
+      if (peer.fullKey == fullKey) {
+        peer.holder = holder;
+        peer.decode.markSuccess();
+      }
+    }
+  }
+
+  void publishExternalBytes(String imageKey, Uint8List bytes) {
+    _publishBytes(imageKey, bytes);
   }
 
   // ── Internal: priorities & policies ────────────────────────
@@ -543,7 +577,18 @@ class PipelineController {
   // ── Internal: work submission (split by stage) ──────────────
 
   void _submitWork(String? sourceKey, String cid, String eid) {
-    resources.forEach((entry) => _evaluateEntry(entry, sourceKey, cid, eid));
+    final entries = <ResourceEntry>[];
+    resources.forEach(entries.add);
+    entries.sort((a, b) => _entrySubmitRank(b).compareTo(_entrySubmitRank(a)));
+    for (final entry in entries) {
+      _evaluateEntry(entry, sourceKey, cid, eid);
+    }
+  }
+
+  int _entrySubmitRank(ResourceEntry entry) {
+    final d = entry.policy.downloadPriority;
+    final p = entry.policy.decodePriority;
+    return d > p ? d : p;
   }
 
   void _evaluateEntry(
@@ -563,6 +608,13 @@ class PipelineController {
     String cid,
     String eid,
   ) {
+    if (entry.priority == PagePriority.current) {
+      debugPrint(
+        '[WebP-Stream][pipeline] download-eval key=${entry.imageKey} '
+        'hasBytes=${entry.hasBytes} inProgress=${entry.download.inProgress} '
+        'allowD=${entry.policy.allowDownload} allowDecode=${entry.policy.allowDecode}',
+      );
+    }
     if (!entry.policy.allowDownload) return;
     if (entry.hasBytes) return;
     final l2Bytes = _cache?.getL2(entry.imageKey);
@@ -576,10 +628,14 @@ class PipelineController {
         return;
       }
     }
-    if (entry.download.inProgress) return;
+    if (entry.download.inProgress) {
+      _attachStreamDecodeToRunningDownload(entry, sourceKey, cid, eid);
+      return;
+    }
     if (_prefetchBudgetExceededFor(entry)) return;
 
     entry.download.inProgress = true;
+    final streamDecode = _streamDecodeOnDownload(entry);
     final task = DownloadTask(
       key: entry.imageKey,
       imageKey: entry.imageKey,
@@ -595,6 +651,8 @@ class PipelineController {
           peer.download.updateProgress(current, total);
         }
       },
+      onEvent: streamDecode?.onEvent,
+      onDispose: streamDecode?.dispose,
     );
     task
         .register()
@@ -610,9 +668,196 @@ class PipelineController {
         })
         .catchError((_) {
           entry.download.inProgress = false;
+          _detachStreamDecode(entry.fullKey);
         });
     task.setContext(ExecutionContext(entry));
     _scheduler.submit(task);
+  }
+
+  ({void Function(ImageDownloadProgress event) onEvent, void Function() dispose})?
+  _streamDecodeOnDownload(
+    ResourceEntry entry,
+  ) {
+    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return null;
+    if (!_streamDecodeAttached.add(entry.fullKey)) return null;
+    webp.WebPAnimDecoder? decoder;
+    dynamic holder;
+    var chunkCount = 0;
+    var lastDebugBytes = 0;
+    var lastFrameCount = -1;
+    var stopped = false;
+    debugPrint(
+      '[WebP-Stream][pipeline] START key=${entry.imageKey} '
+      'priority=${entry.priority} full=${entry.fullKey}',
+    );
+    void dispose() {
+      _streamDecodeAttached.remove(entry.fullKey);
+      final d = decoder;
+      if (holder == null && d != null && !d.isDisposed) d.dispose();
+    }
+    void onEvent(ImageDownloadProgress event) {
+      if (stopped) return;
+      final canDecode = entry.policy.allowDecode && entry.policy.allowGpuUpload;
+      if (!canDecode || (entry.hasHolder && holder == null)) {
+        stopped = true;
+        debugPrint(
+          '[WebP-Stream][pipeline] STOP allowDecode=${entry.policy.allowDecode} '
+          'allowGpu=${entry.policy.allowGpuUpload} hasHolder=${entry.hasHolder} '
+          'priority=${entry.priority} ${entry.imageKey}',
+        );
+        dispose();
+        return;
+      }
+      if (event.reset && decoder != null && !decoder!.isDisposed) {
+        debugPrint('[WebP-Stream][pipeline] RESET ${entry.imageKey}');
+        decoder!.resetStreamInput();
+        holder?.clearBufferedFrames();
+      }
+      final chunk = event.chunkBytes;
+      if (chunk != null) {
+        decoder ??= webp.createStreamingAnimDecoder(
+          targetWidth: _targetW,
+          targetHeight: _targetH,
+        );
+        final d = decoder;
+        if (d == null || d.isDisposed) return;
+        chunkCount++;
+        if (chunkCount <= 3 ||
+            event.currentBytes - lastDebugBytes >= 1024 * 1024) {
+          lastDebugBytes = event.currentBytes;
+          debugPrint(
+            '[WebP-Stream][pipeline] chunk#$chunkCount '
+            '+${chunk.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
+            '${entry.imageKey}',
+          );
+        }
+        final ready = d.appendStreamChunk(chunk);
+        if (ready && d.frameCount != lastFrameCount) {
+          lastFrameCount = d.frameCount;
+          debugPrint(
+            '[WebP-Stream][pipeline] info animated=${d.streamIsAnimated} '
+            'frames=${d.frameCount} ${d.targetWidth}x${d.targetHeight} '
+            '${entry.imageKey}',
+          );
+        }
+        if (ready && !d.streamIsAnimated) {
+          debugPrint('[WebP-Stream][pipeline] ready but static ${entry.imageKey}');
+        }
+        if (ready &&
+            d.streamIsAnimated &&
+            holder == null &&
+            d.frameCount > 0 &&
+            d.targetWidth > 0) {
+          debugPrint(
+            '[WebP-Stream][pipeline] READY animated ${d.frameCount}f '
+            '${d.targetWidth}x${d.targetHeight} ${entry.imageKey}',
+          );
+          holder = DecoderManager.instance.getOrCreateHolder(
+            entry.fullKey,
+            d,
+            d.targetWidth,
+            d.targetHeight,
+            1.0,
+          );
+          for (final peer in resources.getAllForImage(entry.imageKey)) {
+            if (peer.fullKey == entry.fullKey) {
+              peer.holder = holder;
+              peer.decode.markSuccess();
+            }
+          }
+          if (canDecode) holder.requestRefill();
+          debugPrint('[WebP-Stream][pipeline] HOLDER ${entry.imageKey}');
+        } else {
+          if (canDecode) holder?.requestRefill();
+        }
+      }
+      if (event.imageBytes != null) {
+        debugPrint(
+          '[WebP-Stream][pipeline] FINAL ${event.imageBytes!.length}B '
+          'holder=${holder != null} ${entry.imageKey}',
+        );
+        final d = decoder;
+        if (d != null && !d.isDisposed) {
+          d.appendStreamChunk(Uint8List(0), isFinal: true);
+          if (canDecode) holder?.requestRefill();
+          if (holder == null) d.dispose();
+        }
+      }
+    }
+    return (onEvent: onEvent, dispose: dispose);
+  }
+
+  void _attachStreamDecodeToRunningDownload(
+    ResourceEntry entry,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return;
+    if (entry.hasHolder || _streamDecodeAttached.contains(entry.fullKey)) return;
+    final stream = ImageDownloader.joinLoadingComicImage(
+      entry.imageKey,
+      sourceKey,
+      cid,
+      eid,
+      debugLabel: 'pipeline-stream-attach',
+    );
+    if (stream == null) {
+      debugPrint('[WebP-Stream][pipeline] ATTACH skip no-shared ${entry.imageKey}');
+      return;
+    }
+    final streamDecode = _streamDecodeOnDownload(entry);
+    if (streamDecode == null) return;
+    late StreamSubscription<ImageDownloadProgress> sub;
+    sub = stream.listen(
+      (event) {
+        final active = entry.download.inProgress &&
+            entry.policy.allowDecode &&
+            entry.policy.allowGpuUpload &&
+            !entry.hasBytes;
+        if (!active) {
+          _detachStreamDecode(entry.fullKey);
+          return;
+        }
+        streamDecode.onEvent(event);
+      },
+      onError: (e) {
+        debugPrint('[WebP-Stream][pipeline] ATTACH-ERROR ${entry.imageKey} $e');
+        _detachStreamDecode(entry.fullKey);
+      },
+      onDone: () => _detachStreamDecode(entry.fullKey),
+      cancelOnError: false,
+    );
+    _streamDecodeSubs[entry.fullKey] = sub;
+    _streamDecodeDisposers[entry.fullKey] = streamDecode.dispose;
+    debugPrint('[WebP-Stream][pipeline] ATTACH running ${entry.imageKey}');
+  }
+
+  void _detachStreamDecode(String fullKey) {
+    _streamDecodeSubs.remove(fullKey)?.cancel();
+    _streamDecodeDisposers.remove(fullKey)?.call();
+    _streamDecodeAttached.remove(fullKey);
+  }
+
+  void _detachInactiveStreamDecoders(Set<String> activeImageKeys) {
+    for (final fullKey in _streamDecodeSubs.keys.toList()) {
+      final imageKey = _baseKey(fullKey);
+      final entry = resources.get(fullKey);
+      final active = activeImageKeys.contains(imageKey) &&
+          entry != null &&
+          entry.policy.allowDecode &&
+          entry.policy.allowGpuUpload;
+      if (!active) _detachStreamDecode(fullKey);
+    }
+  }
+
+  static String _baseKey(String fullKey) {
+    final at = fullKey.lastIndexOf('@');
+    if (at < 0) return fullKey;
+    final suffix = fullKey.substring(at + 1);
+    return RegExp(r'^\d+x\d+$').hasMatch(suffix)
+        ? fullKey.substring(0, at)
+        : fullKey;
   }
 
   void _submitDecode(
@@ -621,6 +866,13 @@ class PipelineController {
     String cid,
     String eid,
   ) {
+    if (entry.priority == PagePriority.current) {
+      debugPrint(
+        '[WebP-Stream][pipeline] decode-eval key=${entry.imageKey} '
+        'hasBytes=${entry.hasBytes} hasHolder=${entry.hasHolder} '
+        'inProgress=${entry.decode.inProgress} allow=${entry.policy.allowDecode}',
+      );
+    }
     if (!entry.policy.allowDecode) return;
     if (entry.hasHolder) return;
     if (!entry.hasBytes) return;

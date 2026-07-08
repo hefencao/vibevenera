@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' as io;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -53,22 +54,48 @@ class ImageRequestConfig {
 // ═══════════════════════════════════════════════════════════════
 
 class _SharedStream {
-  _SharedStream(this._source, this._onDispose)
+  _SharedStream(this._source, this._onDispose, this._cancelToken)
     : _controller = StreamController<ImageDownloadProgress>.broadcast();
 
   final Stream<ImageDownloadProgress> _source;
   final void Function() _onDispose;
+  final CancelToken _cancelToken;
   final StreamController<ImageDownloadProgress> _controller;
+  final List<ImageDownloadProgress> _history = [];
   StreamSubscription<ImageDownloadProgress>? _upstreamSub;
+  int _listeners = 0;
   bool _disposed = false;
 
-  Stream<ImageDownloadProgress> get stream {
+  Stream<ImageDownloadProgress> get stream async* {
+    _listeners++;
+    _ensureStarted();
+    try {
+      var replayed = 0;
+      for (final event in _coalescedHistory()) {
+        yield event;
+        replayed++;
+        if (replayed % 8 == 0) await Future<void>.delayed(Duration.zero);
+      }
+      yield* _controller.stream;
+    } finally {
+      _listeners--;
+      if (_listeners <= 0 && !_disposed) {
+        cancel();
+      }
+    }
+  }
+
+  void _ensureStarted() {
     _upstreamSub ??= _source.listen(
-      _controller.add,
+      (event) {
+        if (event.chunkBytes != null || event.imageBytes != null || event.reset) {
+          _history.add(event);
+        }
+        _controller.add(event);
+      },
       onError: _controller.addError,
       onDone: _close,
     );
-    return _controller.stream;
   }
 
   void _close() {
@@ -85,12 +112,55 @@ class _SharedStream {
   void cancel() {
     if (_disposed) return;
     _disposed = true;
+    if (!_cancelToken.isCancelled) {
+      _cancelToken.cancel('Shared download disposed');
+    }
     _upstreamSub?.cancel();
     _upstreamSub = null;
     if (!_controller.isClosed) {
       _controller.close();
     }
     _onDispose();
+  }
+
+  List<ImageDownloadProgress> _coalescedHistory() {
+    const maxReplayChunk = 256 * 1024;
+    final result = <ImageDownloadProgress>[];
+    var builder = BytesBuilder(copy: false);
+    var current = 0;
+    int? total;
+
+    void flush() {
+      if (builder.length == 0) return;
+      result.add(
+        ImageDownloadProgress(
+          currentBytes: current,
+          totalBytes: total,
+          chunkBytes: builder.takeBytes(),
+        ),
+      );
+      builder = BytesBuilder(copy: false);
+    }
+
+    for (final event in _history) {
+      if (event.reset) {
+        flush();
+        result.add(event);
+        continue;
+      }
+      final chunk = event.chunkBytes;
+      if (chunk != null) {
+        builder.add(chunk);
+        current = event.currentBytes;
+        total = event.totalBytes;
+        if (builder.length >= maxReplayChunk) flush();
+        continue;
+      }
+      flush();
+      if (event.imageBytes != null) result.add(event);
+    }
+    flush();
+    return result;
   }
 }
 
@@ -136,6 +206,15 @@ abstract class ImageDownloader {
   static String _shortDownloadKey(String key) {
     if (key.length <= 96) return key;
     return '${key.substring(0, 48)}...${key.substring(key.length - 36)}';
+  }
+
+  static String _downloadDebugKey(String key) {
+    final plain = key.split('@').first;
+    final slash = plain.lastIndexOf('/');
+    final bslash = plain.lastIndexOf('\\');
+    final name = plain.substring((slash > bslash ? slash : bslash) + 1);
+    if (name.length <= 48) return name;
+    return '${name.substring(0, 16)}...${name.substring(name.length - 24)}';
   }
 
   static void _warnDownload(String? debugLabel, String message) {
@@ -192,7 +271,7 @@ abstract class ImageDownloader {
     }
 
     final config = ImageRequestConfig.fromMap(url, rawConfig);
-    yield* _executeDownload(config: config, cacheKey: cacheKey);
+    yield* _executeDownload(config: config, cacheKey: cacheKey, debugKey: url);
   }
 
   /// Load a comic image (deduplicated across concurrent calls).
@@ -209,25 +288,50 @@ abstract class ImageDownloader {
     String? debugLabel,
   }) {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    final joined = joinLoadingComicImage(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+      debugLabel: debugLabel,
+    );
+    if (joined != null) return joined;
 
-    final existing = _loadingImages[cacheKey];
-    if (existing != null) {
-      return existing.stream;
-    }
-
+    final requestCancel = CancelToken();
     final shared = _SharedStream(
       _loadComicImage(
         imageKey,
         sourceKey,
         cid,
         eid,
-        cancelToken: cancelToken,
+        cancelToken: requestCancel,
         debugLabel: debugLabel,
       ),
       () => _loadingImages.remove(cacheKey),
+      requestCancel,
     );
     _loadingImages[cacheKey] = shared;
     return shared.stream;
+  }
+
+  static Stream<ImageDownloadProgress>? joinLoadingComicImage(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid, {
+    String? debugLabel,
+  }) {
+    final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    final existing = _loadingImages[cacheKey];
+    if (existing == null) return null;
+    if (imageKey.toLowerCase().contains('.webp') ||
+        _loadingImages.containsKey(cacheKey)) {
+      debugPrint(
+        '[WebP-Stream][download] JOIN key=${_downloadDebugKey(imageKey)} '
+        'label=${debugLabel ?? 'unknown'}',
+      );
+    }
+    return existing.stream;
   }
 
   static Stream<ImageDownloadProgress> loadComicImageUnwrapped(
@@ -261,11 +365,14 @@ abstract class ImageDownloader {
     String? debugLabel,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    _throwIfCancelled(cancelToken);
 
     // Cache hit → yield immediately
     final cached = await CacheManager().findCache(cacheKey);
+    _throwIfCancelled(cancelToken);
     if (cached != null) {
       final data = await cached.readAsBytes();
+      _throwIfCancelled(cancelToken);
       yield ImageDownloadProgress(
         currentBytes: data.length,
         totalBytes: data.length,
@@ -280,18 +387,21 @@ abstract class ImageDownloader {
       rawConfig =
           (await cs?.getImageLoadingConfig?.call(imageKey, cid, eid)) ?? {};
     }
+    _throwIfCancelled(cancelToken);
 
     var config = ImageRequestConfig.fromMap(imageKey, rawConfig);
     var retry = 5;
 
     while (true) {
       try {
+        _throwIfCancelled(cancelToken);
         await for (final event in _executeDownload(
           config: config,
           cacheKey: cacheKey,
           enableModifyImage: true,
           cancelToken: cancelToken,
           debugLabel: debugLabel,
+          debugKey: imageKey,
         )) {
           yield event;
         }
@@ -313,6 +423,7 @@ abstract class ImageDownloader {
             config.onLoadFailed!,
             oldUrl,
           );
+          _throwIfCancelled(cancelToken);
           if (newConfig == null) {
             rethrow;
           }
@@ -327,6 +438,10 @@ abstract class ImageDownloader {
         }
       }
     }
+  }
+
+  static void _throwIfCancelled(CancelToken? cancelToken) {
+    if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
   }
 
   static Future<ImageRequestConfig?> _invokeLoadFailed(
@@ -359,6 +474,7 @@ abstract class ImageDownloader {
     bool enableModifyImage = false,
     CancelToken? cancelToken,
     String? debugLabel,
+    String? debugKey,
   }) async* {
     String requestUrl = config.url;
     if (requestUrl.isEmpty) {
@@ -378,30 +494,99 @@ abstract class ImageDownloader {
     if (!hasAcceptEncoding) {
       headers['Accept-Encoding'] = 'identity';
     }
+    final canStreamDecode = config.modifyImage == null && config.onResponse == null;
+    final streamDebug = requestUrl.toLowerCase().contains('.webp');
+    final key = _downloadDebugKey(debugKey ?? cacheKey);
+    if (streamDebug) {
+      debugPrint(
+        '[WebP-Stream][download] START key=$key '
+        'label=${debugLabel ?? 'unknown'} canStream=$canStreamDecode '
+        'enableModifyImage=$enableModifyImage '
+        'onResponse=${config.onResponse != null} '
+        'modify=${config.modifyImage != null} url=$requestUrl',
+      );
+    }
+    var streamChunkCount = 0;
+    var lastStreamDebugBytes = 0;
+    var pendingChunk = BytesBuilder(copy: false);
+    var pendingCurrent = 0;
+    int? pendingTotal;
 
     final progressEvents = StreamController<ImageDownloadProgress>();
-    final rawFuture = _downloadRawBytes(
-      requestUrl: requestUrl,
-      method: config.method,
-      headers: headers,
-      data: config.data,
-      cancelToken: cancelToken,
-      debugLabel: debugLabel,
-      preferLoadFailedOnRangeIgnored: config.onLoadFailed != null,
-      onProgress: (current, total) {
-        if (!progressEvents.isClosed) {
-          progressEvents.add(
-            ImageDownloadProgress(currentBytes: current, totalBytes: total),
-          );
-        }
-      },
-    ).whenComplete(progressEvents.close);
+    void flushPendingChunk() {
+      if (pendingChunk.length == 0 || progressEvents.isClosed) return;
+      final chunk = pendingChunk.takeBytes();
+      pendingChunk = BytesBuilder(copy: false);
+      streamChunkCount++;
+      if (streamDebug &&
+          (streamChunkCount <= 3 ||
+              pendingCurrent - lastStreamDebugBytes >= 1024 * 1024)) {
+        lastStreamDebugBytes = pendingCurrent;
+        debugPrint(
+          '[WebP-Stream][download] chunk#$streamChunkCount key=$key '
+          '+${chunk.length} loaded=$pendingCurrent/${pendingTotal ?? -1}',
+        );
+      }
+      progressEvents.add(
+        ImageDownloadProgress(
+          currentBytes: pendingCurrent,
+          totalBytes: pendingTotal,
+          chunkBytes: chunk,
+        ),
+      );
+    }
+
+    final rawFuture = (() async {
+      try {
+        return await _downloadRawBytes(
+          requestUrl: requestUrl,
+          method: config.method,
+          headers: headers,
+          data: config.data,
+          cancelToken: cancelToken,
+          debugLabel: debugLabel,
+          preferLoadFailedOnRangeIgnored: config.onLoadFailed != null,
+          onProgress: (current, total) {
+            if (!progressEvents.isClosed) {
+              progressEvents.add(
+                ImageDownloadProgress(currentBytes: current, totalBytes: total),
+              );
+            }
+          },
+          onChunk: (current, total, chunk) {
+            if (!canStreamDecode) return;
+            pendingChunk.add(chunk);
+            pendingCurrent = current;
+            pendingTotal = total;
+            if (pendingChunk.length >= 64 * 1024) flushPendingChunk();
+          },
+          onReset: () {
+            flushPendingChunk();
+            if (!progressEvents.isClosed) {
+              progressEvents.add(
+                const ImageDownloadProgress(
+                  currentBytes: 0,
+                  totalBytes: null,
+                  reset: true,
+                ),
+              );
+            }
+          },
+        );
+      } finally {
+        flushPendingChunk();
+        await progressEvents.close();
+      }
+    })();
 
     await for (final event in progressEvents.stream) {
       yield event;
     }
     final raw = await rawFuture;
     final Uint8List data = raw.data;
+    if (streamDebug) {
+      debugPrint('[WebP-Stream][download] RAW-DONE key=$key bytes=${data.length}');
+    }
 
     if (raw.expectedBytes != null) {
       yield ImageDownloadProgress(
@@ -427,6 +612,8 @@ abstract class ImageDownloader {
     String? debugLabel,
     required bool preferLoadFailedOnRangeIgnored,
     void Function(int current, int? total)? onProgress,
+    void Function(int current, int? total, List<int> chunk)? onChunk,
+    void Function()? onReset,
   }) async {
     final state = _DownloadResumeState();
     try {
@@ -438,6 +625,7 @@ abstract class ImageDownloader {
         cancelToken: cancelToken,
         debugLabel: debugLabel,
         onProgress: onProgress,
+        onChunk: onChunk,
         state: state,
       );
     } catch (e) {
@@ -462,6 +650,8 @@ abstract class ImageDownloader {
         cancelToken: cancelToken,
         debugLabel: debugLabel,
         onProgress: onProgress,
+        onChunk: onChunk,
+        onReset: onReset,
         state: state,
       );
     }
@@ -476,6 +666,7 @@ abstract class ImageDownloader {
     CancelToken? cancelToken,
     String? debugLabel,
     void Function(int current, int? total)? onProgress,
+    void Function(int current, int? total, List<int> chunk)? onChunk,
     required _DownloadResumeState state,
   }) async {
     var attempts = 0;
@@ -552,6 +743,7 @@ abstract class ImageDownloader {
           state: state,
           cancelToken: cancelToken,
           onProgress: onProgress,
+          onChunk: onChunk,
         );
       } catch (e) {
         if (state.isComplete) {
@@ -583,6 +775,8 @@ abstract class ImageDownloader {
     CancelToken? cancelToken,
     String? debugLabel,
     void Function(int current, int? total)? onProgress,
+    void Function(int current, int? total, List<int> chunk)? onChunk,
+    void Function()? onReset,
     required _DownloadResumeState state,
   }) async {
     var attempts = 0;
@@ -621,6 +815,7 @@ abstract class ImageDownloader {
                 'status=${response.statusCode} url=$requestUrl',
           );
           state.resetDownloadedBytes();
+          onReset?.call();
         }
         final effectiveOffset = rangeAccepted ? resumeOffset : 0;
         state.expectedBytes = _expectedBytesFromResponse(
@@ -635,6 +830,7 @@ abstract class ImageDownloader {
           state: state,
           cancelToken: cancelToken,
           onProgress: onProgress,
+          onChunk: onChunk,
         );
       } catch (e) {
         if (state.isComplete) {
@@ -660,6 +856,7 @@ abstract class ImageDownloader {
     required _DownloadResumeState state,
     CancelToken? cancelToken,
     void Function(int current, int? total)? onProgress,
+    void Function(int current, int? total, List<int> chunk)? onChunk,
   }) async {
     var lastProgressTime = DateTime.fromMillisecondsSinceEpoch(0);
     const progressIntervalMs = 100;
@@ -667,6 +864,7 @@ abstract class ImageDownloader {
       if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
       state.add(chunk);
       final loaded = state.downloadedBytes;
+      onChunk?.call(loaded, state.expectedBytes, chunk);
       final now = DateTime.now();
       if (now.difference(lastProgressTime).inMilliseconds >=
           progressIntervalMs) {
@@ -817,10 +1015,14 @@ class ImageDownloadProgress {
   final int currentBytes;
   final int? totalBytes;
   final Uint8List? imageBytes;
+  final Uint8List? chunkBytes;
+  final bool reset;
 
   const ImageDownloadProgress({
     required this.currentBytes,
     required this.totalBytes,
     this.imageBytes,
+    this.chunkBytes,
+    this.reset = false,
   });
 }

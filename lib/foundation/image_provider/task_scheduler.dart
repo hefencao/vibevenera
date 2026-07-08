@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/image_fetch.dart';
+import 'package:venera/network/images.dart';
 
 import 'webp_image_provider.dart';
 
@@ -481,6 +482,7 @@ class DownloadExecution {
   Future<Uint8List> execute({
     CancelToken? cancelToken,
     void Function(int current, int? total)? onProgress,
+    void Function(ImageDownloadProgress event)? onEvent,
   }) async {
     if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
 
@@ -498,7 +500,9 @@ class DownloadExecution {
       cid,
       eid,
       chunkEvents: chunkEvents,
-      debugLabel: 'pipeline-download',
+      debugLabel: 'pipeline-download:$imageKey',
+      onEvent: onEvent,
+      cancelToken: cancelToken,
     );
 
     try {
@@ -529,6 +533,8 @@ class DownloadTask extends PolicyAwareTask {
   final List<Completer<Uint8List>> _completers = [];
   final List<StreamController<ImageChunkEvent>> _chunkControllers = [];
   final List<void Function(int current, int? total)> _progressCallbacks = [];
+  final List<void Function(ImageDownloadProgress event)> _eventCallbacks = [];
+  final List<void Function()> _disposeCallbacks = [];
   CancelToken? _cancelToken;
 
   DownloadTask({
@@ -542,6 +548,8 @@ class DownloadTask extends PolicyAwareTask {
     required String eid,
     this.fullKey,
     void Function(int current, int? total)? onProgress,
+    void Function(ImageDownloadProgress event)? onEvent,
+    void Function()? onDispose,
   }) : _exec = DownloadExecution(
          imageKey: imageKey,
          sourceKey: sourceKey,
@@ -549,6 +557,8 @@ class DownloadTask extends PolicyAwareTask {
          eid: eid,
        ) {
     if (onProgress != null) _progressCallbacks.add(onProgress);
+    if (onEvent != null) _eventCallbacks.add(onEvent);
+    if (onDispose != null) _disposeCallbacks.add(onDispose);
   }
 
   // ── Public API ──────────────────────────────────────────────
@@ -606,6 +616,11 @@ class DownloadTask extends PolicyAwareTask {
             }
           }
         },
+        onEvent: (event) {
+          for (final callback in _eventCallbacks) {
+            callback(event);
+          }
+        },
       );
 
       // [FIX-9] Check context still valid after async gap
@@ -623,6 +638,8 @@ class DownloadTask extends PolicyAwareTask {
         _rejectAll(e);
         TaskScheduler.instance.onTaskFailed(this);
       }
+    } finally {
+      disposeResources();
     }
   }
 
@@ -632,6 +649,11 @@ class DownloadTask extends PolicyAwareTask {
     _cancelToken = null;
     _chunkControllers.clear();
     _progressCallbacks.clear();
+    _eventCallbacks.clear();
+    for (final callback in _disposeCallbacks) {
+      callback();
+    }
+    _disposeCallbacks.clear();
   }
 
   @override
@@ -767,9 +789,16 @@ class _TaskRegistry {
   SchedulerTask? remove(String key) =>
       _running.remove(key) ?? _queued.remove(key);
 
-  /// [FIX-6] Update priorities only for queued tasks.
-  void updateQueuedPriorities(Map<String, int> newPriorities) {
+  /// Update priorities for queued and running tasks. Running priority matters
+  /// for later preemption decisions: a far-download promoted to current must
+  /// not remain the lowest-priority running task.
+  void updatePriorities(Map<String, int> newPriorities) {
     for (final entry in _queued.entries) {
+      if (newPriorities.containsKey(entry.key)) {
+        entry.value.priority = newPriorities[entry.key]!;
+      }
+    }
+    for (final entry in _running.entries) {
       if (newPriorities.containsKey(entry.key)) {
         entry.value.priority = newPriorities[entry.key]!;
       }
@@ -818,8 +847,8 @@ class _MigrationManager {
       registry.remove(t.key);
     }
 
-    // 2. Update priorities for queued tasks (not running)
-    registry.updateQueuedPriorities(newPriorities);
+    // 2. Update priorities before running-task cancellation/preemption checks.
+    registry.updatePriorities(newPriorities);
 
     // 3. Cancel running tasks not in active set
     for (final t in registry.runningNotIn(activeKeys)) {
@@ -923,6 +952,8 @@ class TaskScheduler {
       existing._completers.addAll(incoming._completers);
       existing._chunkControllers.addAll(incoming._chunkControllers);
       existing._progressCallbacks.addAll(incoming._progressCallbacks);
+      existing._eventCallbacks.addAll(incoming._eventCallbacks);
+      existing._disposeCallbacks.addAll(incoming._disposeCallbacks);
     } else if (existing is PrecreateTask && incoming is PrecreateTask) {
       existing._holderCompleters.addAll(incoming._holderCompleters);
     }
@@ -938,21 +969,26 @@ class TaskScheduler {
   }
 
   void _dispatchNext() {
-    if (_queue.isEmpty) return;
-    if (_registry.runningCount >= _maxConcurrent) {
-      _preemptLowestRunningFor(_queue.first);
-      if (_registry.runningCount >= _maxConcurrent) return;
-    }
-    final task = _queue.removeAt(0);
-    _registry.promoteToRunning(task);
-    scheduleMicrotask(() {
-      try {
-        task.execute();
-      } catch (e, st) {
-        debugPrint('[TaskScheduler] task execute error: $e\n$st');
-        onTaskFailed(task);
+    while (_queue.isNotEmpty) {
+      if (_registry.runningCount >= _maxConcurrent) {
+        _preemptLowestRunningFor(_queue.first);
+        if (_registry.runningCount >= _maxConcurrent) return;
       }
-    });
+      final task = _queue.removeAt(0);
+      _registry.promoteToRunning(task);
+      debugPrint(
+        '[TaskScheduler] DISPATCH ${task.key} pri=${task.priority} '
+        'running=${_registry.runningCount}/$_maxConcurrent',
+      );
+      scheduleMicrotask(() {
+        try {
+          task.execute();
+        } catch (e, st) {
+          debugPrint('[TaskScheduler] task execute error: $e\n$st');
+          onTaskFailed(task);
+        }
+      });
+    }
   }
 
   void _maybePreempt(
