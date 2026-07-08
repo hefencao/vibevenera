@@ -661,7 +661,7 @@ abstract mixin class _ReaderLocation {
         return false;
       }
       final hasAnimation = enablePageAnimation(cid, type);
-      if (hasAnimation) {
+      if (hasAnimation && (page - this.page).abs() <= 1) {
         _pendingPage = page;
         _animationCount++;
         update();
