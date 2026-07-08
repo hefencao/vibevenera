@@ -176,69 +176,108 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         padding: EdgeInsets.only(top: context.padding.top),
         decoration: BoxDecoration(
           color: context.colorScheme.surface.toOpacity(0.92),
-          border: Border(
-            bottom: BorderSide(color: Colors.grey.toOpacity(0.5), width: 0.5),
-          ),
         ),
-        child: Padding(
-          padding: EdgeInsets.only(
-            left: context.padding.left,
-            right: context.padding.right,
-          ),
-          child: Row(
-            children: [
-              const SizedBox(width: 8),
-              const BackButton(),
-              const SizedBox(width: 8),
-              Expanded(
-                child: epName == null
-                    ? Text(
-                        context.reader.widget.name,
-                        style: ts.s18,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
+        child: Stack(
+          children: [
+            Padding(
+              padding: EdgeInsets.only(
+                left: context.padding.left,
+                right: context.padding.right,
+              ),
+              child: Row(
+                children: [
+                  const SizedBox(width: 8),
+                  const BackButton(),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: epName == null
+                        ? Text(
                             context.reader.widget.name,
-                            style: ts.s16,
+                            style: ts.s18,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                context.reader.widget.name,
+                                style: ts.s16,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                epName,
+                                style: ts.s12,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ),
-                          Text(
-                            epName,
-                            style: ts.s12,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-              ),
-              const SizedBox(width: 8),
-              if (shouldShowChapterComments())
-                Tooltip(
-                  message: "Chapter Comments".tl,
-                  child: IconButton(
-                    icon: const Icon(Icons.comment),
-                    onPressed: openChapterComments,
                   ),
-                ),
-              Tooltip(
-                message: "Settings".tl,
-                child: IconButton(
-                  icon: const Icon(Icons.settings),
-                  onPressed: openSetting,
-                ),
+                  const SizedBox(width: 8),
+                  if (shouldShowChapterComments())
+                    Tooltip(
+                      message: "Chapter Comments".tl,
+                      child: IconButton(
+                        icon: const Icon(Icons.comment),
+                        onPressed: openChapterComments,
+                      ),
+                    ),
+                  Tooltip(
+                    message: "Settings".tl,
+                    child: IconButton(
+                      icon: const Icon(Icons.settings),
+                      onPressed: openSetting,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ),
-              const SizedBox(width: 8),
-            ],
-          ),
+            ),
+            Positioned(left: 0, right: 0, bottom: 0, child: buildTopDivider()),
+          ],
         ),
       ),
     );
+  }
+
+  Widget buildTopDivider() {
+    final hasSource = context.reader.type.comicSource != null;
+    final baseColor = Colors.grey.toOpacity(0.5);
+    if (!hasSource) return Container(height: 0.5, color: baseColor);
+    return ValueListenableBuilder<ReaderDownloadProgress>(
+      valueListenable: PipelineController.instance.currentDownloadProgress,
+      builder: (context, progress, _) {
+        if (!progress.active) return Container(height: 0.5, color: baseColor);
+        return Stack(
+          alignment: Alignment.bottomLeft,
+          children: [
+            Container(height: 0.5, color: baseColor),
+            SizedBox(
+              height: 2,
+              child: LinearProgressIndicator(
+                value: progress.totalBytes == null ? null : progress.progress,
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                color: _downloadProgressColor(progress.speedBytesPerSecond),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Color _downloadProgressColor(double bytesPerSecond) {
+    const base = 64 * 1024.0;
+    const max = 2 * 1024 * 1024.0;
+    final t = (math.log(1 + bytesPerSecond / base) / math.log(1 + max / base))
+        .clamp(0.0, 1.0);
+    return t < 0.5
+        ? Color.lerp(Colors.red, Colors.amber, t * 2)!
+        : Color.lerp(Colors.amber, Colors.green, (t - 0.5) * 2)!;
   }
 
   bool isLiked() {

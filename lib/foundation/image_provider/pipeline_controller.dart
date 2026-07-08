@@ -129,6 +129,42 @@ class ResourceEvent {
   ResourceEvent(this.fullKey, this.type);
 }
 
+class ReaderDownloadProgress {
+  final String imageKey;
+  final bool active;
+  final int currentBytes;
+  final int? totalBytes;
+  final double speedBytesPerSecond;
+
+  const ReaderDownloadProgress({
+    required this.imageKey,
+    required this.active,
+    required this.currentBytes,
+    required this.totalBytes,
+    required this.speedBytesPerSecond,
+  });
+
+  const ReaderDownloadProgress.idle()
+    : imageKey = '',
+      active = false,
+      currentBytes = 0,
+      totalBytes = null,
+      speedBytesPerSecond = 0;
+
+  double get progress {
+    final total = totalBytes;
+    if (total == null || total <= 0) return 0;
+    return (currentBytes / total).clamp(0.0, 1.0);
+  }
+}
+
+class _ProgressSample {
+  int bytes;
+  int ms;
+  double speed;
+  _ProgressSample(this.bytes, this.ms, this.speed);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // PipelineController
 // ═══════════════════════════════════════════════════════════════
@@ -139,6 +175,9 @@ class PipelineController {
 
   final ResourceManager resources = ResourceManager();
   final TaskScheduler _scheduler = TaskScheduler.instance;
+  final currentDownloadProgress = ValueNotifier<ReaderDownloadProgress>(
+    const ReaderDownloadProgress.idle(),
+  );
 
   void Function(
     String currentKey,
@@ -169,6 +208,8 @@ class PipelineController {
   final Map<String, StreamSubscription<ImageDownloadProgress>>
   _streamDecodeSubs = {};
   final Map<String, void Function()> _streamDecodeDisposers = {};
+  final Map<String, _ProgressSample> _progressSamples = {};
+  int _lastProgressNotifyMs = 0;
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -470,11 +511,13 @@ class PipelineController {
     // Submit work after holder ranges are published so newly created
     // holders immediately receive the correct current/near/far policy.
     _submitWork(_sourceKey, _cid, _eid);
+    _syncCurrentDownloadProgress();
   }
 
   void dispose() {
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
+    currentDownloadProgress.value = const ReaderDownloadProgress.idle();
     _scheduler.clear();
     resources.dispose();
   }
@@ -490,6 +533,15 @@ class PipelineController {
 
   void publishExternalBytes(String imageKey, Uint8List bytes) {
     _publishBytes(imageKey, bytes);
+  }
+
+  void publishExternalDownloadProgress(
+    String imageKey,
+    int current,
+    int? total, {
+    bool done = false,
+  }) {
+    _publishDownloadProgress(imageKey, current, total, done: done);
   }
 
   // ── Internal: priorities & policies ────────────────────────
@@ -650,6 +702,7 @@ class PipelineController {
         for (final peer in resources.getAllForImage(entry.imageKey)) {
           peer.download.updateProgress(current, total);
         }
+        _publishDownloadProgress(entry.imageKey, current, total);
       },
       onEvent: streamDecode?.onEvent,
       onDispose: streamDecode?.dispose,
@@ -924,6 +977,60 @@ class PipelineController {
       peer.download.inProgress = false;
       peer.download.lastError = null;
     }
+    _progressSamples.remove(imageKey);
+    if (imageKey == _currentKey) {
+      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
+    }
+  }
+
+  void _publishDownloadProgress(
+    String imageKey,
+    int current,
+    int? total, {
+    bool done = false,
+  }) {
+    for (final peer in resources.getAllForImage(imageKey)) {
+      peer.download.updateProgress(current, total);
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final old = _progressSamples[imageKey];
+    var speed = old?.speed ?? 0.0;
+    if (old != null && now > old.ms && current >= old.bytes) {
+      final instant = (current - old.bytes) * 1000.0 / (now - old.ms);
+      speed = speed <= 0 ? instant : speed * 0.7 + instant * 0.3;
+    }
+    _progressSamples[imageKey] = _ProgressSample(current, now, speed);
+    if (imageKey != _currentKey) return;
+    final complete = done || (total != null && total > 0 && current >= total);
+    if (complete) {
+      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
+      return;
+    }
+    if (now - _lastProgressNotifyMs < 100 && current > 0) return;
+    _lastProgressNotifyMs = now;
+    currentDownloadProgress.value = ReaderDownloadProgress(
+      imageKey: imageKey,
+      active: true,
+      currentBytes: current,
+      totalBytes: total,
+      speedBytesPerSecond: speed,
+    );
+  }
+
+  void _syncCurrentDownloadProgress() {
+    final entry = resources.get(_currentKey);
+    if (entry == null || entry.hasBytes || !entry.download.inProgress) {
+      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
+      return;
+    }
+    final sample = _progressSamples[_currentKey];
+    currentDownloadProgress.value = ReaderDownloadProgress(
+      imageKey: _currentKey,
+      active: true,
+      currentBytes: entry.download.currentBytes,
+      totalBytes: entry.download.totalBytes,
+      speedBytesPerSecond: sample?.speed ?? 0,
+    );
   }
 
   bool _prefetchBudgetExceededFor(ResourceEntry entry) {

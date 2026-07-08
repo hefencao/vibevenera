@@ -829,6 +829,12 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       debugLabel: 'webp-stream:$imageKey',
     ).listen(
       (event) {
+        PipelineController.instance.publishExternalDownloadProgress(
+          imageKey,
+          event.currentBytes,
+          event.totalBytes,
+          done: event.imageBytes != null,
+        );
         if (chunkEvents != null &&
             !chunkEvents.isClosed &&
             event.chunkBytes == null) {
@@ -976,6 +982,12 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       debugLabel: 'webp-resume:$imageKey',
     ).listen(
       (event) {
+        PipelineController.instance.publishExternalDownloadProgress(
+          imageKey,
+          event.currentBytes,
+          event.totalBytes,
+          done: event.imageBytes != null,
+        );
         if (!DecoderManager.instance.isActiveImageKey(imageKey)) {
           sub.cancel();
           onDone?.call();
@@ -1031,6 +1043,14 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       eid,
       chunkEvents: chunkEvents,
       debugLabel: 'webp-visible:$imageKey',
+      onEvent: (event) {
+        PipelineController.instance.publishExternalDownloadProgress(
+          imageKey,
+          event.currentBytes,
+          event.totalBytes,
+          done: event.imageBytes != null,
+        );
+      },
     );
   }
 
