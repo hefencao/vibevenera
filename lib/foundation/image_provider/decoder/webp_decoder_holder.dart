@@ -64,6 +64,7 @@ class DecoderHolder {
     _notifyCurrentBuffer();
     _pumpUpload();
     _requestFramesIfNeeded();
+    _completeRefillWaiters();
   }
 
   void updatePolicy(ResourcePolicy newPolicy) {
@@ -76,6 +77,7 @@ class DecoderHolder {
     if (!_policy.allowGpuUpload) _clearRawFrames();
     _pumpUpload();
     _requestFramesIfNeeded();
+    _completeRefillWaiters();
   }
 
   BufferedFrame? consumeFrame() {
@@ -205,24 +207,23 @@ class DecoderHolder {
     _isUploading = true;
     final outW = decoder.targetWidth;
     final outH = decoder.targetHeight;
+    final maxUploads = _state == PageState.current ? 2 : 1;
+    final inFlight = <Future<BufferedFrame>>[];
     try {
-      while (_frameBuffer.hasRawFrames) {
+      while (_frameBuffer.hasRawFrames || inFlight.isNotEmpty) {
         if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
           _clearRawFrames();
+          for (final f in inFlight) {
+            final frame = await f;
+            frame.image.dispose();
+          }
           break;
         }
-        final addr = _frameBuffer.removeRawFrame();
-        final rgba = Pointer<Uint8>.fromAddress(
-          addr.address,
-        ).asTypedList(outW * outH * 4);
-        final completer = Completer<BufferedFrame>();
-        ui.decodeImageFromPixels(rgba, outW, outH, ui.PixelFormat.rgba8888, (
-          img,
-        ) {
-          webp.nativePoolRelease(addr.address);
-          completer.complete(BufferedFrame(img, addr.durationMs));
-        });
-        final frame = await completer.future;
+        while (_frameBuffer.hasRawFrames && inFlight.length < maxUploads) {
+          inFlight.add(_uploadRawFrame(_frameBuffer.removeRawFrame(), outW, outH));
+        }
+        if (inFlight.isEmpty) break;
+        final frame = await inFlight.removeAt(0);
         if (_disposed || _pendingDispose || !_policy.allowGpuUpload) {
           frame.image.dispose();
           continue;
@@ -241,6 +242,22 @@ class DecoderHolder {
     }
   }
 
+  Future<BufferedFrame> _uploadRawFrame(
+    webp.WebPAnimFrameAddress addr,
+    int outW,
+    int outH,
+  ) {
+    final rgba = Pointer<Uint8>.fromAddress(
+      addr.address,
+    ).asTypedList(outW * outH * 4);
+    final completer = Completer<BufferedFrame>();
+    ui.decodeImageFromPixels(rgba, outW, outH, ui.PixelFormat.rgba8888, (img) {
+      webp.nativePoolRelease(addr.address);
+      completer.complete(BufferedFrame(img, addr.durationMs));
+    });
+    return completer.future;
+  }
+
   void _completeRefillWaiters() {
     refillSignal?.complete();
     refillSignal = null;
@@ -251,6 +268,15 @@ class DecoderHolder {
         bufferLength >= _firstFrameWatermark) {
       _completeRefillWaiters();
     }
+  }
+
+  void wakePlaybackWaiters() => _completeRefillWaiters();
+
+  void notifyStreamInputChanged() {
+    if (_disposed || _pendingDispose) return;
+    _streamEmptyDecodeCount = 0;
+    requestRefill();
+    _completeRefillWaiters();
   }
 
   void _clearRawFrames() => _frameBuffer.clearRawFrames();

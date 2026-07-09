@@ -1224,10 +1224,6 @@ void _updateWebPState(int page, BuildContext context) {
     debugPrint('[WebP] Page:$page (images=null, skip pre-download)');
     return;
   }
-  debugPrint(
-    '[WebP] Page:$page/${images.length} '
-    '(pre-download triggering for pages ahead)',
-  );
 
   final imageCtrl = reader._imageViewController;
   final cache = imageCtrl?.webpCache;

@@ -86,6 +86,7 @@ class WebPStreamDecodeCoordinator {
         holder?.clearBufferedFrames();
         holder?.updateStreamTransfer(0, null, reset: true);
         holder?.resetStreamPlaybackState();
+        holder?.notifyStreamInputChanged();
         appendedUntil = 0;
       }
       final chunk = event.chunkBytes;
@@ -101,7 +102,7 @@ class WebPStreamDecodeCoordinator {
         if (chunkEnd <= appendedUntil) {
           holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
           holder?.markStreamActive();
-          if (canDecode) holder?.requestRefill();
+          if (canDecode) holder?.notifyStreamInputChanged();
           return;
         }
         final data = chunkStart < appendedUntil
@@ -125,11 +126,11 @@ class WebPStreamDecodeCoordinator {
           h.updateStreamTransfer(event.currentBytes, event.totalBytes);
           h.markStreamActive();
           _publishHolder(resources, entry, h);
-          if (canDecode) holder?.requestRefill();
+          if (canDecode) holder?.notifyStreamInputChanged();
         } else {
           holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
           holder?.markStreamActive();
-          if (canDecode) holder?.requestRefill();
+          if (canDecode) holder?.notifyStreamInputChanged();
         }
       }
       if (event.imageBytes != null) {
@@ -144,7 +145,7 @@ class WebPStreamDecodeCoordinator {
             appendedUntil == 0 ? event.imageBytes! : Uint8List(0),
             isFinal: true,
           );
-          if (canDecode) holder?.requestRefill();
+          if (canDecode) holder?.notifyStreamInputChanged();
           if (holder == null) d.dispose();
         }
       }

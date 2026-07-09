@@ -74,6 +74,7 @@ class WebPPlaybackController {
 
   void dispose() {
     _disposed = true;
+    _activeHolder?.wakePlaybackWaiters();
     _progressiveSub?.cancel();
     _progressiveSub = null;
   }
@@ -262,6 +263,12 @@ class WebPPlaybackController {
     }
     if (holder.disposed) return;
     holder.refillSignal ??= Completer<void>();
+    if (currentHolder &&
+        holder.decoder.isStreaming &&
+        !holder.decoder.streamIsComplete) {
+      await holder.refillSignal!.future;
+      return;
+    }
     await Future.any([
       holder.refillSignal!.future,
       Future.delayed(WebPPlaybackTiming.emptyFrameWait(currentHolder)),

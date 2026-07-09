@@ -61,6 +61,7 @@ class _WebPStreamSession {
           decoder.resetStreamInput();
           holder?.clearBufferedFrames();
           holder?.resetStreamPlaybackState();
+          holder?.notifyStreamInputChanged();
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
@@ -91,7 +92,7 @@ class _WebPStreamSession {
               );
             }
           } else {
-            if (holder?.state == PageState.current) holder?.requestRefill();
+            holder?.notifyStreamInputChanged();
           }
         }
         final bytes = event.imageBytes;
@@ -103,7 +104,7 @@ class _WebPStreamSession {
           if (!decoder.isDisposed) {
             decoder.appendStreamChunk(Uint8List(0), isFinal: true);
           }
-          if (holder?.state == PageState.current) holder?.requestRefill();
+          holder?.notifyStreamInputChanged();
           if (!completer.isCompleted) {
             completer.complete(holder != null
                 ? _ProgressiveLoadResult.animated(holder!, sub)
@@ -209,6 +210,7 @@ class _WebPStreamSession {
           decoder.resetStreamInput();
           holder.clearBufferedFrames();
           holder.resetStreamPlaybackState();
+          holder.notifyStreamInputChanged();
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
@@ -219,8 +221,8 @@ class _WebPStreamSession {
               ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
               : chunk;
           appendedUntil = chunkEnd;
-          final ready = decoder.appendStreamChunk(data);
-          if (ready) holder.requestRefill();
+          decoder.appendStreamChunk(data);
+          holder.notifyStreamInputChanged();
         }
         final bytes = event.imageBytes;
         if (bytes != null) {
@@ -234,7 +236,7 @@ class _WebPStreamSession {
               isFinal: true,
             );
           }
-          holder.requestRefill();
+          holder.notifyStreamInputChanged();
           onDone?.call();
         }
       },

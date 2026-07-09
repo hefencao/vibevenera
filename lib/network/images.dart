@@ -368,7 +368,7 @@ class _PartialImageCache {
 
   Future<void> append(List<int> chunk) async {
     if (chunk.isEmpty) return;
-    _mem.add(Uint8List.sublistView(Uint8List.fromList(chunk)));
+    _mem.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
     if (!_dirReady) {
       await file.parent.create(recursive: true);
       _dirReady = true;
