@@ -74,17 +74,18 @@ lib/foundation/image_provider/
     webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
 ```
 
-Later, after behavior is stable, pipeline files can move under:
+Pipeline runtime split now starts under:
 
 ```text
-lib/foundation/image_provider/pipeline/
-  pipeline_controller.dart
-  preload_policy.dart
-  resource_entry.dart
-  resource_policy.dart
-  resource_manager.dart
-  task_scheduler.dart
+lib/foundation/image_provider/
+  task_scheduler.dart                 # imports + library shell
+  pipeline/
+    pipeline_resource.dart            # Interaction/Page/ResourcePolicy/ResourceEntry
+    task_runtime.dart                 # task base + DownloadTask/PrecreateTask
+    task_scheduler_runtime.dart       # registry/migration/scheduler dispatcher
 ```
+
+Later, after behavior is stable, `pipeline_controller.dart` / `preload_policy.dart` can also move under `image_provider/pipeline/`, and `PrecreateTask` should stop depending directly on `WebPImageProvider`.
 
 ## Renderer backend model
 

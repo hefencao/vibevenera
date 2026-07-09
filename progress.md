@@ -23,6 +23,7 @@
 - 已抽出 `WebPPlaybackController`，completer 只保留 Flutter 生命周期、chunk 上报、结果分发；播放循环/reload/resume 已迁出。
 - 已抽出 `webp_load_result.dart`，加载结果类型与 stream completer 解耦。
 - `WebPPlaybackController` 主循环已 helper 化，renderability/startup/null-frame 等等待逻辑独立。
+- 已按 runtime 边界拆分 `task_scheduler.dart`：resource/policy、task runtime、scheduler runtime 分文件，公共导入保持不变。
 
 ## 关键决策
 
@@ -36,7 +37,7 @@
 
 ## 未完成的代办
 
-1. 继续收窄 `WebPPlaybackController`：拆出 resume/reload 小状态机，降低播放控制器复杂度。
-2. 后续移动 pipeline 文件到 `image_provider/pipeline/`，并让 `TaskScheduler` 脱离 WebPImageProvider。
+1. 让 `PrecreateTask` 脱离 `WebPImageProvider.ensureHolder` 直接依赖，改为注入/注册 WebP holder factory。
+2. 后续移动 `pipeline_controller.dart` / `preload_policy.dart` 到 `image_provider/pipeline/`。
 3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
 4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。

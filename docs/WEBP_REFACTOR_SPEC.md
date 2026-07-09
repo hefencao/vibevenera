@@ -95,6 +95,24 @@ Acceptance:
 - Running download can continue after leaving active window.
 - Re-entering a page can attach/resume without restarting when a shared download exists.
 
+## Pipeline runtime split acceptance
+
+Split `task_scheduler.dart` into a small library shell and pipeline runtime parts:
+
+```text
+task_scheduler.dart
+pipeline/pipeline_resource.dart
+pipeline/task_runtime.dart
+pipeline/task_scheduler_runtime.dart
+```
+
+Acceptance:
+
+- No behavior change.
+- Existing imports of `task_scheduler.dart` continue to work.
+- Resource/policy types, task execution types, and scheduler/registry runtime are separated by file boundary.
+- `dart analyze` passes.
+
 ## Phase 4 playback controller acceptance
 
 Extract animation timing from `_WebPImageStreamCompleter`.
