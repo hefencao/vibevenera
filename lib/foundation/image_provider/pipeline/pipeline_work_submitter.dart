@@ -1,6 +1,8 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_progress_publisher.dart';
@@ -169,7 +171,7 @@ class PipelineWorkSubmitter {
           )) {
         return;
       }
-      debugPrint('[WebP-Stream][pipeline] STALE-DOWNLOAD ${entry.imageKey}');
+      Log.warning('WebP.Stream.Pipeline', 'STALE-DOWNLOAD ${entry.imageKey}');
       entry.download.inProgress = false;
       streamDecodes.markDownloadStale(entry);
     }

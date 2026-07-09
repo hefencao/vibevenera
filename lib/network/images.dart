@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
@@ -184,7 +183,8 @@ class _DownloadResumeState {
 
   _DownloadResumeState([this.partialCache, this.debugLabel]);
 
-  int get downloadedBytes => _baseBytes + _buffer.length;
+  int get downloadedBytes =>
+      partialCache?.memoryLength ?? _baseBytes + _buffer.length;
 
   bool get isComplete =>
       expectedBytes != null && downloadedBytes >= expectedBytes!;
@@ -275,14 +275,21 @@ class _DownloadResumeState {
   }
 
   Future<void> add(List<int> chunk) async {
-    _buffer.add(chunk);
-    if (_baseBytes == 0 && !_checkedDeclaredBytes && _buffer.length >= 12) {
-      _checkedDeclaredBytes = true;
-      setExpectedBytes(ImageDownloader._declaredWebPBytes(_buffer.toBytes()));
-    }
     final cache = partialCache;
-    if (cache == null || chunk.isEmpty) return;
+    if (chunk.isEmpty) return;
+    if (cache == null) {
+      _buffer.add(chunk);
+      if (_baseBytes == 0 && !_checkedDeclaredBytes && _buffer.length >= 12) {
+        _checkedDeclaredBytes = true;
+        setExpectedBytes(ImageDownloader._declaredWebPBytes(_buffer.toBytes()));
+      }
+      return;
+    }
     await cache.append(chunk);
+    if (!_checkedDeclaredBytes && downloadedBytes >= 12) {
+      _checkedDeclaredBytes = true;
+      setExpectedBytes(_declaredWebPBytesFromChunks(cache._mem.chunks));
+    }
     _pendingPartialBytes += chunk.length;
     if (_pendingPartialBytes >= _partialFlushBytes) await flushPartial();
   }
@@ -298,7 +305,7 @@ class _DownloadResumeState {
   }
 
   Future<Uint8List> takeBytes() async {
-    if (_baseBytes > 0) {
+    if (partialCache != null) {
       await closePartial();
       final bytes = await partialCache?.read();
       if (bytes != null && bytes.length >= downloadedBytes) {
@@ -335,6 +342,7 @@ class _PartialImageCache {
   Future<Uint8List?> read() async {
     final chunks = await readChunks();
     if (chunks == null || chunks.isEmpty) return null;
+    if (chunks.length == 1) return chunks.first;
     final builder = BytesBuilder(copy: false);
     for (final chunk in chunks) {
       builder.add(chunk);
@@ -433,6 +441,14 @@ abstract class ImageDownloader {
   static final Map<String, _SharedStream> _loadingImages = {};
   static const _rhttpMaxAttempts = 3;
   static const _ioMaxAttempts = 3;
+
+  static Uint8List _joinBytes(Iterable<Uint8List> chunks) {
+    final builder = BytesBuilder(copy: false);
+    for (final chunk in chunks) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
 
   static String _shortDownloadKey(String key) {
     if (key.length <= 96) return key;
@@ -785,15 +801,19 @@ abstract class ImageDownloader {
     }
     final canStreamDecode = config.modifyImage == null && config.onResponse == null;
     var streamChunkCount = 0;
-    var pendingChunk = BytesBuilder(copy: false);
+    var pendingChunks = <Uint8List>[];
+    var pendingLength = 0;
     var pendingCurrent = 0;
     int? pendingTotal;
 
     final progressEvents = StreamController<ImageDownloadProgress>();
     void flushPendingChunk() {
-      if (pendingChunk.length == 0 || progressEvents.isClosed) return;
-      final chunk = pendingChunk.takeBytes();
-      pendingChunk = BytesBuilder(copy: false);
+      if (pendingLength == 0 || progressEvents.isClosed) return;
+      final chunk = pendingChunks.length == 1
+          ? pendingChunks.first
+          : _joinBytes(pendingChunks);
+      pendingChunks = <Uint8List>[];
+      pendingLength = 0;
       streamChunkCount++;
       progressEvents.add(
         ImageDownloadProgress(
@@ -826,11 +846,13 @@ abstract class ImageDownloader {
           },
           onChunk: (current, total, chunk) {
             if (!canStreamDecode) return;
-            pendingChunk.add(chunk);
+            final data = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+            pendingChunks.add(data);
+            pendingLength += data.length;
             pendingCurrent = current;
             pendingTotal = total;
             final threshold = streamChunkCount == 0 ? 64 * 1024 : 256 * 1024;
-            if (pendingChunk.length >= threshold) flushPendingChunk();
+            if (pendingLength >= threshold) flushPendingChunk();
           },
         );
       } finally {
@@ -889,9 +911,10 @@ abstract class ImageDownloader {
       await state.replayPartial(onProgress: onProgress, onChunk: onChunk);
     } else if (resumeFromBytes != null) {
       if (state.downloadedBytes < resumeFromBytes) {
-        debugPrint(
-          '[WebP-Stream][partial] miss ${debugLabel ?? ''} '
-          'cache=${state.downloadedBytes} holder=$resumeFromBytes',
+        Log.warning(
+          'WebP.Stream.Partial',
+          'miss ${debugLabel ?? ''} '
+              'cache=${state.downloadedBytes} holder=$resumeFromBytes',
         );
       } else if (state.downloadedBytes > resumeFromBytes) {
         await state.replayPartial(
@@ -1146,18 +1169,18 @@ abstract class ImageDownloader {
     try {
       await for (final chunk in stream) {
         if (cancelToken?.isCancelled == true) throw Exception('Cancelled');
-        List<int> data = chunk;
+        Uint8List data;
         if (skip > 0) {
           if (chunk.length <= skip) {
             skip -= chunk.length;
             onProgress?.call(state.downloadedBytes, state.expectedBytes);
             continue;
           }
-          data = Uint8List.sublistView(
-            chunk is Uint8List ? chunk : Uint8List.fromList(chunk),
-            skip,
-          );
+          final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+          data = Uint8List.sublistView(bytes, skip);
           skip = 0;
+        } else {
+          data = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
         }
         await state.add(data);
         final loaded = state.downloadedBytes;

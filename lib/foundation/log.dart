@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/utils/ext.dart';
 import 'package:venera/utils/io.dart';
+import 'package:venera/utils/trace_log.dart';
 
 class LogItem {
   final LogLevel level;
@@ -30,12 +31,12 @@ class Log {
 
   static bool isMuted = false;
 
-  static void printWarning(String text) {
-    debugPrint('\x1B[33m$text\x1B[0m');
+  static void printWarning(String text, {String name = 'Venera.Warning'}) {
+    TraceLog.warning(name, text);
   }
 
-  static void printError(String text) {
-    debugPrint('\x1B[31m$text\x1B[0m');
+  static void printError(String text, {String name = 'Venera.Error'}) {
+    TraceLog.error(name, text);
   }
 
   static IOSink? _file;
@@ -59,12 +60,12 @@ class Log {
 
     switch (level) {
       case LogLevel.error:
-        printError(content);
+        printError(content, name: 'Venera.$title');
       case LogLevel.warning:
-        printWarning(content);
+        printWarning(content, name: 'Venera.$title');
       case LogLevel.info:
         if(kDebugMode) {
-          debugPrint(content);
+          TraceLog.info('Venera.$title', content);
         }
     }
 

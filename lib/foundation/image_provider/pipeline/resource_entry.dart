@@ -1,4 +1,6 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
+import 'package:venera/foundation/log.dart';
 
 // ───────────────────────────────────────────────────────────────
 // 1. Enums
@@ -309,9 +311,10 @@ class ResourceEntry {
   }
 
   void logTransition(String from, String to) {
-    debugPrint(
-      '[Resource] $_shortKey $from → $to '
-      '(dl=${_policy.allowDownload} dec=${_policy.allowDecode})',
+    Log.info(
+      'ImagePipeline.Resource',
+      '$_shortKey $from → $to '
+          '(dl=${_policy.allowDownload} dec=${_policy.allowDecode})',
     );
   }
 

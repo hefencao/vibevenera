@@ -113,7 +113,7 @@ class _WebPStreamSession {
         }
       },
       onError: (e) {
-        debugPrint('[WebP-Stream][visible] ERROR ${_short(_fullKey)} $e');
+        Log.warning('WebP.Stream.Visible', 'ERROR ${_short(_fullKey)} $e');
         final h = holder;
         if (h != null && h.decoder.isStreaming && !h.decoder.streamIsComplete) {
           h.markStreamDownloadClosed(e);
@@ -241,7 +241,10 @@ class _WebPStreamSession {
         }
       },
       onError: (e) {
-        debugPrint('[WebP-Stream][visible] RESUME-ERROR ${_short(_fullKey)} $e');
+        Log.warning(
+          'WebP.Stream.Visible',
+          'RESUME-ERROR ${_short(_fullKey)} $e',
+        );
         holder.markStreamDownloadClosed(e);
         onDone?.call();
       },

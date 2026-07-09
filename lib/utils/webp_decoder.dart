@@ -2,9 +2,10 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
+import 'package:venera/utils/trace_log.dart';
 
 /// WebP 图片格式信息
 class WebPImageInfo {
@@ -513,7 +514,7 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
 
     if (ctx == Pointer.fromAddress(0)) {
       nativeData._free();
-      debugPrint('[WebP-DECODER] createAnimDecoder FAILED');
+      TraceLog.error('WebP.Decoder', 'createAnimDecoder FAILED');
       return null;
     }
 
@@ -690,7 +691,11 @@ class WorkerPoolScheduler {
       await Isolate.spawn(_workerEntry, [receivePort.sendPort, index]);
       _workerPorts[index] = await receivePort.first as SendPort;
     } catch (e) {
-      debugPrint('[WebP-Worker] Failed to initialize worker $index: $e');
+      TraceLog.error(
+        'WebP.Worker',
+        'Failed to initialize worker $index',
+        error: e,
+      );
     } finally {
       _isInitializing[index] = false;
     }
@@ -707,7 +712,11 @@ class WorkerPoolScheduler {
     try {
       bindings = _WebPBindings(_loadLibrary());
     } catch (e) {
-      debugPrint('[WebP-Worker] w$workerIndex lib load FAILED: $e');
+      TraceLog.error(
+        'WebP.Worker',
+        'w$workerIndex lib load FAILED',
+        error: e,
+      );
     }
 
     receivePort.listen((message) {
@@ -778,7 +787,12 @@ class WorkerPoolScheduler {
           replyPort.send(Int64List(0));
         }
       } catch (e, stack) {
-        debugPrint('[WebP-Worker] w$workerIndex crash: $e\n$stack');
+        TraceLog.error(
+          'WebP.Worker',
+          'w$workerIndex crash',
+          error: e,
+          stackTrace: stack,
+        );
         replyPort.send('Error: $e');
       }
     });
@@ -815,7 +829,12 @@ class WorkerPoolScheduler {
         await _ensureWorker(1);
         await _processQueues();
       } catch (e, stack) {
-        debugPrint('[WebP-Worker] ERROR: $e\n$stack');
+        TraceLog.error(
+          'WebP.Worker',
+          'scheduler error',
+          error: e,
+          stackTrace: stack,
+        );
       } finally {
         _isProcessing = false;
       }
@@ -922,11 +941,18 @@ class WorkerPoolScheduler {
           job.onComplete([]);
         }
       } else {
-        debugPrint('[WebP-Worker] w$workerIndex error: $result');
+        TraceLog.error(
+          'WebP.Worker',
+          'w$workerIndex error: $result',
+        );
         job.onComplete([]);
       }
     } catch (e) {
-      debugPrint('[WebP-Worker] w$workerIndex exception: $e');
+      TraceLog.error(
+        'WebP.Worker',
+        'w$workerIndex exception',
+        error: e,
+      );
       job.onComplete([]);
     } finally {
       _activeDecoders.remove(job.decoderAddress);

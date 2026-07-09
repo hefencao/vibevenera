@@ -144,9 +144,9 @@ class WebPPlaybackController {
         );
         playback.markResumeStarted();
       } else if (holder.streamFailed) {
-        debugPrint(
-          '[WebP-Stream][visible] RELOAD failed-stream ${holder.shortKey} '
-          '${holder.streamError}',
+        Log.warning(
+          'WebP.Stream.Visible',
+          'RELOAD failed-stream ${holder.shortKey} ${holder.streamError}',
         );
         final nh = await _reloadAndRestart(
           holder,

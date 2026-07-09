@@ -1,7 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
@@ -196,7 +197,10 @@ class WebPStreamDecodeCoordinator {
         handle.onEvent(event);
       },
       onError: (e) {
-        debugPrint('[WebP-Stream][pipeline] ATTACH-ERROR ${entry.imageKey} $e');
+        Log.warning(
+          'WebP.Stream.Pipeline',
+          'ATTACH-ERROR ${entry.imageKey} $e',
+        );
         detach(entry.fullKey);
       },
       onDone: () => detach(entry.fullKey),

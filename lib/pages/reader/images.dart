@@ -1221,7 +1221,7 @@ void _updateWebPState(int page, BuildContext context) {
   final reader = context.reader;
   final images = reader.images;
   if (images == null) {
-    debugPrint('[WebP] Page:$page (images=null, skip pre-download)');
+    Log.info('WebP.Reader', 'Page:$page images=null, skip pre-download');
     return;
   }
 

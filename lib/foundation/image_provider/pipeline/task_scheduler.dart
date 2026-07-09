@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
+import 'package:venera/foundation/log.dart';
 
 import 'tasks.dart';
 
@@ -245,7 +245,7 @@ class TaskScheduler {
         try {
           task.execute();
         } catch (e, st) {
-          debugPrint('[TaskScheduler] task execute error: $e\n$st');
+          Log.error('ImagePipeline.TaskScheduler', e, st);
           onTaskFailed(task);
         }
       });
