@@ -19,6 +19,7 @@
 - 已生成 WebP 重构 ARCHITECTURE/SPEC。
 - `webp_image_provider.dart` 已用 `part` 拆分，主文件约 143 行。
 - 已抽出 `WebPFrameBuffer`、provider loader/static、holder、decode service、manager、completer part。
+- 已抽出 `WebPStreamSession`，visible streaming / resume streaming 由 session 承载，loader 保留薄代理。
 
 ## 关键决策
 
@@ -32,8 +33,7 @@
 
 ## 未完成的代办
 
-1. 抽出 `WebPStreamSession`，集中管理 append chunk、resume、partial cache、progress publish。
-2. 抽出播放控制器，减少 `_WebPImageStreamCompleter` 中的 timer/loop/wait 逻辑。
-3. 后续移动 pipeline 文件到 `image_provider/pipeline/`，并让 `TaskScheduler` 脱离 WebPImageProvider。
-4. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
-5. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。
+1. 抽出播放控制器，减少 `_WebPImageStreamCompleter` 中的 timer/loop/wait 逻辑。
+2. 后续移动 pipeline 文件到 `image_provider/pipeline/`，并让 `TaskScheduler` 脱离 WebPImageProvider。
+3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
+4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。
