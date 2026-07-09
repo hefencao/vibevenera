@@ -42,6 +42,7 @@ webp/webp_decode_service.dart
 webp/webp_decoder_manager.dart
 webp/webp_provider_static.dart
 webp/webp_provider_loader.dart
+webp/webp_provider_decode.dart
 webp/webp_stream_session.dart
 webp/webp_stream_load.dart
 webp/webp_stream_resume.dart
