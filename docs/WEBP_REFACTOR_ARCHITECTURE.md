@@ -95,6 +95,7 @@ lib/foundation/image_provider/pipeline/
   tasks.dart                    # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
   task_scheduler.dart           # registry, migration, queue dispatch only
   preload_policy.dart           # water-level and relative-page tables
+  pipeline_window.dart          # dynamic page window/offset calculation
   download_progress_publisher.dart # current-page progress state and speed sampling
   download_ranker.dart          # download priority score formula
   prefetch_budget.dart          # platform-aware far-page byte budget

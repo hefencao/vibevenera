@@ -7,6 +7,7 @@ import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_progress_publisher.dart';
 import 'download_ranker.dart';
+import 'pipeline_window.dart';
 import 'preload_policy.dart';
 import 'prefetch_budget.dart';
 import 'resource_entry.dart';
@@ -43,6 +44,7 @@ class PipelineController {
   ValueNotifier<ReaderDownloadProgress> get currentDownloadProgress =>
       _progress.notifier;
   final PrefetchBudget _prefetchBudget = const PrefetchBudget();
+  final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
 
   void Function(
     String currentKey,
@@ -219,83 +221,35 @@ class PipelineController {
   }
 
   void _applyWindow({bool protectJump = false}) {
-    String fk(int i) => (i >= 0 && i < _images.length) ? _images[i] : '';
-
-    if (_windowRuleIndex < 0) {
-      _windowRuleIndex = DynamicPreloadPolicy.ruleIndexFor(
-        currentBufferedFrames: _currentBufferedFrames,
-        preloadCount: _preloadCount,
-      );
-    }
-    final window = DynamicPreloadPolicy.windowAt(_windowRuleIndex);
-    _windowKey = window.key;
-
-    _currentKey = fk(_currentIdx);
-    _nearKeys.clear();
-    _prevKeys.clear();
-    _farKeys.clear();
-    _keepKeys.clear();
-    _offsetByKey.clear();
-
-    final offsets = DynamicPreloadPolicy.offsetsFor(
+    final plan = _windowPlanner.build(
+      currentIdx: _currentIdx,
+      stableIdx: _stableIdx,
+      images: _images,
+      currentBufferedFrames: _currentBufferedFrames,
       preloadCount: _preloadCount,
-      window: window,
-      direction: _readDirection,
+      existingRuleIndex: _windowRuleIndex,
+      readDirection: _readDirection,
+      interaction: _interaction,
+      protectJump: protectJump,
     );
-
-    for (final offset in offsets.decodeNext) {
-      final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) {
-        _nearKeys.add(k);
-        _offsetByKey[k] = offset;
-      }
-    }
-    for (final offset in offsets.decodePrev) {
-      final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) {
-        _prevKeys.add(k);
-        _offsetByKey[k] = offset;
-      }
-    }
-    for (final offset in offsets.downloadOnly) {
-      final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) {
-        _farKeys.add(k);
-        _offsetByKey[k] = offset;
-      }
-    }
-    for (final offset in offsets.keep) {
-      final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) {
-        _keepKeys.add(k);
-        _offsetByKey[k] = offset;
-      }
-    }
-    if (_interaction == InteractionState.dragging) {
-      final offset = _readDirection >= 0 ? 1 : -1;
-      final k = fk(_currentIdx + offset);
-      if (k.isNotEmpty) {
-        if (offset > 0) {
-          _nearKeys.add(k);
-        } else {
-          _prevKeys.add(k);
-        }
-        _farKeys.remove(k);
-        _keepKeys.remove(k);
-        _offsetByKey[k] = offset;
-      }
-    }
-    if (_currentKey.isNotEmpty) _offsetByKey[_currentKey] = 0;
-    if (protectJump) {
-      final stableKey = fk(_stableIdx);
-      if (stableKey.isNotEmpty && stableKey != _currentKey) {
-        _nearKeys.remove(stableKey);
-        _prevKeys.remove(stableKey);
-        _farKeys.remove(stableKey);
-        _keepKeys.add(stableKey);
-        _offsetByKey[stableKey] = _stableIdx - _currentIdx;
-      }
-    }
+    _windowRuleIndex = plan.ruleIndex;
+    _windowKey = plan.windowKey;
+    _currentKey = plan.currentKey;
+    _nearKeys
+      ..clear()
+      ..addAll(plan.nearKeys);
+    _prevKeys
+      ..clear()
+      ..addAll(plan.prevKeys);
+    _farKeys
+      ..clear()
+      ..addAll(plan.farKeys);
+    _keepKeys
+      ..clear()
+      ..addAll(plan.keepKeys);
+    _offsetByKey
+      ..clear()
+      ..addAll(plan.offsetByKey);
 
     // Ensure entries exist
     String fullKey(String k) => _targetW > 0 ? '$k@${_targetW}x$_targetH' : k;

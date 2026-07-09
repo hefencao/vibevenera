@@ -27,6 +27,7 @@
 - 已按目录边界移动到 `pipeline/`、`decoder/`、`runtime/`、`cache/`、`io/`；通用文件去掉 `webp`，WebP 专用文件保留 `webp_` 前缀。
 - 已开始非 `part` 拆分的真实重构：`WebPStreamDecodeCoordinator` 承载 pipeline 流式解码 attach/append/detach，`DownloadProgressPublisher` 承载当前页进度和速度采样。
 - 已抽出 `DownloadRanker` 与 `PrefetchBudget`，下载评分和移动端/桌面预下载预算不再散落在 `PipelineController`。
+- 已抽出 `PipelineWindowPlanner`，动态窗口/相对页码/跳页保护窗口计算从 `PipelineController` 分离。
 
 ## 关键决策
 
@@ -40,7 +41,7 @@
 
 ## 未完成的代办
 
-1. 继续按行为边界收窄 `PipelineController`：下一步优先拆出 window/policy application 或 work submission。
+1. 继续按行为边界收窄 `PipelineController`：下一步优先拆出 policy application 或 work submission。
 2. 继续按行为边界收窄 IO：`image_loader.dart` 仍包含 disk cache 读取，后续可评估 cache/file/network loader 的接口收敛。
 3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
 4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。
