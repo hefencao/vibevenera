@@ -24,6 +24,7 @@ part 'webp/webp_decoder_manager.dart';
 part 'webp/webp_provider_static.dart';
 part 'webp/webp_stream_session.dart';
 part 'webp/webp_provider_loader.dart';
+part 'webp/webp_playback_controller.dart';
 part 'webp/webp_stream_completer.dart';
 
 class WebPImageProvider extends ImageProvider<WebPImageProvider> {
