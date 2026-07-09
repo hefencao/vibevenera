@@ -64,7 +64,9 @@ class WebPStreamDecodeCoordinator {
     if (holder != null) _publishHolder(resources, entry, holder);
 
     void dispose() {
+      stopped = true;
       _attached.remove(entry.fullKey);
+      _disposers.remove(entry.fullKey);
       final d = decoder;
       if (holder != null &&
           !completed &&
@@ -76,6 +78,7 @@ class WebPStreamDecodeCoordinator {
       }
       if (holder == null && d != null && !d.isDisposed) d.dispose();
     }
+    _disposers[entry.fullKey] = dispose;
 
     void onEvent(ImageDownloadProgress event) {
       if (stopped) return;

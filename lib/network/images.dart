@@ -883,7 +883,8 @@ abstract class ImageDownloader {
             pendingChunk.add(chunk);
             pendingCurrent = current;
             pendingTotal = total;
-            if (pendingChunk.length >= 64 * 1024) flushPendingChunk();
+            final threshold = streamChunkCount == 0 ? 64 * 1024 : 256 * 1024;
+            if (pendingChunk.length >= threshold) flushPendingChunk();
           },
         );
       } finally {

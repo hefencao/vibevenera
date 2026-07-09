@@ -2,18 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
-import 'package:venera/foundation/image_provider/webp_image_provider.dart';
-import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_progress_publisher.dart';
 import 'download_ranker.dart';
 import 'pipeline_policy_applier.dart';
 import 'pipeline_window.dart';
 import 'preload_policy.dart';
-import 'prefetch_budget.dart';
+import 'pipeline_work_submitter.dart';
 import 'resource_entry.dart';
 import 'resource_manager.dart';
-import 'tasks.dart';
 import 'task_scheduler.dart';
 import 'webp_stream_decode_coordinator.dart';
 
@@ -44,7 +41,6 @@ class PipelineController {
   final DownloadProgressPublisher _progress = DownloadProgressPublisher();
   ValueNotifier<ReaderDownloadProgress> get currentDownloadProgress =>
       _progress.notifier;
-  final PrefetchBudget _prefetchBudget = const PrefetchBudget();
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
   final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
@@ -67,6 +63,7 @@ class PipelineController {
   int _currentBufferedFrames = 0;
   int _windowKey = -1;
   int _windowRuleIndex = -1;
+  int _sessionId = 0;
   int? _provisionalIdx;
   Timer? _jumpProtectionTimer;
   List<String> _images = const [];
@@ -75,6 +72,14 @@ class PipelineController {
   String _eid = '';
   final WebPStreamDecodeCoordinator _streamDecodes =
       WebPStreamDecodeCoordinator();
+  late final PipelineWorkSubmitter _workSubmitter = PipelineWorkSubmitter(
+    resources: resources,
+    scheduler: _scheduler,
+    streamDecodes: _streamDecodes,
+    progress: _progress,
+    currentKey: () => _currentKey,
+    isSessionActive: (session) => session == _sessionId,
+  );
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -303,16 +308,46 @@ class PipelineController {
 
     // Submit work after holder ranges are published so newly created
     // holders immediately receive the correct current/near/far policy.
-    _submitWork(_sourceKey, _cid, _eid);
-    _syncCurrentDownloadProgress();
+    _workSubmitter.submit(
+      sourceKey: _sourceKey,
+      cid: _cid,
+      eid: _eid,
+      targetWidth: _targetW,
+      targetHeight: _targetH,
+      cache: _cache,
+      session: _sessionId,
+    );
+    _workSubmitter.syncCurrentDownloadProgress();
   }
 
   void dispose() {
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
+    _sessionId++;
     _progress.reset();
+    _streamDecodes.clear();
     _scheduler.clear();
     resources.dispose();
+  }
+
+  void detachReaderSession() {
+    _sessionId++;
+    _jumpProtectionTimer?.cancel();
+    _jumpProtectionTimer = null;
+    _provisionalIdx = null;
+    onWindowChanged = null;
+    _progress.reset();
+    _streamDecodes.clear();
+    _scheduler.migrateTasks(const <String>{}, const <String, int>{});
+    resources.clear();
+    _images = const [];
+    _cache = null;
+    _currentKey = '';
+    _nearKeys.clear();
+    _prevKeys.clear();
+    _farKeys.clear();
+    _keepKeys.clear();
+    _offsetByKey.clear();
   }
 
   void publishExternalHolder(String imageKey, String fullKey, dynamic holder) {
@@ -325,7 +360,7 @@ class PipelineController {
   }
 
   void publishExternalBytes(String imageKey, Uint8List bytes) {
-    _publishBytes(imageKey, bytes);
+    _workSubmitter.publishBytes(imageKey, bytes);
   }
 
   void publishExternalDownloadProgress(
@@ -334,7 +369,12 @@ class PipelineController {
     int? total, {
     bool done = false,
   }) {
-    _publishDownloadProgress(imageKey, current, total, done: done);
+    _workSubmitter.publishDownloadProgress(
+      imageKey,
+      current,
+      total,
+      done: done,
+    );
   }
 
   bool hasStreamDecodeAttached(String fullKey) =>
@@ -373,223 +413,4 @@ class PipelineController {
     return idx < 0 ? 1 << 20 : idx - _currentIdx;
   }
 
-  // ── Internal: work submission (split by stage) ──────────────
-
-  void _submitWork(String? sourceKey, String cid, String eid) {
-    final entries = <ResourceEntry>[];
-    resources.forEach(entries.add);
-    entries.sort((a, b) => _entrySubmitRank(b).compareTo(_entrySubmitRank(a)));
-    for (final entry in entries) {
-      _evaluateEntry(entry, sourceKey, cid, eid);
-    }
-  }
-
-  int _entrySubmitRank(ResourceEntry entry) {
-    final d = entry.policy.downloadPriority;
-    final p = entry.policy.decodePriority;
-    return d > p ? d : p;
-  }
-
-  void _evaluateEntry(
-    ResourceEntry entry,
-    String? sourceKey,
-    String cid,
-    String eid,
-  ) {
-    _submitDownload(entry, sourceKey, cid, eid);
-    _submitDecode(entry, sourceKey, cid, eid);
-    _submitEviction(entry);
-  }
-
-  void _submitDownload(
-    ResourceEntry entry,
-    String? sourceKey,
-    String cid,
-    String eid,
-  ) {
-    if (entry.priority == PagePriority.current) {
-      debugPrint(
-        '[WebP-Stream][pipeline] download-eval key=${entry.imageKey} '
-        'hasBytes=${entry.hasBytes} inProgress=${entry.download.inProgress} '
-        'allowD=${entry.policy.allowDownload} allowDecode=${entry.policy.allowDecode}',
-      );
-    }
-    if (!entry.policy.allowDownload) return;
-    if (entry.hasBytes) return;
-    final l2Bytes = _cache?.getL2(entry.imageKey);
-    if (l2Bytes != null) {
-      _publishBytes(entry.imageKey, l2Bytes);
-      return;
-    }
-    for (final peer in resources.getAllForImage(entry.imageKey)) {
-      if (peer.bytes != null) {
-        _publishBytes(entry.imageKey, peer.bytes!);
-        return;
-      }
-    }
-    if (entry.download.inProgress) {
-      final attached = _streamDecodes.attachToRunningDownload(
-        entry,
-        sourceKey,
-        cid,
-        eid,
-        resources: resources,
-        targetWidth: _targetW,
-        targetHeight: _targetH,
-      );
-      if (attached ||
-          _scheduler.hasTask(entry.imageKey) ||
-          _streamDecodes.isDownloadLoading(
-            entry.imageKey,
-            sourceKey,
-            cid,
-            eid,
-          )) {
-        return;
-      }
-      debugPrint('[WebP-Stream][pipeline] STALE-DOWNLOAD ${entry.imageKey}');
-      entry.download.inProgress = false;
-      _streamDecodes.markDownloadStale(entry);
-    }
-    if (_prefetchBudgetExceededFor(entry)) return;
-
-    entry.download.inProgress = true;
-    final streamDecode = _streamDecodes.start(
-      entry,
-      resources: resources,
-      targetWidth: _targetW,
-      targetHeight: _targetH,
-    );
-    final task = DownloadTask(
-      key: entry.imageKey,
-      imageKey: entry.imageKey,
-      fullKey: entry.fullKey,
-      generation: entry.generation,
-      priority: entry.policy.downloadPriority,
-      cancelable: true,
-      sourceKey: sourceKey,
-      cid: cid,
-      eid: eid,
-      onProgress: (current, total) {
-        for (final peer in resources.getAllForImage(entry.imageKey)) {
-          peer.download.updateProgress(current, total);
-        }
-        _publishDownloadProgress(entry.imageKey, current, total);
-      },
-      onEvent: streamDecode?.onEvent,
-      onDispose: streamDecode?.dispose,
-    );
-    task
-        .register()
-        .then((bytes) {
-          _publishBytes(entry.imageKey, bytes);
-          if (_cache != null && webp.isWebP(bytes)) {
-            _cache!.putL2(entry.imageKey, bytes);
-          }
-          // Cascade: bytes ready → maybe decode
-          for (final peer in resources.getAllForImage(entry.imageKey)) {
-            _submitDecode(peer, sourceKey, cid, eid);
-          }
-        })
-        .catchError((_) {
-          entry.download.inProgress = false;
-          _streamDecodes.detach(entry.fullKey);
-        });
-    task.setContext(ExecutionContext(entry));
-    _scheduler.submit(task);
-  }
-
-  void _submitDecode(
-    ResourceEntry entry,
-    String? sourceKey,
-    String cid,
-    String eid,
-  ) {
-    if (entry.priority == PagePriority.current) {
-      debugPrint(
-        '[WebP-Stream][pipeline] decode-eval key=${entry.imageKey} '
-        'hasBytes=${entry.hasBytes} hasHolder=${entry.hasHolder} '
-        'inProgress=${entry.decode.inProgress} allow=${entry.policy.allowDecode}',
-      );
-    }
-    if (!entry.policy.allowDecode) return;
-    if (entry.hasHolder) return;
-    if (!entry.hasBytes) return;
-    if (entry.decode.inProgress) return;
-    if (entry.decode.isInBackoff) return;
-
-    entry.decode.inProgress = true;
-    final task = PrecreateTask(
-      key: entry.fullKey,
-      imageKey: entry.imageKey,
-      generation: entry.generation,
-      priority: entry.policy.decodePriority,
-      cancelable: true,
-      sourceKey: sourceKey,
-      cid: cid,
-      eid: eid,
-      holderFactory: WebPImageProvider.ensureHolder,
-      targetWidth: _targetW,
-      targetHeight: _targetH,
-      scale: 1.0,
-      cache: _cache,
-      providedBytes: entry.bytes,
-    );
-    task
-        .register()
-        .then((holder) {
-          if (holder == null) {
-            entry.decode.markFailure('No animated WebP holder created');
-            return;
-          }
-          entry.holder = holder;
-          entry.decode.markSuccess();
-        })
-        .catchError((e) {
-          entry.decode.markFailure(e);
-        });
-    task.setContext(ExecutionContext(entry));
-    _scheduler.submit(task);
-  }
-
-  void _submitEviction(ResourceEntry entry) {
-    if (!entry.policy.allowEviction) return;
-    if (!entry.hasBytes && !entry.hasHolder) return;
-    resources.release(entry);
-  }
-
-  void _publishBytes(String imageKey, Uint8List bytes) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      peer.bytes = bytes;
-      peer.download.inProgress = false;
-      peer.download.lastError = null;
-    }
-    _progress.complete(imageKey, _currentKey);
-  }
-
-  void _publishDownloadProgress(
-    String imageKey,
-    int current,
-    int? total, {
-    bool done = false,
-  }) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      peer.download.updateProgress(current, total);
-    }
-    _progress.update(
-      imageKey,
-      current,
-      total,
-      currentKey: _currentKey,
-      done: done,
-    );
-  }
-
-  void _syncCurrentDownloadProgress() {
-    _progress.syncCurrent(_currentKey, resources.get(_currentKey));
-  }
-
-  bool _prefetchBudgetExceededFor(ResourceEntry entry) {
-    return _prefetchBudget.exceededFor(entry, resources);
-  }
 }

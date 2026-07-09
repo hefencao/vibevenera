@@ -219,6 +219,7 @@ void webp_init_native(void) {
 }
 
 #define POOL_MAX_SIZE 18
+#define STREAM_DEMUX_REFRESH_BYTES (512 * 1024)
 
 /* ─── 微秒级计时 ─── */
 static int64_t now_us() {
@@ -366,6 +367,7 @@ struct WebPAnimStreamContext {
     uint8_t* data;
     size_t size;
     size_t capacity;
+    size_t last_demux_size;
     int is_final;
 
     WebPDemuxer* demux;
@@ -682,6 +684,10 @@ int webp_anim_decoder_alive_count(void) {
 static int stream_refresh_demux_locked(WebPAnimStreamContext* ctx) {
     if (!ctx || !ctx->data || ctx->size < 12) return 0;
     if (!ctx->demux_dirty && ctx->demux) return ctx->initialized;
+    if (ctx->initialized && ctx->demux && !ctx->is_final && ctx->last_demux_size > 0 &&
+        ctx->size - ctx->last_demux_size < STREAM_DEMUX_REFRESH_BYTES) {
+        return ctx->initialized;
+    }
     WebPData webp_data = {ctx->data, ctx->size};
     WebPDemuxState state = WEBP_DEMUX_PARSE_ERROR;
     WebPDemuxer* demux = WebPDemuxPartial(&webp_data, &state);
@@ -690,6 +696,7 @@ static int stream_refresh_demux_locked(WebPAnimStreamContext* ctx) {
     if (ctx->demux) WebPDemuxDelete(ctx->demux);
     ctx->demux = demux;
     ctx->demux_dirty = 0;
+    ctx->last_demux_size = ctx->size;
 
     int orig_w = WebPDemuxGetI(demux, WEBP_FF_CANVAS_WIDTH);
     int orig_h = WebPDemuxGetI(demux, WEBP_FF_CANVAS_HEIGHT);
@@ -740,6 +747,10 @@ int webp_anim_stream_decoder_append(WebPAnimStreamContext* ctx,
     if (data && size > 0) {
         size_t need = ctx->size + size;
         if (need > ctx->capacity) {
+            if (ctx->demux) {
+                WebPDemuxDelete(ctx->demux);
+                ctx->demux = NULL;
+            }
             size_t cap = ctx->capacity ? ctx->capacity : 65536;
             while (cap < need) cap *= 2;
             uint8_t* p = (uint8_t*)realloc(ctx->data, cap);
@@ -764,6 +775,7 @@ void webp_anim_stream_decoder_reset_input(WebPAnimStreamContext* ctx) {
     pthread_mutex_lock(&ctx->mutex);
     if (ctx->demux) { WebPDemuxDelete(ctx->demux); ctx->demux = NULL; }
     ctx->size = 0; ctx->is_final = 0; ctx->demux_state = WEBP_DEMUX_PARSE_ERROR;
+    ctx->last_demux_size = 0;
     ctx->demux_dirty = 1;
     ctx->current_frame_num = 0; ctx->current_loop = 0; ctx->prev_dispose = -1;
     if (ctx->composite_canvas) memset(ctx->composite_canvas, 0, (size_t)ctx->target_w * ctx->target_h * 4);

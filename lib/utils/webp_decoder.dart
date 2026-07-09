@@ -633,11 +633,12 @@ class WorkerPoolScheduler {
 
   int decoderEpoch(int decoderAddress) => _decoderEpochs[decoderAddress] ?? 0;
 
-  void invalidateDecoder(int decoderAddress) {
+  bool invalidateDecoder(int decoderAddress) {
     _decoderEpochs[decoderAddress] = decoderEpoch(decoderAddress) + 1;
     _currentQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
     _nextQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
     _bgQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
+    return _activeDecoders.contains(decoderAddress);
   }
 
   bool _isStale(DecodeJob job) =>

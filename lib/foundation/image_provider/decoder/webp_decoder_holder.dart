@@ -118,13 +118,16 @@ class DecoderHolder {
   /// Called by [HolderDecodeService] with decoded frame addresses.
   void onFramesDecoded(List<webp.WebPAnimFrameAddress> frames, int token) {
     if (token != _decodeToken) {
+      _decodeInFlight = false;
       WebPFrameBuffer.releaseRawFrames(frames);
+      _disposeIfPendingAfterDecode();
       return;
     }
     _decodeInFlight = false;
     if (_disposed || _pendingDispose) {
       WebPFrameBuffer.releaseRawFrames(frames);
       _completeRefillWaiters();
+      _disposeIfPendingAfterDecode();
       return;
     }
     if (frames.isEmpty) {
@@ -360,6 +363,17 @@ class DecoderHolder {
 
   void dispose() {
     if (_disposed) return;
+    if (_decodeInFlight) {
+      _pendingDispose = true;
+      onNeedFrames = null;
+      clearBufferedFrames();
+      _completeRefillWaiters();
+      final active =
+          DecoderManager.instance.decodeService.invalidatePendingDecodes(this);
+      if (active) return;
+      _decodeInFlight = false;
+      _pendingDispose = false;
+    }
     _disposed = true;
     _decodeToken++;
     decoder.dispose();
@@ -377,6 +391,12 @@ class DecoderHolder {
         dispose();
       }
     });
+  }
+
+  void _disposeIfPendingAfterDecode() {
+    if (!_pendingDispose || _decodeInFlight || _disposed) return;
+    _pendingDispose = false;
+    dispose();
   }
 }
 

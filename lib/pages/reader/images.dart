@@ -262,6 +262,7 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void dispose() {
     _settlingTimer?.cancel();
+    PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
     super.dispose();
@@ -743,6 +744,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     _settlingTimer?.cancel();
     _delayedScrollingTimer?.cancel();
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
+    PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
     super.dispose();

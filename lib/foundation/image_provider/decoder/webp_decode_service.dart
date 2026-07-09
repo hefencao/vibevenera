@@ -11,7 +11,7 @@ class HolderDecodeService {
     _pool.updateGeneration(gen);
   }
 
-  void invalidatePendingDecodes(DecoderHolder holder) =>
+  bool invalidatePendingDecodes(DecoderHolder holder) =>
       _pool.invalidateDecoder(holder.decoder.address);
 
   /// Attach decode driving to a holder. The holder will call back
