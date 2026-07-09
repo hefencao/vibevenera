@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
@@ -8,7 +6,9 @@ import 'package:venera/foundation/image_provider/webp_image_provider.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_progress_publisher.dart';
+import 'download_ranker.dart';
 import 'preload_policy.dart';
+import 'prefetch_budget.dart';
 import 'resource_entry.dart';
 import 'resource_manager.dart';
 import 'tasks.dart';
@@ -42,6 +42,7 @@ class PipelineController {
   final DownloadProgressPublisher _progress = DownloadProgressPublisher();
   ValueNotifier<ReaderDownloadProgress> get currentDownloadProgress =>
       _progress.notifier;
+  final PrefetchBudget _prefetchBudget = const PrefetchBudget();
 
   void Function(
     String currentKey,
@@ -80,10 +81,6 @@ class PipelineController {
 
   static const int _jumpProtectionDistance = 3;
   static const Duration _jumpProtectionWindow = Duration(milliseconds: 1200);
-  static const int _mobilePrefetchBudgetBytes = 48 * 1024 * 1024;
-  static const int _desktopPrefetchBudgetBytes = 192 * 1024 * 1024;
-  static const int _mobileUnknownPrefetchBytes = 16 * 1024 * 1024;
-  static const int _desktopUnknownPrefetchBytes = 32 * 1024 * 1024;
 
   // ── Public API ──────────────────────────────────────────────
 
@@ -469,53 +466,12 @@ class PipelineController {
   }
 
   int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
-    final p = priority ?? entry.priority;
-    final offset = _offsetByKey[entry.imageKey] ?? _offsetFor(entry.imageKey);
-    final distance = offset.abs();
-    final progress = entry.download.progress;
-    final p2 = progress * progress;
-    final progressBoost = (progress * 32 + p2 * 160 + p2 * p2 * 260).round();
-    final runningDownloads = _scheduler.runningDownloadCount;
-    final queuedDownloads = _scheduler.queuedDownloadCount;
-    final freeDownloadSlots =
-        math.max(0, _scheduler.maxConcurrent - runningDownloads);
-    final inProgressBoost = entry.download.inProgress
-        ? 80 + freeDownloadSlots * 16
-        : 0;
-    final hasPressure = runningDownloads + queuedDownloads >= _scheduler.maxConcurrent;
-    final pressurePenalty = p == PagePriority.distant && hasPressure
-        ? (runningDownloads + queuedDownloads - _scheduler.maxConcurrent + 1) * 24
-        : 0;
-
-    final base = switch (p) {
-      PagePriority.current => 1000,
-      PagePriority.near when offset > 0 => 760,
-      PagePriority.near => 720,
-      PagePriority.far when offset > 0 => 520,
-      PagePriority.far => 500,
-      PagePriority.keep => 260,
-      PagePriority.distant when entry.download.inProgress => 180,
-      PagePriority.distant => 0,
-    };
-
-    if (base == 0) return 0;
-    final directionBias = offset < 0 ? -8 : 0;
-    final raw = base -
-        distance * 12 +
-        directionBias +
-        inProgressBoost +
-        progressBoost -
-        pressurePenalty;
-    final cap = switch (p) {
-      PagePriority.current => 2000,
-      PagePriority.near when offset > 0 => 940,
-      PagePriority.near => 900,
-      PagePriority.far when offset > 0 => 700,
-      PagePriority.far => 680,
-      PagePriority.keep => 660,
-      PagePriority.distant => 660,
-    };
-    return raw.clamp(1, cap).toInt();
+    return DownloadRanker(
+      runningDownloads: _scheduler.runningDownloadCount,
+      queuedDownloads: _scheduler.queuedDownloadCount,
+      maxConcurrent: _scheduler.maxConcurrent,
+      offsetFor: (key) => _offsetByKey[key] ?? _offsetFor(key),
+    ).rank(entry, priority: priority);
   }
 
   int _offsetFor(String imageKey) {
@@ -740,43 +696,6 @@ class PipelineController {
   }
 
   bool _prefetchBudgetExceededFor(ResourceEntry entry) {
-    if (entry.priority == PagePriority.current ||
-        entry.priority == PagePriority.near) {
-      return false;
-    }
-    final knownSize = entry.bytes?.length ?? entry.download.totalBytes;
-    final budget = _prefetchBudgetBytes;
-    if (knownSize != null && knownSize >= budget ~/ 2) {
-      return _currentPrefetchBytes(excluding: entry.imageKey) > 0;
-    }
-    return _currentPrefetchBytes() >= budget;
-  }
-
-  int _currentPrefetchBytes({String? excluding}) {
-    var total = 0;
-    resources.forEach((entry) {
-      if (entry.imageKey == excluding) return;
-      if (entry.priority == PagePriority.current ||
-          entry.priority == PagePriority.near) {
-        return;
-      }
-      total +=
-          entry.bytes?.length ??
-          entry.download.totalBytes ??
-          (entry.download.inProgress ? _unknownPrefetchBytes : 0);
-    });
-    return total;
-  }
-
-  int get _prefetchBudgetBytes {
-    if (Platform.isAndroid || Platform.isIOS) return _mobilePrefetchBudgetBytes;
-    return _desktopPrefetchBudgetBytes;
-  }
-
-  int get _unknownPrefetchBytes {
-    if (Platform.isAndroid || Platform.isIOS) {
-      return _mobileUnknownPrefetchBytes;
-    }
-    return _desktopUnknownPrefetchBytes;
+    return _prefetchBudget.exceededFor(entry, resources);
   }
 }
