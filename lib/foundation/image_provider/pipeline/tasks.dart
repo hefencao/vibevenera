@@ -110,6 +110,7 @@ abstract class PolicyAwareTask extends SchedulerTask {
       await doExecute(ctx);
       if (!isCancelled && !_finished) {
         _finish(true);
+        notifyCompleted();
       }
     } catch (e) {
       if (!isCancelled && !_finished) {
@@ -217,6 +218,7 @@ class DownloadTask extends PolicyAwareTask {
   final List<void Function(int current, int? total)> _progressCallbacks = [];
   final List<void Function(ImageDownloadProgress event)> _eventCallbacks = [];
   final List<void Function()> _disposeCallbacks = [];
+  bool _waitersCompleted = false;
   CancelToken? _cancelToken;
 
   DownloadTask({
@@ -318,21 +320,17 @@ class DownloadTask extends PolicyAwareTask {
         debugPrint('[DownloadTask] CANCEL-POLICY-RUNTIME $key');
         if (isCancelled) {
           _rejectAll('Policy changed mid-download');
-          notifyFailed();
-          return;
+          throw Exception('Policy changed mid-download');
         }
       }
 
       debugPrint('[DownloadTask] DONE $key (${bytes.length ~/ 1024}KB)');
       _resolveAll(bytes);
-      notifyCompleted();
     } catch (e) {
       if (!isCancelled) {
         _rejectAll(e);
-        notifyFailed();
       }
-    } finally {
-      disposeResources();
+      rethrow;
     }
   }
 
@@ -359,8 +357,8 @@ class DownloadTask extends PolicyAwareTask {
   // ── Internal ────────────────────────────────────────────────
 
   void _resolveAll(Uint8List bytes) {
-    if (_finished) return;
-    _finished = true;
+    if (_waitersCompleted) return;
+    _waitersCompleted = true;
     for (final c in _completers) {
       if (!c.isCompleted) c.complete(bytes);
     }
@@ -368,8 +366,8 @@ class DownloadTask extends PolicyAwareTask {
   }
 
   void _rejectAll(Object error) {
-    if (_finished) return;
-    _finished = true;
+    if (_waitersCompleted) return;
+    _waitersCompleted = true;
     for (final c in _completers) {
       if (!c.isCompleted) c.completeError(error);
     }
@@ -466,7 +464,6 @@ class PrecreateTask extends PolicyAwareTask {
     }
     _holderCompleters.clear();
     debugPrint('[Precreate] DONE $_imageKey');
-    notifyCompleted();
   }
 
   @override
