@@ -106,6 +106,7 @@ pipeline/tasks.dart
 pipeline/task_scheduler.dart
 pipeline/preload_policy.dart
 pipeline/pipeline_window.dart
+pipeline/pipeline_policy_applier.dart
 pipeline/download_progress_publisher.dart
 pipeline/download_ranker.dart
 pipeline/prefetch_budget.dart
@@ -118,6 +119,7 @@ Acceptance:
 - `task_scheduler.dart` contains only registry/migration/queue dispatch logic.
 - Policy/resource data live outside task scheduler.
 - Dynamic page window/offset calculation lives outside pipeline controller.
+- Priority and policy application to resources lives outside pipeline controller.
 - Task execution wrappers live outside task scheduler.
 - Current-page progress publication lives outside pipeline controller.
 - Download priority score and prefetch byte budget live outside pipeline controller.

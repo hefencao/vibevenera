@@ -210,6 +210,7 @@ The goal is not visual exactness at one physical pixel. The goal is stable cache
 | `DynamicPreloadPolicy` | [preload_policy.dart](../lib/foundation/image_provider/pipeline/preload_policy.dart) | Water-level and relative-page policy tables |
 | `PipelineController` | [pipeline_controller.dart](../lib/foundation/image_provider/pipeline/pipeline_controller.dart) | Resource state, dynamic window application, task submission |
 | `PipelineWindowPlanner` | [pipeline_window.dart](../lib/foundation/image_provider/pipeline/pipeline_window.dart) | Dynamic page window and relative offset calculation |
+| `PipelinePolicyApplier` | [pipeline_policy_applier.dart](../lib/foundation/image_provider/pipeline/pipeline_policy_applier.dart) | Apply priorities and ResourcePolicy to entries |
 | `ResourcePolicy` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Interaction x priority policy matrix |
 | `ResourceEntry` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Single resource state: bytes, holder, policy, sub-states |
 | `DownloadProgressPublisher` | [download_progress_publisher.dart](../lib/foundation/image_provider/pipeline/download_progress_publisher.dart) | Current page progress state and speed sampling |

@@ -7,6 +7,7 @@ import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_progress_publisher.dart';
 import 'download_ranker.dart';
+import 'pipeline_policy_applier.dart';
 import 'pipeline_window.dart';
 import 'preload_policy.dart';
 import 'prefetch_budget.dart';
@@ -45,6 +46,7 @@ class PipelineController {
       _progress.notifier;
   final PrefetchBudget _prefetchBudget = const PrefetchBudget();
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
+  final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
   void Function(
     String currentKey,
@@ -97,7 +99,7 @@ class PipelineController {
     if (_interaction == state) return;
     _interaction = state;
     if (_images.isEmpty) {
-      _refreshPolicies();
+      _applyPolicies(markDistant: false);
     } else {
       _applyWindow(protectJump: _provisionalIdx != null);
     }
@@ -270,27 +272,7 @@ class PipelineController {
       );
     }
 
-    _assignPriorities();
-    _refreshPolicies();
-
-    final activeImageKeys = <String>{
-      _currentKey,
-      ..._nearKeys,
-      ..._prevKeys,
-      ..._farKeys,
-      ..._keepKeys,
-    };
-
-    // Mark distant entries before migrating/submitting work so stale
-    // pages cannot submit one more task under their previous policy.
-    resources.forEach((e) {
-      if (!activeImageKeys.contains(e.imageKey)) {
-        e.updatePriority(PagePriority.distant);
-        e.updatePolicy(
-          ResourcePolicy.compute(_interaction, PagePriority.distant),
-        );
-      }
-    });
+    final activeImageKeys = _applyPolicies();
     _streamDecodes.detachInactive(activeImageKeys, resources);
 
     // Migrate existing tasks
@@ -360,63 +342,21 @@ class PipelineController {
 
   // ── Internal: priorities & policies ────────────────────────
 
-  void _assignPriorities() {
-    final byKey = <String, ResourceEntry>{};
-    resources.forEach((e) => byKey[e.imageKey] = e);
-
-    byKey[_currentKey]?.updatePriority(PagePriority.current);
-    for (final k in _nearKeys) {
-      byKey[k]?.updatePriority(PagePriority.near);
-    }
-    for (final k in _prevKeys) {
-      byKey[k]?.updatePriority(PagePriority.near);
-    }
-    for (final k in _farKeys) {
-      byKey[k]?.updatePriority(PagePriority.far);
-    }
-    for (final k in _keepKeys) {
-      byKey[k]?.updatePriority(PagePriority.keep);
-    }
-  }
-
-  void _refreshPolicies() {
-    final byKey = <String, ResourceEntry>{};
-    resources.forEach((e) => byKey[e.imageKey] = e);
-
-    final current = byKey[_currentKey];
-    if (current != null) {
-      current.updatePolicy(_rankedPolicy(current, PagePriority.current));
-    }
-    for (final k in _nearKeys) {
-      final entry = byKey[k];
-      if (entry != null) {
-        entry.updatePolicy(_rankedPolicy(entry, PagePriority.near));
-      }
-    }
-    for (final k in _prevKeys) {
-      final entry = byKey[k];
-      if (entry != null) {
-        entry.updatePolicy(_rankedPolicy(entry, PagePriority.near));
-      }
-    }
-    for (final k in _farKeys) {
-      final entry = byKey[k];
-      if (entry != null) {
-        entry.updatePolicy(_rankedPolicy(entry, PagePriority.far));
-      }
-    }
-    for (final k in _keepKeys) {
-      final entry = byKey[k];
-      if (entry != null) {
-        entry.updatePolicy(_rankedPolicy(entry, PagePriority.keep));
-      }
-    }
-  }
-
-  ResourcePolicy _rankedPolicy(ResourceEntry entry, PagePriority priority) {
-    final base = ResourcePolicy.compute(_interaction, priority);
-    if (!base.allowDownload) return base;
-    return base.withDownloadPriority(_downloadRank(entry, priority: priority));
+  Set<String> _applyPolicies({bool markDistant = true}) {
+    return _policyApplier.apply(
+      resources: resources,
+      interaction: _interaction,
+      currentKey: _currentKey,
+      nearKeys: _nearKeys,
+      prevKeys: _prevKeys,
+      farKeys: _farKeys,
+      keepKeys: _keepKeys,
+      downloadRank: (entry, priority) => _downloadRank(
+        entry,
+        priority: priority,
+      ),
+      markDistant: markDistant,
+    );
   }
 
   int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
