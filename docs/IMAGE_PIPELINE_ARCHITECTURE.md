@@ -211,6 +211,8 @@ The goal is not visual exactness at one physical pixel. The goal is stable cache
 | `PipelineController` | [pipeline_controller.dart](../lib/foundation/image_provider/pipeline/pipeline_controller.dart) | Resource state, dynamic window application, task submission |
 | `ResourcePolicy` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Interaction x priority policy matrix |
 | `ResourceEntry` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Single resource state: bytes, holder, policy, sub-states |
+| `DownloadProgressPublisher` | [download_progress_publisher.dart](../lib/foundation/image_provider/pipeline/download_progress_publisher.dart) | Current page progress state and speed sampling |
+| `WebPStreamDecodeCoordinator` | [webp_stream_decode_coordinator.dart](../lib/foundation/image_provider/pipeline/webp_stream_decode_coordinator.dart) | Streaming WebP decode attach, append, detach |
 | `TaskScheduler` | [task_scheduler.dart](../lib/foundation/image_provider/pipeline/task_scheduler.dart) | Priority queue, dedup, migration, cancellation |
 | `DownloadTask` | [tasks.dart](../lib/foundation/image_provider/pipeline/tasks.dart) | Raw byte fetch |
 | `PrecreateTask` | [tasks.dart](../lib/foundation/image_provider/pipeline/tasks.dart) | Decoder holder creation |

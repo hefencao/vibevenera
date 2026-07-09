@@ -105,6 +105,8 @@ pipeline/resource_manager.dart
 pipeline/tasks.dart
 pipeline/task_scheduler.dart
 pipeline/preload_policy.dart
+pipeline/download_progress_publisher.dart
+pipeline/webp_stream_decode_coordinator.dart
 pipeline/pipeline_controller.dart
 ```
 
@@ -113,6 +115,8 @@ Acceptance:
 - `task_scheduler.dart` contains only registry/migration/queue dispatch logic.
 - Policy/resource data live outside task scheduler.
 - Task execution wrappers live outside task scheduler.
+- Current-page progress publication lives outside pipeline controller.
+- WebP streaming decode attach/append/detach lives outside pipeline controller.
 - `PrecreateTask` does not import or call `WebPImageProvider` directly; holder creation is injected.
 - Direct users import data types from `pipeline/resource_entry.dart`.
 - `dart analyze` passes.

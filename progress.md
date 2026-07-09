@@ -25,6 +25,7 @@
 - `WebPPlaybackController` 主循环已 helper 化，renderability/startup/null-frame 等等待逻辑独立。
 - 已按行为/依赖边界拆分 pipeline/task scheduler：`pipeline/resource_entry.dart` 承载 policy/resource 数据，`pipeline/resource_manager.dart` 承载资源生命周期，`pipeline/tasks.dart` 承载任务执行，`pipeline/task_scheduler.dart` 只保留调度/迁移；`PrecreateTask` 已通过 holder factory 脱离 `WebPImageProvider` 直接依赖。
 - 已按目录边界移动到 `pipeline/`、`decoder/`、`runtime/`、`cache/`、`io/`；通用文件去掉 `webp`，WebP 专用文件保留 `webp_` 前缀。
+- 已开始非 `part` 拆分的真实重构：`WebPStreamDecodeCoordinator` 承载 pipeline 流式解码 attach/append/detach，`DownloadProgressPublisher` 承载当前页进度和速度采样。
 
 ## 关键决策
 
@@ -38,7 +39,7 @@
 
 ## 未完成的代办
 
-1. 继续按行为边界收窄 `PipelineController`：优先拆出 stream decode coordinator / progress publisher。
+1. 继续按行为边界收窄 `PipelineController`：下一步优先拆出 download ranker / prefetch budget。
 2. 继续按行为边界收窄 IO：`image_loader.dart` 仍包含 disk cache 读取，后续可评估 cache/file/network loader 的接口收敛。
 3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
 4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。

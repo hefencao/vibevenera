@@ -95,6 +95,8 @@ lib/foundation/image_provider/pipeline/
   tasks.dart                    # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
   task_scheduler.dart           # registry, migration, queue dispatch only
   preload_policy.dart           # water-level and relative-page tables
+  download_progress_publisher.dart # current-page progress state and speed sampling
+  webp_stream_decode_coordinator.dart # WebP streaming decode attach/append/detach
   pipeline_controller.dart      # window policy, rank, work submission orchestration
 ```
 

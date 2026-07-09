@@ -5,14 +5,15 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
-import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
+import 'download_progress_publisher.dart';
 import 'preload_policy.dart';
 import 'resource_entry.dart';
 import 'resource_manager.dart';
 import 'tasks.dart';
 import 'task_scheduler.dart';
+import 'webp_stream_decode_coordinator.dart';
 
 // ═══════════════════════════════════════════════════════════════
 // PipelineController — coordinates Policy → Resource → Scheduler
@@ -28,13 +29,6 @@ import 'task_scheduler.dart';
 //   - Does NOT implement the pipeline state machine (Entry does)
 // ═══════════════════════════════════════════════════════════════
 
-class _ProgressSample {
-  int bytes;
-  int ms;
-  double speed;
-  _ProgressSample(this.bytes, this.ms, this.speed);
-}
-
 // ═══════════════════════════════════════════════════════════════
 // PipelineController
 // ═══════════════════════════════════════════════════════════════
@@ -45,9 +39,9 @@ class PipelineController {
 
   final ResourceManager resources = ResourceManager();
   final TaskScheduler _scheduler = TaskScheduler.instance;
-  final currentDownloadProgress = ValueNotifier<ReaderDownloadProgress>(
-    const ReaderDownloadProgress.idle(),
-  );
+  final DownloadProgressPublisher _progress = DownloadProgressPublisher();
+  ValueNotifier<ReaderDownloadProgress> get currentDownloadProgress =>
+      _progress.notifier;
 
   void Function(
     String currentKey,
@@ -74,12 +68,8 @@ class PipelineController {
   String? _sourceKey;
   String _cid = '';
   String _eid = '';
-  final Set<String> _streamDecodeAttached = {};
-  final Map<String, StreamSubscription<ImageDownloadProgress>>
-  _streamDecodeSubs = {};
-  final Map<String, void Function()> _streamDecodeDisposers = {};
-  final Map<String, _ProgressSample> _progressSamples = {};
-  int _lastProgressNotifyMs = 0;
+  final WebPStreamDecodeCoordinator _streamDecodes =
+      WebPStreamDecodeCoordinator();
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -350,7 +340,7 @@ class PipelineController {
         );
       }
     });
-    _detachInactiveStreamDecoders(activeImageKeys);
+    _streamDecodes.detachInactive(activeImageKeys, resources);
 
     // Migrate existing tasks
     final activeTaskKeys = <String>{};
@@ -387,7 +377,7 @@ class PipelineController {
   void dispose() {
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
-    currentDownloadProgress.value = const ReaderDownloadProgress.idle();
+    _progress.reset();
     _scheduler.clear();
     resources.dispose();
   }
@@ -415,7 +405,7 @@ class PipelineController {
   }
 
   bool hasStreamDecodeAttached(String fullKey) =>
-      _streamDecodeAttached.contains(fullKey);
+      _streamDecodes.hasAttached(fullKey);
 
   // ── Internal: priorities & policies ────────────────────────
 
@@ -588,15 +578,18 @@ class PipelineController {
       }
     }
     if (entry.download.inProgress) {
-      final attached = _attachStreamDecodeToRunningDownload(
+      final attached = _streamDecodes.attachToRunningDownload(
         entry,
         sourceKey,
         cid,
         eid,
+        resources: resources,
+        targetWidth: _targetW,
+        targetHeight: _targetH,
       );
       if (attached ||
           _scheduler.hasTask(entry.imageKey) ||
-          ImageDownloader.isLoadingComicImage(
+          _streamDecodes.isDownloadLoading(
             entry.imageKey,
             sourceKey,
             cid,
@@ -606,15 +599,17 @@ class PipelineController {
       }
       debugPrint('[WebP-Stream][pipeline] STALE-DOWNLOAD ${entry.imageKey}');
       entry.download.inProgress = false;
-      DecoderManager.instance
-          .getHolder(entry.fullKey)
-          ?.markStreamDownloadClosed(StateError('stale pipeline download'));
-      _detachStreamDecode(entry.fullKey);
+      _streamDecodes.markDownloadStale(entry);
     }
     if (_prefetchBudgetExceededFor(entry)) return;
 
     entry.download.inProgress = true;
-    final streamDecode = _streamDecodeOnDownload(entry);
+    final streamDecode = _streamDecodes.start(
+      entry,
+      resources: resources,
+      targetWidth: _targetW,
+      targetHeight: _targetH,
+    );
     final task = DownloadTask(
       key: entry.imageKey,
       imageKey: entry.imageKey,
@@ -648,251 +643,10 @@ class PipelineController {
         })
         .catchError((_) {
           entry.download.inProgress = false;
-          _detachStreamDecode(entry.fullKey);
+          _streamDecodes.detach(entry.fullKey);
         });
     task.setContext(ExecutionContext(entry));
     _scheduler.submit(task);
-  }
-
-  ({void Function(ImageDownloadProgress event) onEvent, void Function() dispose})?
-  _streamDecodeOnDownload(
-    ResourceEntry entry,
-  ) {
-    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return null;
-    if (!_streamDecodeAttached.add(entry.fullKey)) return null;
-    final existingHolder = DecoderManager.instance.getHolder(entry.fullKey);
-    DecoderHolder? holder = existingHolder != null &&
-            !existingHolder.disposed &&
-            existingHolder.decoder.isStreaming &&
-            !existingHolder.decoder.streamIsComplete
-        ? existingHolder
-        : null;
-    webp.WebPAnimDecoder? decoder = holder?.decoder;
-    var appendedUntil = holder?.streamLoadedBytes ?? 0;
-    var chunkCount = 0;
-    var lastDebugBytes = 0;
-    var lastFrameCount = -1;
-    var stopped = false;
-    var completed = false;
-    debugPrint(
-      '[WebP-Stream][pipeline] START key=${entry.imageKey} '
-      'priority=${entry.priority} full=${entry.fullKey}',
-    );
-    if (holder != null) {
-      for (final peer in resources.getAllForImage(entry.imageKey)) {
-        if (peer.fullKey == entry.fullKey) {
-          peer.holder = holder;
-          peer.decode.markSuccess();
-        }
-      }
-    }
-    void dispose() {
-      _streamDecodeAttached.remove(entry.fullKey);
-      final d = decoder;
-      if (holder != null &&
-          !completed &&
-          d != null &&
-          !d.isDisposed &&
-          d.isStreaming &&
-          !d.streamIsComplete) {
-        holder!.markStreamDownloadClosed(StateError('pipeline stream detached'));
-      }
-      if (holder == null && d != null && !d.isDisposed) d.dispose();
-    }
-    void onEvent(ImageDownloadProgress event) {
-      if (stopped) return;
-      final canDecode = entry.policy.allowDecode && entry.policy.allowGpuUpload;
-      if (!canDecode || (entry.hasHolder && holder == null)) {
-        stopped = true;
-        debugPrint(
-          '[WebP-Stream][pipeline] STOP allowDecode=${entry.policy.allowDecode} '
-          'allowGpu=${entry.policy.allowGpuUpload} hasHolder=${entry.hasHolder} '
-          'priority=${entry.priority} ${entry.imageKey}',
-        );
-        dispose();
-        return;
-      }
-      if (event.reset && decoder != null && !decoder!.isDisposed) {
-        debugPrint('[WebP-Stream][pipeline] RESET ${entry.imageKey}');
-        decoder!.resetStreamInput();
-        holder?.clearBufferedFrames();
-        holder?.updateStreamTransfer(0, null, reset: true);
-        holder?.resetStreamPlaybackState();
-        appendedUntil = 0;
-      }
-      final chunk = event.chunkBytes;
-      if (chunk != null) {
-        decoder ??= webp.createStreamingAnimDecoder(
-          targetWidth: _targetW,
-          targetHeight: _targetH,
-        );
-        final d = decoder;
-        if (d == null || d.isDisposed) return;
-        final chunkEnd = event.currentBytes;
-        final chunkStart = chunkEnd - chunk.length;
-        if (chunkEnd <= appendedUntil) {
-          holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
-          holder?.markStreamActive();
-          if (canDecode) holder?.requestRefill();
-          return;
-        }
-        final data = chunkStart < appendedUntil
-            ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
-            : chunk;
-        appendedUntil = chunkEnd;
-        chunkCount++;
-        if (chunkCount <= 3 ||
-            event.currentBytes - lastDebugBytes >= 1024 * 1024) {
-          lastDebugBytes = event.currentBytes;
-          debugPrint(
-            '[WebP-Stream][pipeline] chunk#$chunkCount '
-            '+${data.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
-            '${entry.imageKey}',
-          );
-        }
-        final ready = d.appendStreamChunk(data);
-        if (ready && d.frameCount != lastFrameCount) {
-          lastFrameCount = d.frameCount;
-          debugPrint(
-            '[WebP-Stream][pipeline] info animated=${d.streamIsAnimated} '
-            'frames=${d.frameCount} ${d.targetWidth}x${d.targetHeight} '
-            '${entry.imageKey}',
-          );
-        }
-        if (ready && !d.streamIsAnimated) {
-          debugPrint('[WebP-Stream][pipeline] ready but static ${entry.imageKey}');
-        }
-        if (ready &&
-            d.streamIsAnimated &&
-            holder == null &&
-            d.frameCount > 0 &&
-            d.targetWidth > 0) {
-          debugPrint(
-            '[WebP-Stream][pipeline] READY animated ${d.frameCount}f '
-            '${d.targetWidth}x${d.targetHeight} ${entry.imageKey}',
-          );
-          holder = DecoderManager.instance.getOrCreateHolder(
-            entry.fullKey,
-            d,
-            d.targetWidth,
-            d.targetHeight,
-            1.0,
-          );
-          holder!.updateStreamTransfer(event.currentBytes, event.totalBytes);
-          holder!.markStreamActive();
-          for (final peer in resources.getAllForImage(entry.imageKey)) {
-            if (peer.fullKey == entry.fullKey) {
-              peer.holder = holder;
-              peer.decode.markSuccess();
-            }
-          }
-          if (canDecode) holder?.requestRefill();
-          debugPrint('[WebP-Stream][pipeline] HOLDER ${entry.imageKey}');
-        } else {
-          holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
-          holder?.markStreamActive();
-          if (canDecode) holder?.requestRefill();
-        }
-      }
-      if (event.imageBytes != null) {
-        completed = true;
-        holder?.updateStreamTransfer(
-          event.imageBytes!.length,
-          event.imageBytes!.length,
-        );
-        debugPrint(
-          '[WebP-Stream][pipeline] FINAL ${event.imageBytes!.length}B '
-          'holder=${holder != null} ${entry.imageKey}',
-        );
-        final d = decoder;
-        if (d != null && !d.isDisposed) {
-          d.appendStreamChunk(
-            appendedUntil == 0 ? event.imageBytes! : Uint8List(0),
-            isFinal: true,
-          );
-          if (canDecode) holder?.requestRefill();
-          if (holder == null) d.dispose();
-        }
-      }
-    }
-    return (onEvent: onEvent, dispose: dispose);
-  }
-
-  bool _attachStreamDecodeToRunningDownload(
-    ResourceEntry entry,
-    String? sourceKey,
-    String cid,
-    String eid,
-  ) {
-    if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return false;
-    if (_streamDecodeAttached.contains(entry.fullKey)) {
-      return true;
-    }
-    if (entry.hasHolder) return false;
-    final stream = ImageDownloader.joinLoadingComicImage(
-      entry.imageKey,
-      sourceKey,
-      cid,
-      eid,
-      debugLabel: 'pipeline-stream-attach',
-    );
-    if (stream == null) {
-      debugPrint('[WebP-Stream][pipeline] ATTACH skip no-shared ${entry.imageKey}');
-      return false;
-    }
-    final streamDecode = _streamDecodeOnDownload(entry);
-    if (streamDecode == null) return true;
-    late StreamSubscription<ImageDownloadProgress> sub;
-    sub = stream.listen(
-      (event) {
-        final active = entry.download.inProgress &&
-            entry.policy.allowDecode &&
-            entry.policy.allowGpuUpload &&
-            !entry.hasBytes;
-        if (!active) {
-          _detachStreamDecode(entry.fullKey);
-          return;
-        }
-        streamDecode.onEvent(event);
-      },
-      onError: (e) {
-        debugPrint('[WebP-Stream][pipeline] ATTACH-ERROR ${entry.imageKey} $e');
-        _detachStreamDecode(entry.fullKey);
-      },
-      onDone: () => _detachStreamDecode(entry.fullKey),
-      cancelOnError: false,
-    );
-    _streamDecodeSubs[entry.fullKey] = sub;
-    _streamDecodeDisposers[entry.fullKey] = streamDecode.dispose;
-    debugPrint('[WebP-Stream][pipeline] ATTACH running ${entry.imageKey}');
-    return true;
-  }
-
-  void _detachStreamDecode(String fullKey) {
-    _streamDecodeSubs.remove(fullKey)?.cancel();
-    _streamDecodeDisposers.remove(fullKey)?.call();
-    _streamDecodeAttached.remove(fullKey);
-  }
-
-  void _detachInactiveStreamDecoders(Set<String> activeImageKeys) {
-    for (final fullKey in _streamDecodeSubs.keys.toList()) {
-      final imageKey = _baseKey(fullKey);
-      final entry = resources.get(fullKey);
-      final active = activeImageKeys.contains(imageKey) &&
-          entry != null &&
-          entry.policy.allowDecode &&
-          entry.policy.allowGpuUpload;
-      if (!active) _detachStreamDecode(fullKey);
-    }
-  }
-
-  static String _baseKey(String fullKey) {
-    final at = fullKey.lastIndexOf('@');
-    if (at < 0) return fullKey;
-    final suffix = fullKey.substring(at + 1);
-    return RegExp(r'^\d+x\d+$').hasMatch(suffix)
-        ? fullKey.substring(0, at)
-        : fullKey;
   }
 
   void _submitDecode(
@@ -960,10 +714,7 @@ class PipelineController {
       peer.download.inProgress = false;
       peer.download.lastError = null;
     }
-    _progressSamples.remove(imageKey);
-    if (imageKey == _currentKey) {
-      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
-    }
+    _progress.complete(imageKey, _currentKey);
   }
 
   void _publishDownloadProgress(
@@ -975,47 +726,17 @@ class PipelineController {
     for (final peer in resources.getAllForImage(imageKey)) {
       peer.download.updateProgress(current, total);
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final old = _progressSamples[imageKey];
-    var speed = old?.speed ?? 0.0;
-    if (old != null && now > old.ms && current >= old.bytes) {
-      final instant = (current - old.bytes) * 1000.0 / (now - old.ms);
-      speed = speed <= 0 ? instant : speed * 0.7 + instant * 0.3;
-    } else if (old != null && current < old.bytes) {
-      speed = 0;
-    }
-    _progressSamples[imageKey] = _ProgressSample(current, now, speed);
-    if (imageKey != _currentKey) return;
-    final complete = done || (total != null && total > 0 && current >= total);
-    if (complete) {
-      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
-      return;
-    }
-    if (now - _lastProgressNotifyMs < 100 && current > 0) return;
-    _lastProgressNotifyMs = now;
-    currentDownloadProgress.value = ReaderDownloadProgress(
-      imageKey: imageKey,
-      active: true,
-      currentBytes: current,
-      totalBytes: total,
-      speedBytesPerSecond: speed,
+    _progress.update(
+      imageKey,
+      current,
+      total,
+      currentKey: _currentKey,
+      done: done,
     );
   }
 
   void _syncCurrentDownloadProgress() {
-    final entry = resources.get(_currentKey);
-    if (entry == null || entry.hasBytes || !entry.download.inProgress) {
-      currentDownloadProgress.value = const ReaderDownloadProgress.idle();
-      return;
-    }
-    final sample = _progressSamples[_currentKey];
-    currentDownloadProgress.value = ReaderDownloadProgress(
-      imageKey: _currentKey,
-      active: true,
-      currentBytes: entry.download.currentBytes,
-      totalBytes: entry.download.totalBytes,
-      speedBytesPerSecond: sample?.speed ?? 0,
-    );
+    _progress.syncCurrent(_currentKey, resources.get(_currentKey));
   }
 
   bool _prefetchBudgetExceededFor(ResourceEntry entry) {
