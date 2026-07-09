@@ -43,7 +43,10 @@ webp/webp_decoder_manager.dart
 webp/webp_provider_static.dart
 webp/webp_provider_loader.dart
 webp/webp_stream_session.dart
+webp/webp_playback_timing.dart
 webp/webp_playback_controller.dart
+webp/webp_playback_streaming.dart
+webp/webp_playback_waits.dart
 webp/webp_load_result.dart
 webp/webp_stream_completer.dart
 ```

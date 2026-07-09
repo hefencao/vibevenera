@@ -23,6 +23,7 @@
 - 已抽出 `WebPPlaybackController`，completer 只保留 Flutter 生命周期、chunk 上报、结果分发；播放循环/reload/resume 已迁出。
 - 已抽出 `webp_load_result.dart`，加载结果类型与 stream completer 解耦。
 - `WebPPlaybackController` 主循环已 helper 化，renderability/startup/null-frame 等等待逻辑独立。
+- 已拆出 `webp_playback_timing.dart`、`webp_playback_streaming.dart`、`webp_playback_waits.dart`，播放计时、streaming/reload、等待策略从控制器主体分离。
 
 ## 关键决策
 
