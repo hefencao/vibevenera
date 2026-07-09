@@ -20,7 +20,7 @@
 - `webp_image_provider.dart` 已用 `part` 拆分，主文件约 143 行。
 - 已抽出 `WebPFrameBuffer`、provider loader/static、holder、decode service、manager、completer part。
 - 已抽出 `WebPStreamSession`，visible streaming / resume streaming 由 session 承载，loader 保留薄代理。
-- 已抽出 `WebPPlaybackState` / `WebPPlaybackTiming`，先承载播放循环状态和计时策略，主循环行为保持不变。
+- 已抽出 `WebPPlaybackController`，completer 只保留 Flutter 生命周期、chunk 上报、结果分发；播放循环/reload/resume 已迁出。
 
 ## 关键决策
 
@@ -34,7 +34,7 @@
 
 ## 未完成的代办
 
-1. 继续抽出播放控制器主体，减少 `_WebPImageStreamCompleter` 中的 reload/resume/loop 逻辑。
+1. 继续收窄 `WebPPlaybackController`：拆出 resume/reload 小状态机，降低播放控制器复杂度。
 2. 后续移动 pipeline 文件到 `image_provider/pipeline/`，并让 `TaskScheduler` 脱离 WebPImageProvider。
 3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
 4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。

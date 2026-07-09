@@ -49,3 +49,228 @@ class WebPPlaybackTiming {
     return 1.0;
   }
 }
+
+class WebPPlaybackController {
+  final WebPImageProvider provider;
+  final bool Function() hasListeners;
+  final void Function(ImageInfo) emitImage;
+  bool _disposed = false;
+  StreamSubscription<ImageDownloadProgress>? _progressiveSub;
+  DecoderHolder? _activeHolder;
+
+  WebPPlaybackController({
+    required this.provider,
+    required this.hasListeners,
+    required this.emitImage,
+  });
+
+  void start(
+    DecoderHolder holder, {
+    StreamSubscription<ImageDownloadProgress>? progressiveSub,
+  }) {
+    _progressiveSub = progressiveSub;
+    unawaited(_run(holder));
+  }
+
+  void dispose() {
+    _disposed = true;
+    _progressiveSub?.cancel();
+    _progressiveSub = null;
+  }
+
+  void onAppResumed() {
+    if (!_disposed) _activeHolder?.resumeFromLifecyclePause();
+  }
+
+  Future<DecoderHolder?> _reloadAndRestart(
+    DecoderHolder oldHolder, {
+    bool forceNetwork = false,
+    bool forceFullDecode = false,
+  }) async {
+    if (_disposed) return null;
+    try {
+      await _progressiveSub?.cancel();
+      _progressiveSub = null;
+      if (forceNetwork) {
+        provider.cache?.evictL2(provider.imageKey);
+        await CacheManager().delete(
+          '${provider.imageKey}@${provider.sourceKey}@${provider.cid}@${provider.eid}',
+        );
+      }
+      oldHolder.dispose();
+      final result = await provider._loadImageAsync(
+        forceNetwork: forceNetwork,
+        disableStreaming: forceFullDecode,
+      );
+      if (_disposed) return null;
+      if (result.type == _ResultType.animated) {
+        _progressiveSub = result.progressiveSub;
+        return result.holder;
+      }
+      if (result.type == _ResultType.static) emitImage(result.imageInfo!);
+    } catch (_) {
+      // Keep previous behavior: reload failure stops the loop quietly.
+    }
+    return null;
+  }
+
+  Future<void> _run(DecoderHolder initialHolder) async {
+    var holder = initialHolder;
+    _activeHolder = holder;
+    final playback = WebPPlaybackState();
+    while (!_disposed) {
+      if (!hasListeners()) {
+        await Future.delayed(WebPPlaybackTiming.listenerPoll);
+        continue;
+      }
+      try {
+        final state = WidgetsBinding.instance.lifecycleState;
+        if (state == ui.AppLifecycleState.paused ||
+            state == ui.AppLifecycleState.hidden) {
+          await Future.delayed(WebPPlaybackTiming.inactivePoll);
+          continue;
+        }
+      } catch (_) {}
+
+      final active = DecoderManager.instance.isActiveImageKey(provider.imageKey);
+      if (!active) {
+        if (_progressiveSub != null &&
+            holder.decoder.isStreaming &&
+            !holder.decoder.streamIsComplete) {
+          debugPrint('[WebP-Stream][visible] PAUSE ${holder.shortKey}');
+          await _progressiveSub?.cancel();
+          _progressiveSub = null;
+        }
+        await Future.delayed(WebPPlaybackTiming.inactivePoll);
+        continue;
+      }
+
+      if (holder.disposed) {
+        holder.clearBufferedFrames();
+        final nh = await _reloadAndRestart(holder);
+        if (nh != null) {
+          holder = nh;
+          _activeHolder = holder;
+          playback.resetStartup();
+          continue;
+        }
+        break;
+      }
+
+      final pipelineAttached =
+          PipelineController.instance.hasStreamDecodeAttached(holder.key);
+      if (holder.streamNeedsResume && _progressiveSub == null && !pipelineAttached) {
+        debugPrint(
+          '[WebP-Stream][visible] RESUME-CLOSED ${holder.shortKey} '
+          'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
+          'buf=${holder.bufferLength} loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1} '
+          '${holder.streamError}',
+        );
+        _progressiveSub = provider._resumeStreamingIntoHolder(
+          holder,
+          onDone: () => _progressiveSub = null,
+        );
+        playback.markResumeStarted();
+      } else if (holder.streamFailed) {
+        debugPrint(
+          '[WebP-Stream][visible] RELOAD failed-stream ${holder.shortKey} '
+          '${holder.streamError}',
+        );
+        final canUseFinalBytes =
+            holder.decoder.isStreaming && holder.decoder.streamIsComplete;
+        final nh = await _reloadAndRestart(
+          holder,
+          forceNetwork: !canUseFinalBytes,
+          forceFullDecode: canUseFinalBytes,
+        );
+        if (nh != null) {
+          holder = nh;
+          _activeHolder = holder;
+          playback.resetStartup();
+          continue;
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
+
+      if (_progressiveSub == null &&
+          holder.decoder.isStreaming &&
+          !holder.decoder.streamIsComplete) {
+        if (pipelineAttached) {
+          holder.markStreamActive();
+          holder.requestRefill();
+        } else {
+          _progressiveSub = provider._resumeStreamingIntoHolder(
+            holder,
+            onDone: () => _progressiveSub = null,
+          );
+          playback.markResumeStarted();
+        }
+        holder.requestRefill();
+      }
+
+      final startupWatermark = WebPPlaybackTiming.startupWatermark(playback);
+      if (holder.bufferLength < startupWatermark &&
+          holder.state == PageState.current) {
+        holder.requestRefill();
+        holder.refillSignal ??= Completer<void>();
+        await Future.any([
+          holder.refillSignal!.future,
+          Future.delayed(WebPPlaybackTiming.firstFramePoll),
+        ]);
+        continue;
+      }
+
+      final frame = holder.consumeFrame();
+      if (frame == null) {
+        playback.markNullFrame();
+        final currentHolder = holder.state == PageState.current;
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            !holder.decoder.streamIsComplete &&
+            holder._streamAtAvailableEnd &&
+            playback.nullFrameWaits >= (playback.hasShownFirstFrame ? 1 : 3) &&
+            holder.restartAvailableStreamPlayback()) {
+          debugPrint('[WebP-Stream][visible] REPLAY-PARTIAL ${holder.shortKey}');
+          playback.resetStartup();
+          continue;
+        }
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            !holder.decoder.streamIsComplete &&
+            _progressiveSub != null &&
+            playback.nullFrameWaits >= 30 &&
+            playback.resumeWaitElapsed) {
+          debugPrint(
+            '[WebP-Stream][visible] WAIT-DOWNLOAD ${holder.shortKey} '
+            'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
+            'buf=${holder.bufferLength} raw=${holder.queuedFrameCount - holder.bufferLength} '
+            'inFlight=${holder._decodeInFlight} uploading=${holder._isUploading} '
+            'loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1}',
+          );
+          playback.nullFrameWaits = 0;
+        }
+        if (currentHolder &&
+            holder.decoder.isStreaming &&
+            holder.decoder.streamIsComplete &&
+            playback.nullFrameWaits >= 6 &&
+            holder._streamMayDecodeMore) {
+          holder.markStreamFailed(StateError('stream ended before all frames'));
+          continue;
+        }
+        if (holder.disposed) continue;
+        holder.refillSignal ??= Completer<void>();
+        await Future.any([
+          holder.refillSignal!.future,
+          Future.delayed(WebPPlaybackTiming.emptyFrameWait(currentHolder)),
+        ]);
+        continue;
+      }
+
+      emitImage(ImageInfo(image: frame.image, scale: holder.scale));
+      playback.markFrameShown();
+      await Future.delayed(WebPPlaybackTiming.frameDelay(frame, holder));
+    }
+    if (_activeHolder == holder) _activeHolder = null;
+  }
+}
