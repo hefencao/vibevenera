@@ -207,17 +207,17 @@ The goal is not visual exactness at one physical pixel. The goal is stable cache
 
 | Component | File | Responsibility |
 |---|---|---|
-| `DynamicPreloadPolicy` | [preload_policy.dart](../lib/foundation/image_provider/preload_policy.dart) | Water-level and relative-page policy tables |
-| `PipelineController` | [pipeline_controller.dart](../lib/foundation/image_provider/pipeline_controller.dart) | Resource state, dynamic window application, task submission |
-| `ResourcePolicy` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Interaction x priority policy matrix |
-| `ResourceEntry` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Single resource state: bytes, holder, policy, sub-states |
-| `TaskScheduler` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Priority queue, dedup, migration, cancellation |
-| `DownloadTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Raw byte fetch |
-| `PrecreateTask` | [task_scheduler.dart](../lib/foundation/image_provider/task_scheduler.dart) | Decoder holder creation |
+| `DynamicPreloadPolicy` | [preload_policy.dart](../lib/foundation/image_provider/pipeline/preload_policy.dart) | Water-level and relative-page policy tables |
+| `PipelineController` | [pipeline_controller.dart](../lib/foundation/image_provider/pipeline/pipeline_controller.dart) | Resource state, dynamic window application, task submission |
+| `ResourcePolicy` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Interaction x priority policy matrix |
+| `ResourceEntry` | [resource_entry.dart](../lib/foundation/image_provider/pipeline/resource_entry.dart) | Single resource state: bytes, holder, policy, sub-states |
+| `TaskScheduler` | [task_scheduler.dart](../lib/foundation/image_provider/pipeline/task_scheduler.dart) | Priority queue, dedup, migration, cancellation |
+| `DownloadTask` | [tasks.dart](../lib/foundation/image_provider/pipeline/tasks.dart) | Raw byte fetch |
+| `PrecreateTask` | [tasks.dart](../lib/foundation/image_provider/pipeline/tasks.dart) | Decoder holder creation |
 | `DecoderManager` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | Active holder lifecycle and holder page state |
 | `DecoderHolder` | [webp_image_provider.dart](../lib/foundation/image_provider/webp_image_provider.dart) | Native decoder, frame buffer, buffer-level reporting |
 | `WorkerPoolScheduler` | [webp_decoder.dart](../lib/utils/webp_decoder.dart) | Isolate frame decode with priority queues |
-| `DecodedImageCache` | [decoded_image_cache.dart](../lib/foundation/image_provider/decoded_image_cache.dart) | L1 decoded images, L2 bytes, L3 RGBA |
+| `DecodedImageCache` | [decoded_image_cache.dart](../lib/foundation/image_provider/cache/decoded_image_cache.dart) | L1 decoded images, L2 bytes, L3 RGBA |
 
 ## 7. Why Not a Parameter Model Yet?
 

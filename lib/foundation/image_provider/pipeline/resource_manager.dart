@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'pipeline_models.dart';
+import 'resource_entry.dart';
 
 /// Manages the lifecycle of [ResourceEntry] objects and orchestrates
 /// the download → decode pipeline for a set of image pages.

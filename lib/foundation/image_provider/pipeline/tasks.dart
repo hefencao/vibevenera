@@ -3,11 +3,11 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
-import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
-import 'package:venera/foundation/image_provider/image_fetch.dart';
+import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
+import 'package:venera/foundation/image_provider/io/image_loader.dart';
 import 'package:venera/network/images.dart';
 
-import 'pipeline_models.dart';
+import 'resource_entry.dart';
 
 // ───────────────────────────────────────────────────────────────
 // 5. SchedulerTask — base with explicit lifecycle

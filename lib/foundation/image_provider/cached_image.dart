@@ -4,10 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/network/images.dart';
-import 'package:venera/utils/io.dart';
 import 'base_image_provider.dart';
 import 'cached_image.dart' as image_provider;
-import 'image_fetch.dart';
+import 'io/image_loader.dart';
 
 class CachedImageProvider
     extends BaseImageProvider<image_provider.CachedImageProvider> {

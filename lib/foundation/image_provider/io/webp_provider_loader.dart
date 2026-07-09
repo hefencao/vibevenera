@@ -108,13 +108,13 @@ extension _WebPImageProviderLoader on WebPImageProvider {
   Future<_ProgressiveLoadResult?> _tryLoadAnimatedStreaming({
     StreamController<ImageChunkEvent>? chunkEvents,
   }) =>
-      WebPStreamSession(this).loadAnimated(chunkEvents: chunkEvents);
+      _WebPStreamSession(this).loadAnimated(chunkEvents: chunkEvents);
 
   StreamSubscription<ImageDownloadProgress>? _resumeStreamingIntoHolder(
     DecoderHolder holder, {
     void Function()? onDone,
   }) =>
-      WebPStreamSession(this).resumeIntoHolder(holder, onDone: onDone);
+      _WebPStreamSession(this).resumeIntoHolder(holder, onDone: onDone);
 
   Future<Uint8List> _fetchBytes({
     StreamController<ImageChunkEvent>? chunkEvents,

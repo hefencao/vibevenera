@@ -8,25 +8,25 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:venera/foundation/cache_manager.dart';
-import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
+import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
-import 'image_fetch.dart';
-import 'pipeline_controller.dart';
-import 'pipeline_models.dart';
+import 'io/image_loader.dart';
+import 'pipeline/pipeline_controller.dart';
+import 'pipeline/resource_entry.dart';
 
-part 'webp/webp_common.dart';
-part 'webp/webp_frame_buffer.dart';
-part 'webp/webp_decoder_holder.dart';
-part 'webp/webp_decode_service.dart';
-part 'webp/webp_decoder_manager.dart';
-part 'webp/webp_provider_static.dart';
-part 'webp/webp_stream_session.dart';
-part 'webp/webp_provider_loader.dart';
-part 'webp/webp_playback_controller.dart';
-part 'webp/webp_load_result.dart';
-part 'webp/webp_stream_completer.dart';
+part 'runtime/webp_common.dart';
+part 'runtime/webp_frame_buffer.dart';
+part 'decoder/webp_decoder_holder.dart';
+part 'decoder/webp_decode_service.dart';
+part 'decoder/webp_decoder_manager.dart';
+part 'pipeline/webp_provider_static.dart';
+part 'runtime/webp_stream_session.dart';
+part 'io/webp_provider_loader.dart';
+part 'runtime/webp_playback_controller.dart';
+part 'io/webp_load_result.dart';
+part 'runtime/webp_stream_completer.dart';
 
 class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   final String imageKey;

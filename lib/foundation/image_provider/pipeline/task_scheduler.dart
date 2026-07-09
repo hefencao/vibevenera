@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-import 'pipeline_tasks.dart';
+import 'tasks.dart';
 
 // ═══════════════════════════════════════════════════════════════
 // Image Pipeline — Policy → Resource → Scheduler

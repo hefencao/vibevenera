@@ -3,15 +3,15 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:venera/foundation/image_provider/decoded_image_cache.dart';
+import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'preload_policy.dart';
-import 'pipeline_models.dart';
-import 'pipeline_resource_manager.dart';
-import 'pipeline_tasks.dart';
+import 'resource_entry.dart';
+import 'resource_manager.dart';
+import 'tasks.dart';
 import 'task_scheduler.dart';
 
 // ═══════════════════════════════════════════════════════════════

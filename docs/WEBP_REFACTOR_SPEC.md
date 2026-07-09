@@ -32,20 +32,20 @@ This spec defines the staged refactor of the WebP image provider and playback ru
 - `part` directives
 - `WebPImageProvider` class for now
 
-New part files:
+Current part files are organized by behavior directory:
 
 ```text
-webp/webp_common.dart
-webp/webp_frame_buffer.dart
-webp/webp_decoder_holder.dart
-webp/webp_decode_service.dart
-webp/webp_decoder_manager.dart
-webp/webp_provider_static.dart
-webp/webp_provider_loader.dart
-webp/webp_stream_session.dart
-webp/webp_playback_controller.dart
-webp/webp_load_result.dart
-webp/webp_stream_completer.dart
+runtime/webp_common.dart
+runtime/webp_frame_buffer.dart
+decoder/webp_decoder_holder.dart
+decoder/webp_decode_service.dart
+decoder/webp_decoder_manager.dart
+pipeline/webp_provider_static.dart
+io/webp_provider_loader.dart
+runtime/webp_stream_session.dart
+runtime/webp_playback_controller.dart
+io/webp_load_result.dart
+runtime/webp_stream_completer.dart
 ```
 
 Acceptance:
@@ -100,11 +100,12 @@ Acceptance:
 Split by behavior/dependency boundary, not by arbitrary line count:
 
 ```text
-pipeline_models.dart
-pipeline_resource_manager.dart
-pipeline_tasks.dart
-task_scheduler.dart
-pipeline_controller.dart
+pipeline/resource_entry.dart
+pipeline/resource_manager.dart
+pipeline/tasks.dart
+pipeline/task_scheduler.dart
+pipeline/preload_policy.dart
+pipeline/pipeline_controller.dart
 ```
 
 Acceptance:
@@ -113,7 +114,7 @@ Acceptance:
 - Policy/resource data live outside task scheduler.
 - Task execution wrappers live outside task scheduler.
 - `PrecreateTask` does not import or call `WebPImageProvider` directly; holder creation is injected.
-- Existing public imports continue to work after updating direct users of data types to `pipeline_models.dart`.
+- Direct users import data types from `pipeline/resource_entry.dart`.
 - `dart analyze` passes.
 
 ## Phase 4 playback controller acceptance

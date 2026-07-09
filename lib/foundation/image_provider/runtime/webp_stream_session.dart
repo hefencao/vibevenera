@@ -1,8 +1,8 @@
 part of '../webp_image_provider.dart';
 
-class WebPStreamSession {
+class _WebPStreamSession {
   final WebPImageProvider provider;
-  WebPStreamSession(this.provider);
+  _WebPStreamSession(this.provider);
 
   String get imageKey => provider.imageKey;
   String? get sourceKey => provider.sourceKey;

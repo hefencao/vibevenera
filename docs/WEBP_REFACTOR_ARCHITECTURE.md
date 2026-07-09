@@ -55,37 +55,50 @@ WebPImageStreamCompleter consumes current holder
 
 ## Target module boundaries
 
-Initial low-risk split keeps a single Dart library via `part/part of`:
+Current split keeps WebP runtime in one Dart library via `part/part of`, but
+moves files by behavior/dependency directory:
 
 ```text
 lib/foundation/image_provider/
   webp_image_provider.dart              # WebPImageProvider entry / part directives
-  webp/
+  decoder/
+    webp_decoder_holder.dart            # WebP decoder holder lifecycle/state
+    webp_decode_service.dart            # WebP holder decode dispatch
+    webp_decoder_manager.dart           # WebP holder manager/eviction
+  runtime/
     webp_common.dart                    # shared helpers and BufferedFrame
     webp_frame_buffer.dart              # holder-owned frame/raw queues
-    webp_decoder_holder.dart            # DecoderHolder lifecycle/state
-    webp_decode_service.dart            # HolderDecodeService
-    webp_decoder_manager.dart           # DecoderManager
-    webp_provider_static.dart           # page policy/static helpers
-    webp_provider_loader.dart           # bytes/static/animated branching
     webp_stream_session.dart            # visible streaming/resume
     webp_playback_controller.dart       # animation loop/reload/resume control
-    webp_load_result.dart               # private load result DTOs
     webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
+  io/
+    image_loader.dart                   # generic local/cache/network byte loader
+    local_file_loader.dart              # generic local file / SAF-safe read path
+    network_loader.dart                 # generic ImageDownloader stream adapter
+    webp_provider_loader.dart           # WebP bytes/static/animated branching
+    webp_load_result.dart               # private WebP load result DTOs
+  pipeline/
+    webp_provider_static.dart           # WebP target/page/pipeline helpers
+  cache/
+    decoded_image_cache.dart            # facade for reader WebP caches
+    gpu_cache.dart                      # generic ui.Image L1 cache
+    byte_cache.dart                     # generic raw byte L2 cache
+    frame_cache.dart                    # generic RGBA frame L3 cache
 ```
 
-Pipeline/task scheduler is split by behavior and dependency boundary before moving directories:
+Pipeline/task scheduler is split by behavior and dependency boundary:
 
 ```text
-lib/foundation/image_provider/
-  pipeline_models.dart              # Interaction/Page priority, ResourcePolicy, ResourceEntry, progress DTOs
-  pipeline_resource_manager.dart    # ResourceManager and resource events
-  pipeline_tasks.dart               # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
-  task_scheduler.dart               # registry, migration, queue dispatch only
-  pipeline_controller.dart          # window policy, rank, work submission orchestration
+lib/foundation/image_provider/pipeline/
+  resource_entry.dart           # Interaction/Page priority, ResourcePolicy, ResourceEntry, progress DTOs
+  resource_manager.dart         # ResourceManager and resource events
+  tasks.dart                    # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
+  task_scheduler.dart           # registry, migration, queue dispatch only
+  preload_policy.dart           # water-level and relative-page tables
+  pipeline_controller.dart      # window policy, rank, work submission orchestration
 ```
 
-`TaskScheduler` must not depend on `WebPImageProvider`; WebP holder creation is injected into `PrecreateTask` through a holder factory. Later directory moves under `image_provider/pipeline/` should be done only after these behavior boundaries are stable.
+`TaskScheduler` must not depend on `WebPImageProvider`; WebP holder creation is injected into `PrecreateTask` through a holder factory. Generic files do not use a `webp_` prefix; WebP-specific files keep it.
 
 ## Renderer backend model
 

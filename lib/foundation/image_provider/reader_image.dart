@@ -5,7 +5,7 @@ import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/js_engine.dart';
 import 'base_image_provider.dart';
-import 'image_fetch.dart';
+import 'io/image_loader.dart';
 import 'reader_image.dart' as image_provider;
 
 class ReaderImageProvider
