@@ -136,13 +136,6 @@ class PipelineWorkSubmitter {
     required DecodedImageCache? cache,
     required int session,
   }) {
-    if (entry.priority == PagePriority.current) {
-      debugPrint(
-        '[WebP-Stream][pipeline] download-eval key=${entry.imageKey} '
-        'hasBytes=${entry.hasBytes} inProgress=${entry.download.inProgress} '
-        'allowD=${entry.policy.allowDownload} allowDecode=${entry.policy.allowDecode}',
-      );
-    }
     if (!entry.policy.allowDownload) return;
     if (entry.hasBytes) return;
     final l2Bytes = cache?.getL2(entry.imageKey);
@@ -249,13 +242,6 @@ class PipelineWorkSubmitter {
     required DecodedImageCache? cache,
     required int session,
   }) {
-    if (entry.priority == PagePriority.current) {
-      debugPrint(
-        '[WebP-Stream][pipeline] decode-eval key=${entry.imageKey} '
-        'hasBytes=${entry.hasBytes} hasHolder=${entry.hasHolder} '
-        'inProgress=${entry.decode.inProgress} allow=${entry.policy.allowDecode}',
-      );
-    }
     if (!entry.policy.allowDecode) return;
     if (entry.hasHolder) return;
     if (!entry.hasBytes) return;

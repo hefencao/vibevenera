@@ -32,7 +32,6 @@ class DecoderHolder {
   int streamLoadedBytes = 0;
   int? streamExpectedBytes;
   int _streamEmptyDecodeCount = 0;
-  int _lastStreamDecodeLogMs = 0;
   bool _streamFailed = false;
   bool _streamDownloadClosed = false;
   Object? streamError;
@@ -99,6 +98,7 @@ class DecoderHolder {
     if (_disposed || _pendingDispose) return;
     if (!_policy.allowDecode || !_policy.allowGpuUpload) return;
     if (_decodeInFlight) return;
+    if (_streamAtAvailableEnd) return;
 
     final target = _state == PageState.current
         ? _highWatermark
@@ -138,16 +138,6 @@ class DecoderHolder {
       _completeRefillWaiters();
       if (decoder.isStreaming) {
         _streamEmptyDecodeCount++;
-        final now = _nowMs();
-        if (_streamEmptyDecodeCount <= 3 ||
-            now - _lastStreamDecodeLogMs >= 1000) {
-          _lastStreamDecodeLogMs = now;
-          debugPrint(
-            '[WebP-Stream][decode] empty#$_streamEmptyDecodeCount '
-            'frames=${decoder.frameCount} buf=$bufferLength raw=${_frameBuffer.rawLength} '
-            '$shortKey',
-          );
-        }
         if (_streamEmptyDecodeCount >= 6 &&
             decoder.streamIsComplete &&
             queuedFrameCount == 0 &&
@@ -180,14 +170,7 @@ class DecoderHolder {
       return;
     }
     decodedFrameCount += frames.length;
-    if (decoder.isStreaming) {
-      _streamEmptyDecodeCount = 0;
-      debugPrint(
-        '[WebP-Stream][decode] frames=${frames.length} '
-        'totalDecoded=$decodedFrameCount buf=$bufferLength raw=${_frameBuffer.rawLength} '
-        '$shortKey',
-      );
-    }
+    if (decoder.isStreaming) _streamEmptyDecodeCount = 0;
     _frameBuffer.addRawFrames(frames);
     _pumpUpload();
     _requestFramesIfNeeded();
@@ -205,8 +188,7 @@ class DecoderHolder {
       decoder.isStreaming &&
       !decoder.streamIsComplete &&
       decoder.frameCount > 0 &&
-      decodedFrameCount >= decoder.frameCount &&
-      queuedFrameCount == 0;
+      decodedFrameCount >= decoder.frameCount;
 
   /// Generation at the time the last decode was dispatched.
   int _dispatchGen = 0;
@@ -283,7 +265,6 @@ class DecoderHolder {
     decodedFrameCount = 0;
     uploadedFrameCount = 0;
     _streamEmptyDecodeCount = 0;
-    _lastStreamDecodeLogMs = 0;
     markStreamActive();
     _completeRefillWaiters();
   }
@@ -298,7 +279,7 @@ class DecoderHolder {
     streamExpectedBytes = total ?? streamExpectedBytes;
   }
 
-  bool restartAvailableStreamPlayback({int minFrames = 3}) {
+  bool restartAvailableStreamPlayback({int minFrames = 1}) {
     if (_disposed || _pendingDispose || !decoder.isStreaming) return false;
     if (decoder.streamIsComplete || decoder.frameCount < minFrames) return false;
     if (queuedFrameCount > 0 || _isUploading) return false;
@@ -311,9 +292,6 @@ class DecoderHolder {
     decoder.restartStreamPlayback();
     resetStreamPlaybackState();
     requestRefill();
-    if (cancelInFlight) {
-      debugPrint('[WebP-Stream][visible] REPLAY-CANCEL-DECODE $shortKey');
-    }
     return true;
   }
 

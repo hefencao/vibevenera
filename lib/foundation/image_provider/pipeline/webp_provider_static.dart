@@ -86,9 +86,6 @@ Future<DecoderHolder?> _ensureWebPHolder({
       th,
       scale,
     );
-    debugPrint(
-      '[WebP-HOLDER] ${_short(fullKey)} created (${bytes.length ~/ 1024}KB)',
-    );
     return holder;
   } catch (_) {
     return null;

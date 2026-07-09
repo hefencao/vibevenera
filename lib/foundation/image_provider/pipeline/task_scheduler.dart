@@ -95,7 +95,6 @@ class _MigrationManager {
       }
     }
     for (final t in toCancel) {
-      debugPrint('[Migration] CANCEL ${t.key} (out of range)');
       t.cancel();
       queue.remove(t);
       registry.remove(t.key);
@@ -113,7 +112,6 @@ class _MigrationManager {
     for (final t in registry.runningNotIn(activeKeys)) {
       if (!t.cancelable) continue;
       if (t is DownloadTask) continue;
-      debugPrint('[Migration] CANCEL-RUNNING ${t.key}');
       t.cancel();
       registry.remove(t.key);
     }
@@ -243,10 +241,6 @@ class TaskScheduler {
       }
       final task = _queue.removeAt(0);
       _registry.promoteToRunning(task);
-      debugPrint(
-        '[TaskScheduler] DISPATCH ${task.key} pri=${task.priority} '
-        'running=${_registry.runningCount}/$_maxConcurrent',
-      );
       scheduleMicrotask(() {
         try {
           task.execute();
@@ -263,9 +257,6 @@ class TaskScheduler {
     SchedulerTask incoming,
     int oldPriority,
   ) {
-    debugPrint(
-      '[TaskScheduler] PREEMPT ${existing.key} ($oldPriority → ${incoming.priority})',
-    );
     existing.cancel();
     _queue.remove(existing);
     _registry.remove(existing.key);
@@ -286,10 +277,6 @@ class TaskScheduler {
     if (lowest == null) return;
     if (incoming.priority - lowest.priority < _preemptionThreshold) return;
 
-    debugPrint(
-      '[TaskScheduler] PREEMPT-RUNNING ${lowest.key} '
-      '(${lowest.priority} → ${incoming.priority})',
-    );
     lowest.cancel();
     _registry.remove(lowest.key);
   }

@@ -52,15 +52,8 @@ class WebPStreamDecodeCoordinator {
         : null;
     webp.WebPAnimDecoder? decoder = holder?.decoder;
     var appendedUntil = holder?.streamLoadedBytes ?? 0;
-    var chunkCount = 0;
-    var lastDebugBytes = 0;
-    var lastFrameCount = -1;
     var stopped = false;
     var completed = false;
-    debugPrint(
-      '[WebP-Stream][pipeline] START key=${entry.imageKey} '
-      'priority=${entry.priority} full=${entry.fullKey}',
-    );
     if (holder != null) _publishHolder(resources, entry, holder);
 
     void dispose() {
@@ -85,16 +78,10 @@ class WebPStreamDecodeCoordinator {
       final canDecode = entry.policy.allowDecode && entry.policy.allowGpuUpload;
       if (!canDecode || (entry.hasHolder && holder == null)) {
         stopped = true;
-        debugPrint(
-          '[WebP-Stream][pipeline] STOP allowDecode=${entry.policy.allowDecode} '
-          'allowGpu=${entry.policy.allowGpuUpload} hasHolder=${entry.hasHolder} '
-          'priority=${entry.priority} ${entry.imageKey}',
-        );
         dispose();
         return;
       }
       if (event.reset && decoder != null && !decoder!.isDisposed) {
-        debugPrint('[WebP-Stream][pipeline] RESET ${entry.imageKey}');
         decoder!.resetStreamInput();
         holder?.clearBufferedFrames();
         holder?.updateStreamTransfer(0, null, reset: true);
@@ -121,37 +108,12 @@ class WebPStreamDecodeCoordinator {
             ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
             : chunk;
         appendedUntil = chunkEnd;
-        chunkCount++;
-        if (chunkCount <= 3 ||
-            event.currentBytes - lastDebugBytes >= 1024 * 1024) {
-          lastDebugBytes = event.currentBytes;
-          debugPrint(
-            '[WebP-Stream][pipeline] chunk#$chunkCount '
-            '+${data.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
-            '${entry.imageKey}',
-          );
-        }
         final ready = d.appendStreamChunk(data);
-        if (ready && d.frameCount != lastFrameCount) {
-          lastFrameCount = d.frameCount;
-          debugPrint(
-            '[WebP-Stream][pipeline] info animated=${d.streamIsAnimated} '
-            'frames=${d.frameCount} ${d.targetWidth}x${d.targetHeight} '
-            '${entry.imageKey}',
-          );
-        }
-        if (ready && !d.streamIsAnimated) {
-          debugPrint('[WebP-Stream][pipeline] ready but static ${entry.imageKey}');
-        }
         if (ready &&
             d.streamIsAnimated &&
             holder == null &&
             d.frameCount > 0 &&
             d.targetWidth > 0) {
-          debugPrint(
-            '[WebP-Stream][pipeline] READY animated ${d.frameCount}f '
-            '${d.targetWidth}x${d.targetHeight} ${entry.imageKey}',
-          );
           holder = DecoderManager.instance.getOrCreateHolder(
             entry.fullKey,
             d,
@@ -164,7 +126,6 @@ class WebPStreamDecodeCoordinator {
           h.markStreamActive();
           _publishHolder(resources, entry, h);
           if (canDecode) holder?.requestRefill();
-          debugPrint('[WebP-Stream][pipeline] HOLDER ${entry.imageKey}');
         } else {
           holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
           holder?.markStreamActive();
@@ -176,10 +137,6 @@ class WebPStreamDecodeCoordinator {
         holder?.updateStreamTransfer(
           event.imageBytes!.length,
           event.imageBytes!.length,
-        );
-        debugPrint(
-          '[WebP-Stream][pipeline] FINAL ${event.imageBytes!.length}B '
-          'holder=${holder != null} ${entry.imageKey}',
         );
         final d = decoder;
         if (d != null && !d.isDisposed) {
@@ -215,7 +172,6 @@ class WebPStreamDecodeCoordinator {
       debugLabel: 'pipeline-stream-attach',
     );
     if (stream == null) {
-      debugPrint('[WebP-Stream][pipeline] ATTACH skip no-shared ${entry.imageKey}');
       return false;
     }
     final handle = start(
@@ -247,7 +203,6 @@ class WebPStreamDecodeCoordinator {
     );
     _subs[entry.fullKey] = sub;
     _disposers[entry.fullKey] = handle.dispose;
-    debugPrint('[WebP-Stream][pipeline] ATTACH running ${entry.imageKey}');
     return true;
   }
 

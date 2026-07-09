@@ -15,15 +15,22 @@ extension _WebPImageProviderLoader on WebPImageProvider {
           existingHolder != null &&
           !existingHolder.disposed) {
         if (existingHolder.decoder.isStreaming) {
-          debugPrint(
-            '[WebP-Stream][visible] REUSE-HOLDER ${existingHolder.shortKey} '
-            'frames=${existingHolder.decoder.frameCount} decoded=${existingHolder.decodedFrameCount} '
-            'buf=${existingHolder.bufferLength} raw=${existingHolder.queuedFrameCount - existingHolder.bufferLength} '
-            'closed=${existingHolder.streamNeedsResume} failed=${existingHolder.streamFailed} '
-            'loaded=${existingHolder.streamLoadedBytes}/${existingHolder.streamExpectedBytes ?? -1}',
-          );
+          if (existingHolder.streamFailed) {
+            existingHolder.dispose();
+          } else if (existingHolder.streamNeedsResume) {
+            final cachedBytes =
+                await tryReadFromCache(imageKey, sourceKey, cid, eid);
+            if (cachedBytes != null && webp.isWebP(cachedBytes)) {
+              existingHolder.dispose();
+            } else {
+              return _ImageResult.animated(existingHolder);
+            }
+          } else {
+            return _ImageResult.animated(existingHolder);
+          }
+        } else {
+          return _ImageResult.animated(existingHolder);
         }
-        return _ImageResult.animated(existingHolder);
       }
 
       // L1 cache check (decoded ui.Image in memory)

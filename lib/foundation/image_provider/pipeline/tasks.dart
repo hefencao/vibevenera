@@ -1,7 +1,7 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
@@ -100,7 +100,6 @@ abstract class PolicyAwareTask extends SchedulerTask {
 
     final ctx = _ctx;
     if (ctx == null || !permissionValid(ctx)) {
-      debugPrint('[Task] CANCEL-POLICY $key (permission revoked)');
       cancel();
       notifyCompleted();
       return;
@@ -281,14 +280,7 @@ class DownloadTask extends PolicyAwareTask {
 
   @override
   Future<void> doExecute(ExecutionContext ctx) async {
-    debugPrint('[DownloadTask] START $key (gen=$generation pri=$priority)');
-
     _cancelToken = CancelToken();
-
-    // [FIX-9] Runtime policy check via CancelToken
-    _cancelToken!.whenCancel.then((_) {
-      debugPrint('[DownloadTask] cancel token triggered for $key');
-    });
 
     try {
       final bytes = await _exec.execute(
@@ -317,14 +309,12 @@ class DownloadTask extends PolicyAwareTask {
 
       // [FIX-9] Check context still valid after async gap
       if (!ctx.downloadAllowed) {
-        debugPrint('[DownloadTask] CANCEL-POLICY-RUNTIME $key');
         if (isCancelled) {
           _rejectAll('Policy changed mid-download');
           throw Exception('Policy changed mid-download');
         }
       }
 
-      debugPrint('[DownloadTask] DONE $key (${bytes.length ~/ 1024}KB)');
       _resolveAll(bytes);
     } catch (e) {
       if (!isCancelled) {
@@ -444,7 +434,6 @@ class PrecreateTask extends PolicyAwareTask {
 
   @override
   Future<void> doExecute(ExecutionContext ctx) async {
-    debugPrint('[Precreate] EXEC $_imageKey (gen=$generation pri=$priority)');
     final holder = await _holderFactory(
       imageKey: _imageKey,
       fullKey: key,
@@ -463,7 +452,6 @@ class PrecreateTask extends PolicyAwareTask {
       if (!c.isCompleted) c.complete(holder);
     }
     _holderCompleters.clear();
-    debugPrint('[Precreate] DONE $_imageKey');
   }
 
   @override

@@ -186,7 +186,6 @@ class DecoderManager {
     for (final k in toRemove) {
       final h = _holders.remove(k);
       if (h != null) {
-        debugPrint('[WebP] ${_short(k)} evicted (distant)');
         h.markPendingDispose();
       }
     }

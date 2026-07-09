@@ -26,10 +26,6 @@ class _WebPStreamSession {
     final completer = Completer<_ProgressiveLoadResult?>();
     DecoderHolder? holder;
     Uint8List? finalBytes;
-    var chunkCount = 0;
-    var lastDebugBytes = 0;
-    var lastFrameCount = -1;
-    debugPrint('[WebP-Stream][visible] START ${_short(_fullKey)}');
 
     late StreamSubscription<ImageDownloadProgress> sub;
     sub = ImageDownloader.loadComicImage(
@@ -62,47 +58,18 @@ class _WebPStreamSession {
           );
         }
         if (event.reset && !decoder.isDisposed) {
-          debugPrint('[WebP-Stream][visible] RESET ${_short(_fullKey)}');
           decoder.resetStreamInput();
           holder?.clearBufferedFrames();
           holder?.resetStreamPlaybackState();
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
-          chunkCount++;
-          if (chunkCount <= 3 ||
-              event.currentBytes - lastDebugBytes >= 1024 * 1024) {
-            lastDebugBytes = event.currentBytes;
-            debugPrint(
-              '[WebP-Stream][visible] chunk#$chunkCount '
-              '+${chunk.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1}',
-            );
-          }
           final ready = decoder.appendStreamChunk(chunk);
-          if (ready && decoder.frameCount != lastFrameCount) {
-            lastFrameCount = decoder.frameCount;
-            debugPrint(
-              '[WebP-Stream][visible] info animated=${decoder.streamIsAnimated} '
-              'frames=${decoder.frameCount} ${decoder.targetWidth}x${decoder.targetHeight} '
-              '${_short(_fullKey)}',
-            );
-          }
-          if (ready && !decoder.streamIsAnimated) {
-            debugPrint(
-              '[WebP-Stream][visible] ready but static '
-              '${decoder.targetWidth}x${decoder.targetHeight} ${_short(_fullKey)}',
-            );
-          }
           if (ready &&
               decoder.streamIsAnimated &&
               holder == null &&
               decoder.frameCount > 0 &&
               decoder.targetWidth > 0) {
-            debugPrint(
-              '[WebP-Stream][visible] READY animated '
-              '${decoder.frameCount}f ${decoder.targetWidth}x${decoder.targetHeight} '
-              '${_short(_fullKey)}',
-            );
             holder = DecoderManager.instance.getOrCreateHolder(
               _fullKey,
               decoder,
@@ -118,7 +85,6 @@ class _WebPStreamSession {
               holder,
             );
             if (holder!.state == PageState.current) holder!.requestRefill();
-            debugPrint('[WebP-Stream][visible] HOLDER ${_short(_fullKey)}');
             if (!completer.isCompleted) {
               completer.complete(
                 _ProgressiveLoadResult.animated(holder!, sub),
@@ -132,10 +98,6 @@ class _WebPStreamSession {
         if (bytes != null) {
           finalBytes = bytes;
           holder?.updateStreamTransfer(bytes.length, bytes.length);
-          debugPrint(
-            '[WebP-Stream][visible] FINAL ${bytes.length}B '
-            'holder=${holder != null} ${_short(_fullKey)}',
-          );
           if (cache != null && webp.isWebP(bytes)) cache!.putL2(imageKey, bytes);
           PipelineController.instance.publishExternalBytes(imageKey, bytes);
           if (!decoder.isDisposed) {
@@ -161,10 +123,6 @@ class _WebPStreamSession {
         if (holder == null && !decoder.isDisposed) decoder.dispose();
       },
       onDone: () {
-        debugPrint(
-          '[WebP-Stream][visible] DONE holder=${holder != null} '
-          'final=${finalBytes?.length ?? 0} ${_short(_fullKey)}',
-        );
         if (holder != null && finalBytes == null) {
           holder!.markStreamDownloadClosed(StateError('stream ended without final bytes'));
         }
@@ -203,32 +161,18 @@ class _WebPStreamSession {
         PipelineController.instance.hasStreamDecodeAttached(_fullKey);
     final resumeExistingInput = resumeFromBytes > 0;
     var appendedUntil = resumeExistingInput ? resumeFromBytes : 0;
-    debugPrint(
-      '[WebP-Stream][visible] RESUME ${_short(_fullKey)} '
-      'offset=$resumeFromBytes keep=$resumeExistingInput '
-      'attached=$attachedByPipeline',
-    );
     if (attachedByPipeline) {
       holder.markStreamActive();
       holder.requestRefill();
       return null;
     }
     if (resumeExistingInput) {
-      final restarted = holder.restartAvailableStreamPlayback(minFrames: 1);
-      debugPrint(
-        '[WebP-Stream][visible] RESUME-RESTART ${_short(_fullKey)} '
-        'ok=$restarted frames=${decoder.frameCount} decoded=${holder.decodedFrameCount} '
-        'buf=${holder.bufferLength} '
-        'raw=${holder.queuedFrameCount - holder.bufferLength} '
-        'inFlight=${holder._decodeInFlight} uploading=${holder._isUploading}',
-      );
+      holder.restartAvailableStreamPlayback(minFrames: 1);
     } else {
       decoder.resetStreamInput();
       holder.clearBufferedFrames();
       holder.resetStreamPlaybackState();
     }
-    var chunkCount = 0;
-    var lastDebugBytes = 0;
     var completed = false;
     var closedByPolicy = false;
     late StreamSubscription<ImageDownloadProgress> sub;
@@ -275,16 +219,6 @@ class _WebPStreamSession {
               ? Uint8List.sublistView(chunk, appendedUntil - chunkStart)
               : chunk;
           appendedUntil = chunkEnd;
-          chunkCount++;
-          if (chunkCount <= 3 ||
-              event.currentBytes - lastDebugBytes >= 1024 * 1024) {
-            lastDebugBytes = event.currentBytes;
-            debugPrint(
-              '[WebP-Stream][visible] resume-chunk#$chunkCount '
-              '+${data.length} loaded=${event.currentBytes}/${event.totalBytes ?? -1} '
-              '${_short(_fullKey)}',
-            );
-          }
           final ready = decoder.appendStreamChunk(data);
           if (ready) holder.requestRefill();
         }

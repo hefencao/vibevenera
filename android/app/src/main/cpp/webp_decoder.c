@@ -18,7 +18,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <sys/time.h>
 #include <android/log.h>
 
 #define LOGTAG "WebP_Native"
@@ -221,13 +220,6 @@ void webp_init_native(void) {
 #define POOL_MAX_SIZE 18
 #define STREAM_DEMUX_REFRESH_BYTES (512 * 1024)
 
-/* ─── 微秒级计时 ─── */
-static int64_t now_us() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + (int64_t)tv.tv_usec;
-}
-
 /* ================================================================
  * 原生缓冲池（Zero-Copy 管线核心）
  * ================================================================ */
@@ -296,7 +288,6 @@ uint8_t* webp_native_pool_acquire(size_t size) {
 
     // 3. 槽位全满，直接 malloc（不入池，release 时直接 free）
     pthread_mutex_unlock(&g_pool_mutex);
-    LOGD("[POOL] All %d slots busy, fallback malloc(%zu)", POOL_MAX_SIZE, size);
     return (uint8_t*)malloc(size);
 }
 
@@ -523,8 +514,6 @@ WebPAnimContext* webp_anim_decoder_new(const uint8_t* data, size_t size, int tar
     ctx->composite_canvas = (uint8_t*)calloc(1, canvas_bytes);
     if (!ctx->composite_canvas) { WebPDemuxDelete(demux); free(ctx); return NULL; }
     g_alive_contexts++;
-    LOGI("[LIFECYCLE] NEW  ctx=%p total_alive=%d frames=%d canvas=%dx%d target=%dx%d",
-         (void*)ctx, g_alive_contexts, ctx->frame_count, orig_w, orig_h, t_w, t_h);
     if (canvas_width) *canvas_width = orig_w; if (canvas_height) *canvas_height = orig_h;
     if (frame_count) *frame_count = ctx->frame_count; if (loop_count) *loop_count = ctx->loop_count;
     if (actual_width) *actual_width = t_w; if (actual_height) *actual_height = t_h;
@@ -565,7 +554,6 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     int f_h = (int)floor((ctx->iter.y_offset + ctx->iter.height) * ctx->scale_y) - f_y;
     if (f_w <= 0) f_w = 1; if (f_h <= 0) f_h = 1;
 
-    LOGD("Frame %d/%d scaled: %dx%d @ (%d,%d)", ctx->current_frame_num, ctx->frame_count, f_w, f_h, f_x, f_y);
 
     /* ── 5. 准备解码缓冲区（+4096 安全边距用于 SIMD 对齐） ── */
     size_t needed = (size_t)f_w * f_h * 4 + 4096;
@@ -586,9 +574,7 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
     cfg.output.u.RGBA.size = ctx->frame_buf_size;
     cfg.output.is_external_memory = 1;
 
-    int64_t t_dec = now_us();
     VP8StatusCode dec_status = WebPDecode(ctx->iter.fragment.bytes, ctx->iter.fragment.size, &cfg);
-    int64_t dt_dec = now_us() - t_dec;
 
     if (dec_status != VP8_STATUS_OK) {
         LOGE("WebPDecode failed for frame %d/%d (frame skipped)", ctx->current_frame_num, ctx->frame_count);
@@ -614,10 +600,8 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
 
     /* ── 11. 从原生缓冲池获取输出缓冲区，拷贝合成画布（Premultiplied Alpha） ── */
     size_t canvas_bytes = (size_t)ctx->target_w * ctx->target_h * 4;
-    int64_t t_copy = now_us();
     uint8_t* out = webp_native_pool_acquire(canvas_bytes);
     memcpy(out, ctx->composite_canvas, canvas_bytes);
-    int64_t dt_copy = now_us() - t_copy;
 
     /* ── 12. 设置帧时长 ── */
     if (duration_ms) {
@@ -625,11 +609,6 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
         if (d <= 10) d = 100;
         *duration_ms = d;
     }
-
-    LOGD("[TIMING] f%d/%d dec=%lldus copy=%lldus size=%dx%d threads=%d",
-         ctx->current_frame_num, ctx->frame_count,
-         (long long)dt_dec, (long long)dt_copy,
-         dec_w, dec_h, ctx->use_threads);
 
     return out;
 }
@@ -662,13 +641,11 @@ void webp_anim_decoder_reset(WebPAnimContext* ctx) {
 
 void webp_anim_decoder_delete(WebPAnimContext* ctx) {
     if (!ctx) return;
-    LOGI("[LIFECYCLE] DEL START ctx=%p", (void*)ctx);
     if (ctx->has_frame) WebPDemuxReleaseIterator(&ctx->iter);
     if (ctx->demux) WebPDemuxDelete(ctx->demux);
     free(ctx->composite_canvas);
     free(ctx->frame_buf);
     g_alive_contexts--;
-    LOGI("[LIFECYCLE] DEL DONE ctx=%p total_alive=%d", (void*)ctx, g_alive_contexts);
     free(ctx);
 }
 
@@ -715,8 +692,6 @@ static int stream_refresh_demux_locked(WebPAnimStreamContext* ctx) {
         ctx->prev_dispose = -1;
         ctx->initialized = 1;
         g_alive_contexts++;
-        LOGI("[LIFECYCLE] STREAM NEW ctx=%p total_alive=%d canvas=%dx%d target=%dx%d",
-             (void*)ctx, g_alive_contexts, orig_w, orig_h, t_w, t_h);
     }
     ctx->frame_count = WebPDemuxGetI(demux, WEBP_FF_FRAME_COUNT);
     ctx->loop_count = WebPDemuxGetI(demux, WEBP_FF_LOOP_COUNT);
@@ -928,7 +903,6 @@ void webp_anim_stream_decoder_delete(WebPAnimStreamContext* ctx) {
     free(ctx->frame_buf);
     if (ctx->initialized) {
         g_alive_contexts--;
-        LOGI("[LIFECYCLE] STREAM DEL ctx=%p total_alive=%d", (void*)ctx, g_alive_contexts);
     }
     pthread_mutex_unlock(&ctx->mutex);
     pthread_mutex_destroy(&ctx->mutex);

@@ -450,8 +450,6 @@ WebPImageInfo? getInfo(Uint8List data) {
 WebPStaticFrame? decodeStatic(Uint8List data,
     {required int targetWidth, required int targetHeight}) {
   if (!isWebP(data)) return null;
-  final sw = Stopwatch()..start();
-
   final nativeData = data._asNative();
 
   final outW = calloc<Int32>();
@@ -474,12 +472,10 @@ WebPStaticFrame? decodeStatic(Uint8List data,
     final length = w * h * 4;
 
     final rgba = result.asTypedList(length);
-    final copySw = Stopwatch()..start();
     final dartRgba = Uint8List.fromList(rgba);
 
     _bind.freeBuffer(result);
 
-    debugPrint('[WebP] decodeStatic ${w}x$h C=${sw.elapsedMilliseconds}ms copy=${copySw.elapsedMilliseconds}ms');
     return WebPStaticFrame(rgba: dartRgba, width: w, height: h);
   } finally {
     calloc.free(outW);
@@ -532,7 +528,6 @@ WebPAnimDecoder? createAnimDecoder(Uint8List data,
       targetWidth: aW.value,
       targetHeight: aH.value,
     );
-    debugPrint('[WebP] +decoder #${_bind.animAliveCount()} ${decoder.frameCount}f ${decoder.targetWidth}x${decoder.targetHeight}');
     return decoder;
   } finally {
     calloc.free(cW);
@@ -766,7 +761,6 @@ class WorkerPoolScheduler {
         final ctx = Pointer<Void>.fromAddress(decoderAddress);
         // 单次 FFI 调用批量解码 N 帧，消除 per-frame FFI 往返开销
         final cResults = calloc<Int64>(count * 2);
-        final tStart = DateTime.now().microsecondsSinceEpoch;
         var n = isStreaming
             ? bindings.streamGetFrames(ctx, count, cResults)
             : bindings.animGetFrames(ctx, count, cResults);
@@ -774,17 +768,14 @@ class WorkerPoolScheduler {
           bindings.animReset(ctx);
           n = bindings.animGetFrames(ctx, count, cResults);
         }
-        final dtTotal = (DateTime.now().microsecondsSinceEpoch - tStart) ~/ 1000;
 
         if (n > 0) {
           final results = Int64List.fromList(cResults.asTypedList(n * 2));
           calloc.free(cResults);
           replyPort.send(results);
-          debugPrint('[WebP-T] w$workerIndex batch=$n/$count total=${dtTotal}ms avg=${n>0?dtTotal~/n:0}ms/f addr=${decoderAddress & 0xFFFF}');
         } else {
           calloc.free(cResults);
           replyPort.send(Int64List(0));
-          debugPrint('[WebP-T] w$workerIndex batch=0/$count (eos) addr=${decoderAddress & 0xFFFF}');
         }
       } catch (e, stack) {
         debugPrint('[WebP-Worker] w$workerIndex crash: $e\n$stack');
@@ -798,9 +789,6 @@ class WorkerPoolScheduler {
     // enter the queue. Previously the generation check happened
     // AFTER the worker had already done the decode work.
     if (_isStale(job)) {
-      debugPrint('[WebP-T] dispatch REJECT stale gen=${job.generation} '
-          'curr=$_currentGeneration epoch=${job.decoderEpoch}/${decoderEpoch(job.decoderAddress)} '
-          'addr=${job.decoderAddress & 0xFFFF}');
       job.onComplete([]);
       return;
     }
@@ -892,13 +880,7 @@ class WorkerPoolScheduler {
       sourceQueue!.remove(job);
       _activeDecoders.add(job.decoderAddress);
 
-      final queueWaitUs = DateTime.now().microsecondsSinceEpoch - job.dispatchedAt;
-      debugPrint('[WebP-T] w$assignedWorker dequeue wait=${queueWaitUs ~/ 1000}ms '
-          'n=${job.framesToDecode} addr=${job.decoderAddress & 0xFFFF} gen=${job.generation}');
-
       if (_isStale(job)) {
-        debugPrint('[WebP-T] w$assignedWorker stale gen=${job.generation} curr=$_currentGeneration '
-            'epoch=${job.decoderEpoch}/${decoderEpoch(job.decoderAddress)}');
         _activeDecoders.remove(job.decoderAddress);
         job.onComplete([]);
         continue;
@@ -916,7 +898,6 @@ class WorkerPoolScheduler {
     }
 
     _workerBusy[workerIndex] = true;
-    final t0 = DateTime.now().microsecondsSinceEpoch;
     try {
       final replyPort = ReceivePort();
       port.send([replyPort.sendPort, job.decoderAddress, job.framesToDecode,
@@ -924,10 +905,7 @@ class WorkerPoolScheduler {
 
       final result = await replyPort.first;
       replyPort.close();
-      final dt = (DateTime.now().microsecondsSinceEpoch - t0) ~/ 1000;
-
       if (result is Int64List) {
-        final n = result.length ~/ 2;
         if (!_isStale(job)) {
           final List<WebPAnimFrameAddress> frames = [];
           for (int i = 0; i < result.length; i += 2) {
@@ -936,8 +914,6 @@ class WorkerPoolScheduler {
               durationMs: result[i + 1],
             ));
           }
-          final avgPerFrame = n > 0 ? dt ~/ n : 0;
-          debugPrint('[WebP-T] w$workerIndex recv $n frames rtt=${dt}ms avg=$avgPerFrame ms/f gen=${job.generation}');
           job.onComplete(frames);
         } else {
           for (int i = 0; i < result.length; i += 2) {
@@ -1151,8 +1127,6 @@ class WebPAnimDecoder {
     } else {
       _bindings.animDelete(_ctx);
     }
-    final alive = _bindings.animAliveCount();
-    debugPrint('[WebP] -decoder ($alive remain)');
     _nativeData?._free();
   }
 

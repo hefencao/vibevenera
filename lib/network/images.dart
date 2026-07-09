@@ -190,7 +190,6 @@ class _DownloadResumeState {
       expectedBytes != null && downloadedBytes >= expectedBytes!;
 
   Future<void> initFromPartial() async {
-    final sw = Stopwatch()..start();
     final chunks = await partialCache?.readChunks();
     if (chunks == null || chunks.isEmpty) return;
     var len = 0;
@@ -202,11 +201,6 @@ class _DownloadResumeState {
     setExpectedBytes(partialCache?.memoryExpectedBytes);
     setExpectedBytes(_declaredWebPBytesFromChunks(chunks));
     _checkedDeclaredBytes = downloadedBytes >= 12;
-    debugPrint(
-      '[WebP-Stream][partial] init ${debugLabel ?? ''} '
-      '${chunks.length}c ${downloadedBytes}B mem=${partialCache?.memoryLength ?? 0} '
-      '${sw.elapsedMilliseconds}ms',
-    );
   }
 
   void setExpectedBytes(int? value) {
@@ -235,7 +229,6 @@ class _DownloadResumeState {
     if (hasReplayedPartial || downloadedBytes <= fromBytes) return;
     hasReplayedPartial = true;
     final chunks = _replayChunks;
-    final sw = Stopwatch()..start();
     const chunkSize = 256 * 1024;
     if (chunks != null) {
       var builder = BytesBuilder(copy: false);
@@ -268,10 +261,6 @@ class _DownloadResumeState {
         if (builder.length >= chunkSize) await flush();
       }
       await flush();
-      debugPrint(
-        '[WebP-Stream][partial] replay ${debugLabel ?? ''} '
-        '$fromBytes->$downloadedBytes events=$emitted ${sw.elapsedMilliseconds}ms',
-      );
       return;
     }
     final bytes = _buffer.toBytes();
@@ -283,10 +272,6 @@ class _DownloadResumeState {
         await Future<void>.delayed(Duration.zero);
       }
     }
-    debugPrint(
-      '[WebP-Stream][partial] replay-buffer ${debugLabel ?? ''} '
-      '${downloadedBytes}B ${sw.elapsedMilliseconds}ms',
-    );
   }
 
   Future<void> add(List<int> chunk) async {
@@ -454,15 +439,6 @@ abstract class ImageDownloader {
     return '${key.substring(0, 48)}...${key.substring(key.length - 36)}';
   }
 
-  static String _downloadDebugKey(String key) {
-    final plain = key.split('@').first;
-    final slash = plain.lastIndexOf('/');
-    final bslash = plain.lastIndexOf('\\');
-    final name = plain.substring((slash > bslash ? slash : bslash) + 1);
-    if (name.length <= 48) return name;
-    return '${name.substring(0, 16)}...${name.substring(name.length - 24)}';
-  }
-
   static void _warnDownload(String? debugLabel, String message) {
     Log.warning(
       'ImageDownloader',
@@ -543,7 +519,7 @@ abstract class ImageDownloader {
     }
 
     final config = ImageRequestConfig.fromMap(url, rawConfig);
-    yield* _executeDownload(config: config, cacheKey: cacheKey, debugKey: url);
+    yield* _executeDownload(config: config, cacheKey: cacheKey);
   }
 
   /// Load a comic image (deduplicated across concurrent calls).
@@ -602,13 +578,6 @@ abstract class ImageDownloader {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final existing = _loadingImages[cacheKey];
     if (existing == null) return null;
-    if (imageKey.toLowerCase().contains('.webp') ||
-        _loadingImages.containsKey(cacheKey)) {
-      debugPrint(
-        '[WebP-Stream][download] JOIN key=${_downloadDebugKey(imageKey)} '
-        'label=${debugLabel ?? 'unknown'}',
-      );
-    }
     return existing.stream;
   }
 
@@ -701,7 +670,6 @@ abstract class ImageDownloader {
           enableModifyImage: true,
           cancelToken: cancelToken,
           debugLabel: debugLabel,
-          debugKey: imageKey,
           replayPartial: shouldReplayPartial,
           resumeFromBytes: resumeOffset,
           resumeExpectedBytes: resumeExpected,
@@ -793,7 +761,6 @@ abstract class ImageDownloader {
     bool enableModifyImage = false,
     CancelToken? cancelToken,
     String? debugLabel,
-    String? debugKey,
     bool replayPartial = true,
     int? resumeFromBytes,
     int? resumeExpectedBytes,
@@ -817,19 +784,7 @@ abstract class ImageDownloader {
       headers['Accept-Encoding'] = 'identity';
     }
     final canStreamDecode = config.modifyImage == null && config.onResponse == null;
-    final streamDebug = requestUrl.toLowerCase().contains('.webp');
-    final key = _downloadDebugKey(debugKey ?? cacheKey);
-    if (streamDebug) {
-      debugPrint(
-        '[WebP-Stream][download] START key=$key '
-        'label=${debugLabel ?? 'unknown'} canStream=$canStreamDecode '
-        'enableModifyImage=$enableModifyImage '
-        'onResponse=${config.onResponse != null} '
-        'modify=${config.modifyImage != null} url=$requestUrl',
-      );
-    }
     var streamChunkCount = 0;
-    var lastStreamDebugBytes = 0;
     var pendingChunk = BytesBuilder(copy: false);
     var pendingCurrent = 0;
     int? pendingTotal;
@@ -840,15 +795,6 @@ abstract class ImageDownloader {
       final chunk = pendingChunk.takeBytes();
       pendingChunk = BytesBuilder(copy: false);
       streamChunkCount++;
-      if (streamDebug &&
-          (streamChunkCount <= 3 ||
-              pendingCurrent - lastStreamDebugBytes >= 1024 * 1024)) {
-        lastStreamDebugBytes = pendingCurrent;
-        debugPrint(
-          '[WebP-Stream][download] chunk#$streamChunkCount key=$key '
-          '+${chunk.length} loaded=$pendingCurrent/${pendingTotal ?? -1}',
-        );
-      }
       progressEvents.add(
         ImageDownloadProgress(
           currentBytes: pendingCurrent,
@@ -904,10 +850,6 @@ abstract class ImageDownloader {
         'Connection closed while receiving data: ${data.length}/$declared',
       );
     }
-    if (streamDebug) {
-      debugPrint('[WebP-Stream][download] RAW-DONE key=$key bytes=${data.length}');
-    }
-
     if (raw.expectedBytes != null) {
       yield ImageDownloadProgress(
         currentBytes: data.length,

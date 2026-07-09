@@ -137,12 +137,6 @@ class WebPPlaybackController {
       final pipelineAttached =
           PipelineController.instance.hasStreamDecodeAttached(holder.key);
       if (holder.streamNeedsResume && _progressiveSub == null && !pipelineAttached) {
-        debugPrint(
-          '[WebP-Stream][visible] RESUME-CLOSED ${holder.shortKey} '
-          'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
-          'buf=${holder.bufferLength} loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1} '
-          '${holder.streamError}',
-        );
         _progressiveSub = provider._resumeStreamingIntoHolder(
           holder,
           onDone: () => _progressiveSub = null,
@@ -153,12 +147,9 @@ class WebPPlaybackController {
           '[WebP-Stream][visible] RELOAD failed-stream ${holder.shortKey} '
           '${holder.streamError}',
         );
-        final canUseFinalBytes =
-            holder.decoder.isStreaming && holder.decoder.streamIsComplete;
         final nh = await _reloadAndRestart(
           holder,
-          forceNetwork: !canUseFinalBytes,
-          forceFullDecode: canUseFinalBytes,
+          forceFullDecode: true,
         );
         if (nh != null) {
           holder = nh;
@@ -221,7 +212,6 @@ class WebPPlaybackController {
     if (_progressiveSub != null &&
         holder.decoder.isStreaming &&
         !holder.decoder.streamIsComplete) {
-      debugPrint('[WebP-Stream][visible] PAUSE ${holder.shortKey}');
       await _progressiveSub?.cancel();
       _progressiveSub = null;
     }
@@ -259,24 +249,8 @@ class WebPPlaybackController {
         holder._streamAtAvailableEnd &&
         playback.nullFrameWaits >= (playback.hasShownFirstFrame ? 1 : 3) &&
         holder.restartAvailableStreamPlayback()) {
-      debugPrint('[WebP-Stream][visible] REPLAY-PARTIAL ${holder.shortKey}');
       playback.resetStartup();
       return;
-    }
-    if (currentHolder &&
-        holder.decoder.isStreaming &&
-        !holder.decoder.streamIsComplete &&
-        _progressiveSub != null &&
-        playback.nullFrameWaits >= 30 &&
-        playback.resumeWaitElapsed) {
-      debugPrint(
-        '[WebP-Stream][visible] WAIT-DOWNLOAD ${holder.shortKey} '
-        'frames=${holder.decoder.frameCount} decoded=${holder.decodedFrameCount} '
-        'buf=${holder.bufferLength} raw=${holder.queuedFrameCount - holder.bufferLength} '
-        'inFlight=${holder._decodeInFlight} uploading=${holder._isUploading} '
-        'loaded=${holder.streamLoadedBytes}/${holder.streamExpectedBytes ?? -1}',
-      );
-      playback.nullFrameWaits = 0;
     }
     if (currentHolder &&
         holder.decoder.isStreaming &&
