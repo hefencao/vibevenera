@@ -67,15 +67,9 @@ lib/foundation/image_provider/
     webp_decode_service.dart            # HolderDecodeService
     webp_decoder_manager.dart           # DecoderManager
     webp_provider_static.dart           # page policy/static helpers
-    webp_provider_loader.dart           # cache/bytes load orchestration
-    webp_provider_decode.dart           # fetch/static/animated decode helpers
-    webp_stream_session.dart            # session context/getters
-    webp_stream_load.dart               # visible streaming startup
-    webp_stream_resume.dart             # resume into existing holder
-    webp_playback_timing.dart           # playback state/timing constants
-    webp_playback_controller.dart       # animation loop controller
-    webp_playback_streaming.dart        # reload/resume/stream recovery helpers
-    webp_playback_waits.dart            # listener/lifecycle/startup/null-frame waits
+    webp_provider_loader.dart           # bytes/static/animated branching
+    webp_stream_session.dart            # visible streaming/resume
+    webp_playback_controller.dart       # animation loop/reload/resume control
     webp_load_result.dart               # private load result DTOs
     webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
 ```

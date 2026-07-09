@@ -18,12 +18,11 @@
 - 已提交：`e1eb066 Improve WebP streaming download scheduling`。
 - 已生成 WebP 重构 ARCHITECTURE/SPEC。
 - `webp_image_provider.dart` 已用 `part` 拆分，主文件约 143 行。
-- 已抽出 `WebPFrameBuffer`、provider loader/decode/static、holder、decode service、manager、completer part。
-- `WebPStreamSession` 已继续拆为 session shell、stream load、stream resume，loader 保留薄代理。
+- 已抽出 `WebPFrameBuffer`、provider loader/static、holder、decode service、manager、completer part。
+- 已抽出 `WebPStreamSession`，visible streaming / resume streaming 由 session 承载，loader 保留薄代理。
 - 已抽出 `WebPPlaybackController`，completer 只保留 Flutter 生命周期、chunk 上报、结果分发；播放循环/reload/resume 已迁出。
 - 已抽出 `webp_load_result.dart`，加载结果类型与 stream completer 解耦。
 - `WebPPlaybackController` 主循环已 helper 化，renderability/startup/null-frame 等等待逻辑独立。
-- 已拆出 `webp_playback_timing.dart`、`webp_playback_streaming.dart`、`webp_playback_waits.dart`，播放计时、streaming/reload、等待策略从控制器主体分离。
 
 ## 关键决策
 
