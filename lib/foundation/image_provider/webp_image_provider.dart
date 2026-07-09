@@ -23,6 +23,8 @@ part 'webp/webp_decode_service.dart';
 part 'webp/webp_decoder_manager.dart';
 part 'webp/webp_provider_static.dart';
 part 'webp/webp_stream_session.dart';
+part 'webp/webp_stream_load.dart';
+part 'webp/webp_stream_resume.dart';
 part 'webp/webp_provider_loader.dart';
 part 'webp/webp_playback_timing.dart';
 part 'webp/webp_playback_controller.dart';

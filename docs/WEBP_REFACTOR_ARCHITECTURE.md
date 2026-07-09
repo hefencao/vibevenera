@@ -68,7 +68,9 @@ lib/foundation/image_provider/
     webp_decoder_manager.dart           # DecoderManager
     webp_provider_static.dart           # page policy/static helpers
     webp_provider_loader.dart           # bytes/static/animated branching
-    webp_stream_session.dart            # visible streaming/resume
+    webp_stream_session.dart            # session context/getters
+    webp_stream_load.dart               # visible streaming startup
+    webp_stream_resume.dart             # resume into existing holder
     webp_playback_timing.dart           # playback state/timing constants
     webp_playback_controller.dart       # animation loop controller
     webp_playback_streaming.dart        # reload/resume/stream recovery helpers
