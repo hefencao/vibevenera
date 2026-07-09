@@ -95,6 +95,27 @@ Acceptance:
 - Running download can continue after leaving active window.
 - Re-entering a page can attach/resume without restarting when a shared download exists.
 
+## Pipeline/task scheduler split acceptance
+
+Split by behavior/dependency boundary, not by arbitrary line count:
+
+```text
+pipeline_models.dart
+pipeline_resource_manager.dart
+pipeline_tasks.dart
+task_scheduler.dart
+pipeline_controller.dart
+```
+
+Acceptance:
+
+- `task_scheduler.dart` contains only registry/migration/queue dispatch logic.
+- Policy/resource data live outside task scheduler.
+- Task execution wrappers live outside task scheduler.
+- `PrecreateTask` does not import or call `WebPImageProvider` directly; holder creation is injected.
+- Existing public imports continue to work after updating direct users of data types to `pipeline_models.dart`.
+- `dart analyze` passes.
+
 ## Phase 4 playback controller acceptance
 
 Extract animation timing from `_WebPImageStreamCompleter`.

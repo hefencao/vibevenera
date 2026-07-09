@@ -14,7 +14,7 @@ import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'image_fetch.dart';
 import 'pipeline_controller.dart';
-import 'task_scheduler.dart';
+import 'pipeline_models.dart';
 
 part 'webp/webp_common.dart';
 part 'webp/webp_frame_buffer.dart';

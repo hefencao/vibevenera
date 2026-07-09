@@ -74,17 +74,18 @@ lib/foundation/image_provider/
     webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
 ```
 
-Later, after behavior is stable, pipeline files can move under:
+Pipeline/task scheduler is split by behavior and dependency boundary before moving directories:
 
 ```text
-lib/foundation/image_provider/pipeline/
-  pipeline_controller.dart
-  preload_policy.dart
-  resource_entry.dart
-  resource_policy.dart
-  resource_manager.dart
-  task_scheduler.dart
+lib/foundation/image_provider/
+  pipeline_models.dart              # Interaction/Page priority, ResourcePolicy, ResourceEntry, progress DTOs
+  pipeline_resource_manager.dart    # ResourceManager and resource events
+  pipeline_tasks.dart               # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
+  task_scheduler.dart               # registry, migration, queue dispatch only
+  pipeline_controller.dart          # window policy, rank, work submission orchestration
 ```
+
+`TaskScheduler` must not depend on `WebPImageProvider`; WebP holder creation is injected into `PrecreateTask` through a holder factory. Later directory moves under `image_provider/pipeline/` should be done only after these behavior boundaries are stable.
 
 ## Renderer backend model
 
