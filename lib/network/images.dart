@@ -733,6 +733,12 @@ abstract class ImageDownloader {
           );
           config = newConfig;
           if (!sameUrl) {
+            await _PartialImageCache(cacheKey).clear();
+            yield const ImageDownloadProgress(
+              currentBytes: 0,
+              totalBytes: null,
+              reset: true,
+            );
             shouldReplayPartial = false;
             resumeOffset = null;
             resumeExpected = null;

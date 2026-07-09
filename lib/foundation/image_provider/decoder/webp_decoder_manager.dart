@@ -55,6 +55,13 @@ class DecoderManager {
 
   DecoderHolder? getHolder(String key) => _holders[key];
 
+  void removeHolder(String key) {
+    final holder = _holders.remove(key);
+    if (holder == null) return;
+    holder.dispose();
+    if (_holders.isEmpty) _cancelEvictionTimer();
+  }
+
   DecoderHolder getOrCreateHolder(
     String key,
     webp.WebPAnimDecoder decoder,

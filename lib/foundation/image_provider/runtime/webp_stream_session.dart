@@ -26,6 +26,7 @@ class _WebPStreamSession {
     final completer = Completer<_ProgressiveLoadResult?>();
     DecoderHolder? holder;
     Uint8List? finalBytes;
+    var appendedUntil = 0;
 
     late StreamSubscription<ImageDownloadProgress> sub;
     sub = ImageDownloader.loadComicImage(
@@ -38,6 +39,7 @@ class _WebPStreamSession {
       (event) {
         if (event.reset) {
           holder?.updateStreamTransfer(0, null, reset: true);
+          holder?.traceStreamState('SIGNAL-RESET visible');
         } else {
           holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
         }
@@ -65,6 +67,7 @@ class _WebPStreamSession {
         }
         final chunk = event.chunkBytes;
         if (chunk != null && !decoder.isDisposed) {
+          appendedUntil = event.currentBytes;
           final ready = decoder.appendStreamChunk(chunk);
           if (ready &&
               decoder.streamIsAnimated &&
@@ -78,6 +81,20 @@ class _WebPStreamSession {
               decoder.targetHeight,
               scale,
             );
+            if (!identical(holder!.decoder, decoder)) {
+              if (!completer.isCompleted) {
+                completer.complete(_ProgressiveLoadResult.animated(holder!));
+              }
+              unawaited(sub.cancel());
+              return;
+            }
+            if (!holder!.acquireStreamOwner('visible')) {
+              if (!completer.isCompleted) {
+                completer.complete(_ProgressiveLoadResult.animated(holder!));
+              }
+              unawaited(sub.cancel());
+              return;
+            }
             holder!.updateStreamTransfer(event.currentBytes, event.totalBytes);
             holder!.markStreamActive();
             PipelineController.instance.publishExternalHolder(
@@ -99,10 +116,23 @@ class _WebPStreamSession {
         if (bytes != null) {
           finalBytes = bytes;
           holder?.updateStreamTransfer(bytes.length, bytes.length);
+          holder?.traceStreamState('SIGNAL-FINAL visible');
+          if (holder == null) {
+            TraceLog.info(
+              'WebP.Stream.Signal',
+              'SIGNAL-FINAL visible no-holder ${_short(_fullKey)} '
+                  'bytes=${bytes.length}',
+            );
+          }
           if (cache != null && webp.isWebP(bytes)) cache!.putL2(imageKey, bytes);
           PipelineController.instance.publishExternalBytes(imageKey, bytes);
           if (!decoder.isDisposed) {
-            decoder.appendStreamChunk(Uint8List(0), isFinal: true);
+            decoder.appendStreamChunk(
+              appendedUntil < bytes.length
+                  ? Uint8List.sublistView(bytes, appendedUntil)
+                  : Uint8List(0),
+              isFinal: true,
+            );
           }
           holder?.notifyStreamInputChanged();
           if (!completer.isCompleted) {
@@ -115,6 +145,7 @@ class _WebPStreamSession {
       onError: (e) {
         Log.warning('WebP.Stream.Visible', 'ERROR ${_short(_fullKey)} $e');
         final h = holder;
+        h?.releaseStreamOwner('visible');
         if (h != null && h.decoder.isStreaming && !h.decoder.streamIsComplete) {
           h.markStreamDownloadClosed(e);
         } else {
@@ -124,6 +155,7 @@ class _WebPStreamSession {
         if (holder == null && !decoder.isDisposed) decoder.dispose();
       },
       onDone: () {
+        holder?.releaseStreamOwner('visible');
         if (holder != null && finalBytes == null) {
           holder!.markStreamDownloadClosed(StateError('stream ended without final bytes'));
         }
@@ -157,14 +189,16 @@ class _WebPStreamSession {
     if (!decoder.isStreaming || decoder.isDisposed || decoder.streamIsComplete) {
       return null;
     }
+    if (!holder.acquireStreamOwner('visible')) return null;
     final resumeFromBytes = holder.streamLoadedBytes;
     final attachedByPipeline =
         PipelineController.instance.hasStreamDecodeAttached(_fullKey);
-    final resumeExistingInput = resumeFromBytes > 0;
+    final resumeExistingInput = resumeFromBytes > 0 && !holder.streamNeedsResume;
     var appendedUntil = resumeExistingInput ? resumeFromBytes : 0;
     if (attachedByPipeline) {
       holder.markStreamActive();
       holder.requestRefill();
+      holder.releaseStreamOwner('visible');
       return null;
     }
     if (resumeExistingInput) {
@@ -173,6 +207,8 @@ class _WebPStreamSession {
       decoder.resetStreamInput();
       holder.clearBufferedFrames();
       holder.resetStreamPlaybackState();
+      holder.updateStreamTransfer(0, null, reset: true);
+      holder.traceStreamState('RESUME-RESET visible');
     }
     var completed = false;
     var closedByPolicy = false;
@@ -190,6 +226,7 @@ class _WebPStreamSession {
       (event) {
         if (event.reset) {
           holder.updateStreamTransfer(0, null, reset: true);
+          holder.traceStreamState('SIGNAL-RESET resume');
         } else {
           holder.updateStreamTransfer(event.currentBytes, event.totalBytes);
         }
@@ -203,6 +240,7 @@ class _WebPStreamSession {
         if (!DecoderManager.instance.isActiveImageKey(imageKey)) {
           closedByPolicy = true;
           sub.cancel();
+          holder.releaseStreamOwner('visible');
           onDone?.call();
           return;
         }
@@ -228,15 +266,19 @@ class _WebPStreamSession {
         if (bytes != null) {
           completed = true;
           holder.updateStreamTransfer(bytes.length, bytes.length);
+          holder.traceStreamState('SIGNAL-FINAL resume');
           if (cache != null && webp.isWebP(bytes)) cache!.putL2(imageKey, bytes);
           PipelineController.instance.publishExternalBytes(imageKey, bytes);
           if (!decoder.isDisposed) {
             decoder.appendStreamChunk(
-              appendedUntil == 0 ? bytes : Uint8List(0),
+              appendedUntil < bytes.length
+                  ? Uint8List.sublistView(bytes, appendedUntil)
+                  : Uint8List(0),
               isFinal: true,
             );
           }
           holder.notifyStreamInputChanged();
+          holder.releaseStreamOwner('visible');
           onDone?.call();
         }
       },
@@ -246,12 +288,14 @@ class _WebPStreamSession {
           'RESUME-ERROR ${_short(_fullKey)} $e',
         );
         holder.markStreamDownloadClosed(e);
+        holder.releaseStreamOwner('visible');
         onDone?.call();
       },
       onDone: () {
         if (!completed && !closedByPolicy) {
           holder.markStreamDownloadClosed(StateError('resume ended without final bytes'));
         }
+        holder.releaseStreamOwner('visible');
         onDone?.call();
       },
       cancelOnError: false,

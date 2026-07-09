@@ -48,7 +48,7 @@ class _ProgressiveLoadResult {
   const _ProgressiveLoadResult._({this.holder, this.bytes, this.subscription});
   factory _ProgressiveLoadResult.animated(
     DecoderHolder holder,
-    StreamSubscription<ImageDownloadProgress> subscription,
+    [StreamSubscription<ImageDownloadProgress>? subscription]
   ) =>
       _ProgressiveLoadResult._(holder: holder, subscription: subscription);
   factory _ProgressiveLoadResult.bytes(Uint8List bytes) =>

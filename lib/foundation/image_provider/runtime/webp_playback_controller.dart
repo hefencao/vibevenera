@@ -75,6 +75,7 @@ class WebPPlaybackController {
   void dispose() {
     _disposed = true;
     _activeHolder?.wakePlaybackWaiters();
+    _activeHolder?.releaseStreamOwner('visible');
     _progressiveSub?.cancel();
     _progressiveSub = null;
   }
@@ -92,6 +93,7 @@ class WebPPlaybackController {
     try {
       await _progressiveSub?.cancel();
       _progressiveSub = null;
+      oldHolder.releaseStreamOwner('visible');
       if (forceNetwork) {
         provider.cache?.evictL2(provider.imageKey);
         await CacheManager().delete(
@@ -215,6 +217,7 @@ class WebPPlaybackController {
         !holder.decoder.streamIsComplete) {
       await _progressiveSub?.cancel();
       _progressiveSub = null;
+      holder.releaseStreamOwner('visible');
     }
     await Future.delayed(WebPPlaybackTiming.inactivePoll);
     return true;
@@ -229,10 +232,11 @@ class WebPPlaybackController {
         holder.state != PageState.current) {
       return false;
     }
-    holder.requestRefill();
     holder.refillSignal ??= Completer<void>();
+    final refill = holder.refillSignal!.future;
+    holder.requestRefill();
     await Future.any([
-      holder.refillSignal!.future,
+      refill,
       Future.delayed(WebPPlaybackTiming.firstFramePoll),
     ]);
     return true;
@@ -243,6 +247,12 @@ class WebPPlaybackController {
     WebPPlaybackState playback,
   ) async {
     playback.markNullFrame();
+    if (playback.nullFrameWaits == 1 ||
+        playback.nullFrameWaits == 3 ||
+        playback.nullFrameWaits == 6 ||
+        playback.nullFrameWaits % 30 == 0) {
+      holder.traceStreamState('PLAYBACK-NULL n=${playback.nullFrameWaits}');
+    }
     final currentHolder = holder.state == PageState.current;
     if (currentHolder &&
         holder.decoder.isStreaming &&
@@ -256,21 +266,47 @@ class WebPPlaybackController {
     if (currentHolder &&
         holder.decoder.isStreaming &&
         holder.decoder.streamIsComplete &&
+        playback.nullFrameWaits >= 1 &&
+        holder._restartCompletedStreamPlayback()) {
+      playback.resetStartup();
+      return;
+    }
+    if (currentHolder &&
+        holder.decoder.isStreaming &&
+        holder.decoder.streamIsComplete &&
         playback.nullFrameWaits >= 6 &&
         holder._streamMayDecodeMore) {
       holder.markStreamFailed(StateError('stream ended before all frames'));
       return;
     }
+    if (currentHolder &&
+        holder.decoder.isStreaming &&
+        !holder.decoder.streamIsComplete &&
+        playback.nullFrameWaits >= 6 &&
+        holder.decodedFrameCount == 0 &&
+        holder.streamLoadedBytes > 0) {
+      holder.traceStreamState('RESYNC partial-stall');
+      await _progressiveSub?.cancel();
+      _progressiveSub = null;
+      holder.releaseStreamOwner('visible');
+      holder.markStreamDownloadClosed(StateError('partial stream stalled'));
+      return;
+    }
     if (holder.disposed) return;
     holder.refillSignal ??= Completer<void>();
+    final refill = holder.refillSignal!.future;
+    holder.requestRefill();
     if (currentHolder &&
         holder.decoder.isStreaming &&
         !holder.decoder.streamIsComplete) {
-      await holder.refillSignal!.future;
+      await Future.any([
+        refill,
+        Future.delayed(WebPPlaybackTiming.emptyFrameWait(true)),
+      ]);
       return;
     }
     await Future.any([
-      holder.refillSignal!.future,
+      refill,
       Future.delayed(WebPPlaybackTiming.emptyFrameWait(currentHolder)),
     ]);
   }

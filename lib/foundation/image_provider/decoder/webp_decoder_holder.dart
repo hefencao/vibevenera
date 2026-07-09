@@ -34,15 +34,19 @@ class DecoderHolder {
   int _streamEmptyDecodeCount = 0;
   bool _streamFailed = false;
   bool _streamDownloadClosed = false;
+  bool _streamDecodeReachedAvailableEnd = false;
+  String? _streamOwner;
   Object? streamError;
   bool get streamFailed => _streamFailed;
   bool get streamNeedsResume =>
       _streamDownloadClosed && decoder.isStreaming && !decoder.streamIsComplete;
+  String? get streamOwner => _streamOwner;
 
   bool _decodeInFlight = false;
   bool _isUploading = false;
   int _decodeToken = 0;
   Completer<void>? refillSignal;
+  int _lastTraceMs = 0;
 
   /// Callback set by [HolderDecodeService]. Called when the holder
   /// needs more frames decoded.
@@ -137,9 +141,15 @@ class DecoderHolder {
         _pendingDispose = false;
         dispose();
       }
-      _completeRefillWaiters();
       if (decoder.isStreaming) {
         _streamEmptyDecodeCount++;
+        if (_shouldTraceEmptyDecode()) {
+          traceStreamState('DECODE-EMPTY', throttle: _streamEmptyDecodeCount > 6);
+        }
+        if (!decoder.streamIsComplete && decodedFrameCount > 0) {
+          _streamDecodeReachedAvailableEnd = true;
+        }
+        if (_restartCompletedStreamPlayback()) return;
         if (_streamEmptyDecodeCount >= 6 &&
             decoder.streamIsComplete &&
             queuedFrameCount == 0 &&
@@ -153,6 +163,7 @@ class DecoderHolder {
         }
         return;
       }
+      _completeRefillWaiters();
       _requestFramesIfNeeded();
       return;
     }
@@ -172,7 +183,10 @@ class DecoderHolder {
       return;
     }
     decodedFrameCount += frames.length;
-    if (decoder.isStreaming) _streamEmptyDecodeCount = 0;
+    if (decoder.isStreaming) {
+      _streamEmptyDecodeCount = 0;
+      _streamDecodeReachedAvailableEnd = false;
+    }
     _frameBuffer.addRawFrames(frames);
     _pumpUpload();
     _requestFramesIfNeeded();
@@ -190,7 +204,32 @@ class DecoderHolder {
       decoder.isStreaming &&
       !decoder.streamIsComplete &&
       decoder.frameCount > 0 &&
-      decodedFrameCount >= decoder.frameCount;
+      (decodedFrameCount >= decoder.frameCount ||
+          _streamDecodeReachedAvailableEnd);
+
+  bool _restartCompletedStreamPlayback() {
+    if (!decoder.isStreaming || !decoder.streamIsComplete) return false;
+    if (decoder.frameCount <= 0 || decodedFrameCount < decoder.frameCount) {
+      return false;
+    }
+    if (_decodeInFlight) return false;
+    if (queuedFrameCount > 0 || _isUploading) return false;
+    _decodeToken++;
+    decoder.restartStreamPlayback();
+    decodedFrameCount = 0;
+    uploadedFrameCount = 0;
+    _streamEmptyDecodeCount = 0;
+    _streamDecodeReachedAvailableEnd = false;
+    traceStreamState('FINAL-RESTART');
+    requestRefill();
+    return true;
+  }
+
+  bool _shouldTraceEmptyDecode() =>
+      _streamEmptyDecodeCount == 1 ||
+      _streamEmptyDecodeCount == 3 ||
+      _streamEmptyDecodeCount == 6 ||
+      _streamEmptyDecodeCount % 30 == 0;
 
   /// Generation at the time the last decode was dispatched.
   int _dispatchGen = 0;
@@ -275,8 +314,22 @@ class DecoderHolder {
   void notifyStreamInputChanged() {
     if (_disposed || _pendingDispose) return;
     _streamEmptyDecodeCount = 0;
+    _streamDecodeReachedAvailableEnd = false;
     requestRefill();
     _completeRefillWaiters();
+  }
+
+  bool acquireStreamOwner(String owner) {
+    if (_streamOwner == null || _streamOwner == owner) {
+      _streamOwner = owner;
+      return true;
+    }
+    traceStreamState('OWNER-BUSY $owner current=$_streamOwner');
+    return false;
+  }
+
+  void releaseStreamOwner(String owner) {
+    if (_streamOwner == owner) _streamOwner = null;
   }
 
   void _clearRawFrames() => _frameBuffer.clearRawFrames();
@@ -291,6 +344,7 @@ class DecoderHolder {
     decodedFrameCount = 0;
     uploadedFrameCount = 0;
     _streamEmptyDecodeCount = 0;
+    _streamDecodeReachedAvailableEnd = false;
     markStreamActive();
     _completeRefillWaiters();
   }
@@ -299,6 +353,7 @@ class DecoderHolder {
     if (reset) {
       streamLoadedBytes = 0;
       streamExpectedBytes = null;
+      _streamDecodeReachedAvailableEnd = false;
       return;
     }
     if (current > streamLoadedBytes) streamLoadedBytes = current;
@@ -307,7 +362,7 @@ class DecoderHolder {
 
   bool restartAvailableStreamPlayback({int minFrames = 1}) {
     if (_disposed || _pendingDispose || !decoder.isStreaming) return false;
-    if (decoder.streamIsComplete || decoder.frameCount < minFrames) return false;
+    if (decoder.streamIsComplete || decodedFrameCount < minFrames) return false;
     if (queuedFrameCount > 0 || _isUploading) return false;
     final cancelInFlight = _decodeInFlight;
     if (cancelInFlight) {
@@ -317,6 +372,7 @@ class DecoderHolder {
     _decodeToken++;
     decoder.restartStreamPlayback();
     resetStreamPlaybackState();
+    traceStreamState('PARTIAL-RESTART');
     requestRefill();
     return true;
   }
@@ -331,6 +387,7 @@ class DecoderHolder {
     if (_disposed || _pendingDispose) return;
     _streamDownloadClosed = true;
     streamError = reason;
+    traceStreamState('DOWNLOAD-CLOSED $reason');
     _completeRefillWaiters();
   }
 
@@ -339,6 +396,7 @@ class DecoderHolder {
     _streamFailed = true;
     _streamDownloadClosed = false;
     streamError = error;
+    traceStreamState('FAILED $error');
     _completeRefillWaiters();
   }
 
@@ -353,6 +411,25 @@ class DecoderHolder {
     _pumpUpload();
     _requestFramesIfNeeded();
     _notifyCurrentBuffer();
+  }
+
+  void traceStreamState(String event, {bool throttle = false}) {
+    if (!decoder.isStreaming) return;
+    final now = _nowMs();
+    if (throttle && now - _lastTraceMs < 1000) return;
+    _lastTraceMs = now;
+    TraceLog.info(
+      'WebP.Stream.State',
+      '$event $shortKey '
+          'st=$_state loaded=$streamLoadedBytes/$streamExpectedBytes '
+          'final=${decoder.streamIsComplete} fc=${decoder.frameCount} '
+          'dec=$decodedFrameCount up=$uploadedFrameCount '
+          'buf=$bufferLength raw=${_frameBuffer.rawLength} '
+          'q=$queuedFrameCount in=$_decodeInFlight upload=$_isUploading '
+          'atEnd=$_streamAtAvailableEnd failed=$_streamFailed '
+          'closed=$_streamDownloadClosed owner=$_streamOwner '
+          'empty=$_streamEmptyDecodeCount',
+    );
   }
 
   void _notifyCurrentBuffer() {

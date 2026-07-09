@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:venera/foundation/image_provider/webp_image_provider.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/utils/trace_log.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'resource_entry.dart';
@@ -30,9 +31,10 @@ class WebPStreamDecodeCoordinator {
       ImageDownloader.isLoadingComicImage(imageKey, sourceKey, cid, eid);
 
   void markDownloadStale(ResourceEntry entry) {
-    DecoderManager.instance
-        .getHolder(entry.fullKey)
-        ?.markStreamDownloadClosed(StateError('stale pipeline download'));
+    final holder = DecoderManager.instance.getHolder(entry.fullKey);
+    if (holder != null) {
+      _dropHolder(entry, holder, 'stale pipeline download');
+    }
     detach(entry.fullKey);
   }
 
@@ -52,10 +54,25 @@ class WebPStreamDecodeCoordinator {
         ? existingHolder
         : null;
     webp.WebPAnimDecoder? decoder = holder?.decoder;
-    var appendedUntil = holder?.streamLoadedBytes ?? 0;
+    var appendedUntil = holder != null && !holder.streamNeedsResume
+        ? holder.streamLoadedBytes
+        : 0;
     var stopped = false;
     var completed = false;
-    if (holder != null) _publishHolder(resources, entry, holder);
+    if (holder != null) {
+      if (!holder.acquireStreamOwner('pipeline')) {
+        _attached.remove(entry.fullKey);
+        return null;
+      }
+      if (holder.streamNeedsResume && decoder != null && !decoder.isDisposed) {
+        decoder.resetStreamInput();
+        holder.clearBufferedFrames();
+        holder.resetStreamPlaybackState();
+        holder.updateStreamTransfer(0, null, reset: true);
+        holder.traceStreamState('RESUME-RESET pipeline');
+      }
+      _publishHolder(resources, entry, holder);
+    }
 
     void dispose() {
       stopped = true;
@@ -68,8 +85,9 @@ class WebPStreamDecodeCoordinator {
           !d.isDisposed &&
           d.isStreaming &&
           !d.streamIsComplete) {
-        holder!.markStreamDownloadClosed(StateError('pipeline stream detached'));
+        _dropHolder(entry, holder!, 'pipeline stream detached');
       }
+      holder?.releaseStreamOwner('pipeline');
       if (holder == null && d != null && !d.isDisposed) d.dispose();
     }
     _disposers[entry.fullKey] = dispose;
@@ -87,6 +105,7 @@ class WebPStreamDecodeCoordinator {
         holder?.clearBufferedFrames();
         holder?.updateStreamTransfer(0, null, reset: true);
         holder?.resetStreamPlaybackState();
+        holder?.traceStreamState('SIGNAL-RESET pipeline');
         holder?.notifyStreamInputChanged();
         appendedUntil = 0;
       }
@@ -124,6 +143,11 @@ class WebPStreamDecodeCoordinator {
             1.0,
           );
           final h = holder!;
+          if (!h.acquireStreamOwner('pipeline')) {
+            stopped = true;
+            dispose();
+            return;
+          }
           h.updateStreamTransfer(event.currentBytes, event.totalBytes);
           h.markStreamActive();
           _publishHolder(resources, entry, h);
@@ -140,10 +164,20 @@ class WebPStreamDecodeCoordinator {
           event.imageBytes!.length,
           event.imageBytes!.length,
         );
+        holder?.traceStreamState('SIGNAL-FINAL pipeline');
+        if (holder == null) {
+          TraceLog.info(
+            'WebP.Stream.Signal',
+            'SIGNAL-FINAL pipeline no-holder ${entry.fullKey} '
+                'bytes=${event.imageBytes!.length}',
+          );
+        }
         final d = decoder;
         if (d != null && !d.isDisposed) {
           d.appendStreamChunk(
-            appendedUntil == 0 ? event.imageBytes! : Uint8List(0),
+            appendedUntil < event.imageBytes!.length
+                ? Uint8List.sublistView(event.imageBytes!, appendedUntil)
+                : Uint8List(0),
             isFinal: true,
           );
           if (canDecode) holder?.notifyStreamInputChanged();
@@ -252,6 +286,19 @@ class WebPStreamDecodeCoordinator {
         peer.decode.markSuccess();
       }
     }
+  }
+
+  void _dropHolder(ResourceEntry entry, DecoderHolder holder, String reason) {
+    holder.traceStreamState('DROP-HOLDER $reason');
+    for (final peer in _resourcesForDrop(entry)) {
+      peer.holder = null;
+      peer.decode.reset();
+    }
+    DecoderManager.instance.removeHolder(holder.key);
+  }
+
+  Iterable<ResourceEntry> _resourcesForDrop(ResourceEntry entry) sync* {
+    yield entry;
   }
 
   static String _baseKey(String fullKey) {
