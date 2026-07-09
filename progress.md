@@ -21,6 +21,7 @@
 - 已抽出 `WebPFrameBuffer`、provider loader/static、holder、decode service、manager、completer part。
 - 已抽出 `WebPStreamSession`，visible streaming / resume streaming 由 session 承载，loader 保留薄代理。
 - 已抽出 `WebPPlaybackController`，completer 只保留 Flutter 生命周期、chunk 上报、结果分发；播放循环/reload/resume 已迁出。
+- 已抽出 `webp_load_result.dart`，加载结果类型与 stream completer 解耦。
 
 ## 关键决策
 

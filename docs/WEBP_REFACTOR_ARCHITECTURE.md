@@ -59,15 +59,19 @@ Initial low-risk split keeps a single Dart library via `part/part of`:
 
 ```text
 lib/foundation/image_provider/
-  webp_image_provider.dart              # WebPImageProvider only after staged cleanup
+  webp_image_provider.dart              # WebPImageProvider entry / part directives
   webp/
     webp_common.dart                    # shared helpers and BufferedFrame
-    webp_frame_buffer.dart              # later: extracted holder buffer
-    webp_decoder_holder.dart            # DecoderHolder
+    webp_frame_buffer.dart              # holder-owned frame/raw queues
+    webp_decoder_holder.dart            # DecoderHolder lifecycle/state
     webp_decode_service.dart            # HolderDecodeService
     webp_decoder_manager.dart           # DecoderManager
-    webp_stream_loader.dart             # later: streaming attach/resume
-    webp_stream_completer.dart          # _WebPImageStreamCompleter and result types
+    webp_provider_static.dart           # page policy/static helpers
+    webp_provider_loader.dart           # bytes/static/animated branching
+    webp_stream_session.dart            # visible streaming/resume
+    webp_playback_controller.dart       # animation loop/reload/resume control
+    webp_load_result.dart               # private load result DTOs
+    webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
 ```
 
 Later, after behavior is stable, pipeline files can move under:
