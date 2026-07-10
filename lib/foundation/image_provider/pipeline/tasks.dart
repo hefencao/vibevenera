@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
 import 'package:venera/network/images.dart';
 
@@ -281,6 +282,7 @@ class DownloadTask extends PolicyAwareTask {
   @override
   Future<void> doExecute(ExecutionContext ctx) async {
     _cancelToken = CancelToken();
+    Log.info('WebP.Pipeline.Flow', 'DOWNLOAD-START ${_exec.imageKey.split('/').last}');
 
     try {
       final bytes = await _exec.execute(

@@ -20,6 +20,7 @@ class PipelineWorkSubmitter {
   final DownloadProgressPublisher progress;
   final String Function() currentKey;
   final bool Function(int session) isSessionActive;
+  final void Function(String imageKey, Uint8List bytes) onBytesPublished;
   final PrefetchBudget _prefetchBudget = const PrefetchBudget();
 
   PipelineWorkSubmitter({
@@ -29,6 +30,7 @@ class PipelineWorkSubmitter {
     required this.progress,
     required this.currentKey,
     required this.isSessionActive,
+    required this.onBytesPublished,
   });
 
   void submit({
@@ -57,6 +59,28 @@ class PipelineWorkSubmitter {
     }
   }
 
+  void submitEntry(
+    ResourceEntry entry, {
+    required String? sourceKey,
+    required String cid,
+    required String eid,
+    required int targetWidth,
+    required int targetHeight,
+    required DecodedImageCache? cache,
+    required int session,
+  }) {
+    _evaluateEntry(
+      entry,
+      sourceKey,
+      cid,
+      eid,
+      targetWidth: targetWidth,
+      targetHeight: targetHeight,
+      cache: cache,
+      session: session,
+    );
+  }
+
   void publishBytes(String imageKey, Uint8List bytes) {
     for (final peer in resources.getAllForImage(imageKey)) {
       peer.bytes = bytes;
@@ -64,6 +88,7 @@ class PipelineWorkSubmitter {
       peer.download.lastError = null;
     }
     progress.complete(imageKey, currentKey());
+    onBytesPublished(imageKey, bytes);
   }
 
   void publishDownloadProgress(

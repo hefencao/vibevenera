@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
+import 'package:venera/foundation/log.dart';
 
 import 'download_progress_publisher.dart';
 import 'download_ranker.dart';
@@ -34,7 +35,20 @@ import 'webp_stream_decode_coordinator.dart';
 
 class PipelineController {
   static final PipelineController instance = PipelineController._();
-  PipelineController._();
+  PipelineController._() {
+    _streamDecodes = WebPStreamDecodeCoordinator(
+      onHolderPublished: _completeStreamResultWaitersFor,
+    );
+    _workSubmitter = PipelineWorkSubmitter(
+      resources: resources,
+      scheduler: _scheduler,
+      streamDecodes: _streamDecodes,
+      progress: _progress,
+      currentKey: () => _currentKey,
+      isSessionActive: (session) => session == _sessionId,
+      onBytesPublished: _completeStreamResultBytes,
+    );
+  }
 
   final ResourceManager resources = ResourceManager();
   final TaskScheduler _scheduler = TaskScheduler.instance;
@@ -70,16 +84,9 @@ class PipelineController {
   String? _sourceKey;
   String _cid = '';
   String _eid = '';
-  final WebPStreamDecodeCoordinator _streamDecodes =
-      WebPStreamDecodeCoordinator();
-  late final PipelineWorkSubmitter _workSubmitter = PipelineWorkSubmitter(
-    resources: resources,
-    scheduler: _scheduler,
-    streamDecodes: _streamDecodes,
-    progress: _progress,
-    currentKey: () => _currentKey,
-    isSessionActive: (session) => session == _sessionId,
-  );
+  late final WebPStreamDecodeCoordinator _streamDecodes;
+  final Map<String, List<Completer<dynamic>>> _streamResultWaiters = {};
+  late final PipelineWorkSubmitter _workSubmitter;
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -228,6 +235,7 @@ class PipelineController {
   }
 
   void _applyWindow({bool protectJump = false}) {
+    final previousCurrent = _currentKey;
     final plan = _windowPlanner.build(
       currentIdx: _currentIdx,
       stableIdx: _stableIdx,
@@ -257,6 +265,12 @@ class PipelineController {
     _offsetByKey
       ..clear()
       ..addAll(plan.offsetByKey);
+    if (_currentKey != previousCurrent) {
+      Log.info(
+        'WebP.Pipeline.Flow',
+        'CURRENT ${_flowKey(previousCurrent)} -> ${_flowKey(_currentKey)}',
+      );
+    }
 
     // Ensure entries exist
     String fullKey(String k) => _targetW > 0 ? '$k@${_targetW}x$_targetH' : k;
@@ -328,6 +342,7 @@ class PipelineController {
     _streamDecodes.clear();
     _scheduler.clear();
     resources.dispose();
+    _completeStreamResultWaiters(null);
   }
 
   void detachReaderSession() {
@@ -348,6 +363,7 @@ class PipelineController {
     _farKeys.clear();
     _keepKeys.clear();
     _offsetByKey.clear();
+    _completeStreamResultWaiters(null);
   }
 
   void publishExternalHolder(String imageKey, String fullKey, dynamic holder) {
@@ -357,6 +373,7 @@ class PipelineController {
         peer.decode.markSuccess();
       }
     }
+    _completeStreamResultWaitersFor(fullKey, holder);
   }
 
   void publishExternalBytes(String imageKey, Uint8List bytes) {
@@ -379,6 +396,57 @@ class PipelineController {
 
   bool hasStreamDecodeAttached(String fullKey) =>
       _streamDecodes.hasAttached(fullKey);
+
+  bool isManagingFullKey(String fullKey) => resources.get(fullKey) != null;
+
+  Future<dynamic> waitForStreamResult(String fullKey) {
+    final entry = resources.get(fullKey);
+    final holder = entry?.holder;
+    if (holder != null) return Future.value(holder);
+    final bytes = entry?.bytes;
+    if (bytes != null) return Future.value(bytes);
+    final c = Completer<dynamic>();
+    _streamResultWaiters.putIfAbsent(fullKey, () => []).add(c);
+    return c.future;
+  }
+
+  void ensureStreamWork(String fullKey) {
+    final entry = resources.get(fullKey);
+    if (entry == null) return;
+    _workSubmitter.submitEntry(
+      entry,
+      sourceKey: _sourceKey,
+      cid: _cid,
+      eid: _eid,
+      targetWidth: _targetW,
+      targetHeight: _targetH,
+      cache: _cache,
+      session: _sessionId,
+    );
+  }
+
+  void _completeStreamResultWaiters(dynamic value) {
+    for (final waiters in _streamResultWaiters.values) {
+      for (final c in waiters) {
+        if (!c.isCompleted) c.complete(value);
+      }
+    }
+    _streamResultWaiters.clear();
+  }
+
+  void _completeStreamResultWaitersFor(String fullKey, dynamic value) {
+    final waiters = _streamResultWaiters.remove(fullKey);
+    if (waiters == null) return;
+    for (final c in waiters) {
+      if (!c.isCompleted) c.complete(value);
+    }
+  }
+
+  void _completeStreamResultBytes(String imageKey, Uint8List bytes) {
+    for (final peer in resources.getAllForImage(imageKey)) {
+      _completeStreamResultWaitersFor(peer.fullKey, bytes);
+    }
+  }
 
   // ── Internal: priorities & policies ────────────────────────
 
@@ -412,5 +480,7 @@ class PipelineController {
     final idx = _images.indexOf(imageKey);
     return idx < 0 ? 1 << 20 : idx - _currentIdx;
   }
+
+  static String _flowKey(String key) => key.isEmpty ? '-' : key.split('/').last;
 
 }

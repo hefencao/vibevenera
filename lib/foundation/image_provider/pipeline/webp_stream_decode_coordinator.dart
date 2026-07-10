@@ -16,9 +16,12 @@ typedef WebPStreamDecodeHandle = ({
 });
 
 class WebPStreamDecodeCoordinator {
+  final void Function(String fullKey, dynamic holder) onHolderPublished;
   final Set<String> _attached = {};
   final Map<String, StreamSubscription<ImageDownloadProgress>> _subs = {};
   final Map<String, void Function()> _disposers = {};
+
+  WebPStreamDecodeCoordinator({required this.onHolderPublished});
 
   bool hasAttached(String fullKey) => _attached.contains(fullKey);
 
@@ -95,7 +98,7 @@ class WebPStreamDecodeCoordinator {
     void onEvent(ImageDownloadProgress event) {
       if (stopped) return;
       final canDecode = entry.policy.allowDecode && entry.policy.allowGpuUpload;
-      if (!canDecode || (entry.hasHolder && holder == null)) {
+      if (entry.hasHolder && holder == null) {
         stopped = true;
         dispose();
         return;
@@ -111,6 +114,7 @@ class WebPStreamDecodeCoordinator {
       }
       final chunk = event.chunkBytes;
       if (chunk != null) {
+        if (!canDecode && decoder == null) return;
         decoder ??= webp.createStreamingAnimDecoder(
           targetWidth: targetWidth,
           targetHeight: targetHeight,
@@ -119,6 +123,16 @@ class WebPStreamDecodeCoordinator {
         if (d == null || d.isDisposed) return;
         final chunkEnd = event.currentBytes;
         final chunkStart = chunkEnd - chunk.length;
+        if (chunkStart > appendedUntil) {
+          final error = StateError(
+            'stream chunk gap: $appendedUntil..$chunkStart',
+          );
+          holder?.markStreamFailed(error);
+          Log.error('WebP.Stream.Pipeline', '${entry.imageKey} $error');
+          stopped = true;
+          dispose();
+          return;
+        }
         if (chunkEnd <= appendedUntil) {
           holder?.updateStreamTransfer(event.currentBytes, event.totalBytes);
           holder?.markStreamActive();
@@ -132,6 +146,7 @@ class WebPStreamDecodeCoordinator {
         final ready = d.appendStreamChunk(data);
         if (ready &&
             d.streamIsAnimated &&
+            canDecode &&
             holder == null &&
             d.frameCount > 0 &&
             d.targetWidth > 0) {
@@ -255,10 +270,9 @@ class WebPStreamDecodeCoordinator {
     for (final fullKey in _subs.keys.toList()) {
       final imageKey = _baseKey(fullKey);
       final entry = resources.get(fullKey);
-      final active = activeImageKeys.contains(imageKey) &&
-          entry != null &&
-          entry.policy.allowDecode &&
-          entry.policy.allowGpuUpload;
+      final active = entry != null &&
+          ((entry.download.inProgress && !entry.hasBytes) ||
+              activeImageKeys.contains(imageKey));
       if (!active) detach(fullKey);
     }
   }
@@ -286,6 +300,7 @@ class WebPStreamDecodeCoordinator {
         peer.decode.markSuccess();
       }
     }
+    onHolderPublished(entry.fullKey, holder);
   }
 
   void _dropHolder(ResourceEntry entry, DecoderHolder holder, String reason) {

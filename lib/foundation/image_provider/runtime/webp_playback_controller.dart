@@ -284,7 +284,7 @@ class WebPPlaybackController {
         !holder.decoder.streamIsComplete &&
         playback.nullFrameWaits >= 6 &&
         holder.decodedFrameCount == 0 &&
-        holder.streamLoadedBytes > 0) {
+        holder.streamLoadedBytes >= 1024 * 1024) {
       holder.traceStreamState('RESYNC partial-stall');
       await _progressiveSub?.cancel();
       _progressiveSub = null;

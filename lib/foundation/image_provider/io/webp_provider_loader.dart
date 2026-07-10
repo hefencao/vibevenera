@@ -114,8 +114,20 @@ extension _WebPImageProviderLoader on WebPImageProvider {
 
   Future<_ProgressiveLoadResult?> _tryLoadAnimatedStreaming({
     StreamController<ImageChunkEvent>? chunkEvents,
-  }) =>
-      _WebPStreamSession(this).loadAnimated(chunkEvents: chunkEvents);
+  }) async {
+    final pipeline = PipelineController.instance;
+    if (pipeline.isManagingFullKey(_fullKey)) {
+      final pipelineResult = pipeline.waitForStreamResult(_fullKey);
+      pipeline.ensureStreamWork(_fullKey);
+      final result = await pipelineResult;
+      if (result is DecoderHolder && !result.disposed) {
+        return _ProgressiveLoadResult.animated(result);
+      }
+      if (result is Uint8List) return _ProgressiveLoadResult.bytes(result);
+      return null;
+    }
+    return _WebPStreamSession(this).loadAnimated(chunkEvents: chunkEvents);
+  }
 
   StreamSubscription<ImageDownloadProgress>? _resumeStreamingIntoHolder(
     DecoderHolder holder, {

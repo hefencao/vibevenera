@@ -66,6 +66,7 @@ class _WebPImageStreamCompleter extends ImageStreamCompleter
     StreamSubscription<ImageDownloadProgress>? progressiveSub,
   ) {
     _playback?.dispose();
+    holder.traceStreamState('VISIBLE-START');
     _playback = WebPPlaybackController(
       provider: _provider,
       hasListeners: () => hasListeners,

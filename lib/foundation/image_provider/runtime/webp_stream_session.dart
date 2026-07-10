@@ -180,7 +180,6 @@ class _WebPStreamSession {
     return completer.future;
   }
 
-
   StreamSubscription<ImageDownloadProgress>? resumeIntoHolder(
     DecoderHolder holder, {
     void Function()? onDone,

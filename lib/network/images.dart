@@ -69,16 +69,26 @@ class _SharedStream {
 
   Stream<ImageDownloadProgress> get stream async* {
     _listeners++;
+    final live = StreamController<ImageDownloadProgress>();
+    final liveSub = _controller.stream.listen(
+      live.add,
+      onError: live.addError,
+      onDone: live.close,
+    )..pause();
+    final history = List<ImageDownloadProgress>.of(_history);
     _ensureStarted();
     try {
       var replayed = 0;
-      for (final event in _coalescedHistory()) {
+      for (final event in history) {
         yield event;
         replayed++;
         if (replayed % 8 == 0) await Future<void>.delayed(Duration.zero);
       }
-      yield* _controller.stream;
+      liveSub.resume();
+      yield* live.stream;
     } finally {
+      await liveSub.cancel();
+      if (!live.isClosed) unawaited(live.close());
       _listeners--;
       if (_listeners <= 0 && !_disposed) {
         cancel();
@@ -128,45 +138,6 @@ class _SharedStream {
     _onDispose();
   }
 
-  List<ImageDownloadProgress> _coalescedHistory() {
-    const maxReplayChunk = 256 * 1024;
-    final result = <ImageDownloadProgress>[];
-    var builder = BytesBuilder(copy: false);
-    var current = 0;
-    int? total;
-
-    void flush() {
-      if (builder.length == 0) return;
-      result.add(
-        ImageDownloadProgress(
-          currentBytes: current,
-          totalBytes: total,
-          chunkBytes: builder.takeBytes(),
-        ),
-      );
-      builder = BytesBuilder(copy: false);
-    }
-
-    for (final event in _history) {
-      if (event.reset) {
-        flush();
-        result.add(event);
-        continue;
-      }
-      final chunk = event.chunkBytes;
-      if (chunk != null) {
-        builder.add(chunk);
-        current = event.currentBytes;
-        total = event.totalBytes;
-        if (builder.length >= maxReplayChunk) flush();
-        continue;
-      }
-      flush();
-      if (event.imageBytes != null) result.add(event);
-    }
-    flush();
-    return result;
-  }
 }
 
 class _DownloadResumeState {
