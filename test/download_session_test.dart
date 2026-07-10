@@ -5,7 +5,7 @@ import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/utils/webp_decoder.dart';
 
 void main() {
-  test('detach only removes logical demand', () {
+  test('detach only removes logical demand', () async {
     final source = _FakeSource();
     var reconciles = 0;
     final registry = DownloadSessionRegistry(
@@ -31,7 +31,8 @@ void main() {
     expect(preload.attached, isFalse);
     expect(session.isDisposed, isFalse);
     expect(source.isDisposed, isFalse);
-    expect(reconciles, 3);
+    await Future<void>.delayed(Duration.zero);
+    expect(reconciles, 1);
 
     registry.evict(identity);
     expect(source.isDisposed, isTrue);

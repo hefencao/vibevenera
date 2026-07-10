@@ -85,6 +85,8 @@ void webp_source_delete(WebPSource*);
 
 Dio-owned Dart memory cannot safely be retained by native code. The transport copies each chunk once into the final reserved native region and immediately commits it. No temporary native input buffer or second decoder copy is allowed.
 
+For untransformed network responses, the Session transport uses a stream-only downloader mode: original response chunks are forwarded without Dart concatenation, legacy partial-memory/history storage is disabled, and completion is an explicit final-length signal rather than a complete `Uint8List`. The Session artifact is the only partial persistence path. Responses requiring `onResponse`/`modifyImage` remain an explicit full-body compatibility path because transformation itself requires authoritative complete output.
+
 The source stores offsets rather than long-lived pointers so storage growth cannot invalidate decode metadata. Expected length from HTTP or the RIFF header should allocate final capacity once. Unknown lengths use controlled growth under the source lock.
 
 ## Incremental container index
@@ -120,6 +122,7 @@ Appending only changes `WebPSource`. Partial looping only resets `WebPPlaybackCu
 - Network preemption changes `receiving -> paused`; it does not destroy the source.
 - Same-source range resume appends at `committedLength` in the same epoch.
 - Source switching resets the source with a new epoch.
+- Existing playback cursors rebind to the new source epoch after in-flight native work exits; playback restart alone never changes source identity.
 - Completion validates and seals the source, then promotes partial storage atomically.
 
 ### WebPDecodeSession
@@ -128,6 +131,7 @@ Appending only changes `WebPSource`. Partial looping only resets `WebPPlaybackCu
 - References one `NativeWebPSource` and owns one playback cursor.
 - Translates page policy into decode/upload demand.
 - Survives visible detach and temporary page-priority changes.
+- Display leases follow active ImageStream listeners, not ImageCache residency, and never create transport demand.
 - Publishes an immediate state snapshot followed by ordered frame/status events.
 
 ### Display lease

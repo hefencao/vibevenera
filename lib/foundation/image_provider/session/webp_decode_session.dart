@@ -341,6 +341,36 @@ final class WebPDecodeSession {
         .toList(growable: false);
   }
 
+  List<NativeFrameHandle> importDecodedFrames(
+    WebPDecodeClaim claim,
+    List<webp.WebPAnimFrameAddress> decoded,
+  ) {
+    _checkActive();
+    if (claim._completed || !_isDecodeClaimCurrent(claim)) {
+      for (final frame in decoded) {
+        webp.nativePoolRelease(frame.address);
+      }
+      return const [];
+    }
+    final state = cursor.state;
+    if (!state.ready || state.targetWidth <= 0 || state.targetHeight <= 0) {
+      for (final frame in decoded) {
+        webp.nativePoolRelease(frame.address);
+      }
+      throw StateError('Playback cursor produced frames before target size');
+    }
+    return decoded
+        .map(
+          (frame) => NativeFrameHandle(
+            address: frame.address,
+            width: state.targetWidth,
+            height: state.targetHeight,
+            durationMs: frame.durationMs,
+          ),
+        )
+        .toList(growable: false);
+  }
+
   void completeDecode(
     WebPDecodeClaim claim,
     List<NativeFrameHandle> frames, {
@@ -563,7 +593,7 @@ final class WebPDecodeSession {
     _hasProducedFrame = false;
     _decodeError = null;
     _uploadError = null;
-    cursor.restart();
+    cursor.rebindSource();
     holder.clearBufferedFrames();
   }
 

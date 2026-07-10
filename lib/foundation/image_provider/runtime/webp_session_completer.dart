@@ -28,26 +28,28 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       : _scopeId = 'visible:${identityHashCode(_provider)}:'
             '${DateTime.now().microsecondsSinceEpoch}' {
     WidgetsBinding.instance.addObserver(this);
-    scheduleMicrotask(_attach);
   }
 
   @override
   void addListener(ImageStreamListener listener) {
     super.addListener(listener);
+    if (_lease == null) _attach();
     _schedulePump();
+  }
+
+  @override
+  void removeListener(ImageStreamListener listener) {
+    super.removeListener(listener);
+    if (!hasListeners) _detachVisible();
   }
 
   @override
   void onDisposed() {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(_holderSubscription?.cancel());
-    unawaited(_downloadSubscription?.cancel());
-    unawaited(_decodeSubscription?.cancel());
+    _detachVisible();
     _fallbackCodec?.dispose();
     _fallbackCodec = null;
-    _lease?.detach();
-    _lease = null;
     super.onDisposed();
   }
 
@@ -57,7 +59,7 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   }
 
   void _attach() {
-    if (_disposed) return;
+    if (_disposed || !hasListeners || _lease != null) return;
     try {
       final lease = PipelineController.instance.acquireVisibleWebP(
         imageKey: _provider.imageKey,
@@ -85,6 +87,20 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     } catch (error, stack) {
       _reportError(error, stack);
     }
+  }
+
+  void _detachVisible() {
+    final holderSubscription = _holderSubscription;
+    final downloadSubscription = _downloadSubscription;
+    final decodeSubscription = _decodeSubscription;
+    _holderSubscription = null;
+    _downloadSubscription = null;
+    _decodeSubscription = null;
+    unawaited(holderSubscription?.cancel());
+    unawaited(downloadSubscription?.cancel());
+    unawaited(decodeSubscription?.cancel());
+    _lease?.detach();
+    _lease = null;
   }
 
   void _onHolderState(WebPFrameHolderSnapshot snapshot) {

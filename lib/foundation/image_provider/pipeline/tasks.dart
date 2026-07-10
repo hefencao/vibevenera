@@ -12,6 +12,7 @@ import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'resource_entry.dart';
 
@@ -523,6 +524,7 @@ final class WebPDownloadTask extends SchedulerTask {
 final class WebPDecodeTask extends SchedulerTask {
   final WebPDecodeSession session;
   final int maxBatch;
+  final webp.WorkerPoolScheduler _pool = webp.WorkerPoolScheduler.instance;
 
   WebPDecodeTask({
     required super.key,
@@ -552,9 +554,33 @@ final class WebPDecodeTask extends SchedulerTask {
       return;
     }
 
+    final cursor = session.cursor;
+    cursor.setThreadLimit(session.isCurrent ? 2 : 1);
+    _pool.dispatch(
+      webp.DecodeJob(
+        generation: generation,
+        decoderAddress: cursor.address,
+        decoderEpoch: _pool.decoderEpoch(cursor.address),
+        usePlaybackCursor: true,
+        framesToDecode: claim.reservedFrames,
+        targetW: session.identity.targetWidth,
+        targetH: session.identity.targetHeight,
+        onComplete: (decoded) => _complete(claim, decoded),
+        onError: (error) => _fail(claim, error),
+      ),
+      session.isCurrent
+          ? webp.DecodePriority.current
+          : webp.DecodePriority.next,
+    );
+  }
+
+  void _complete(
+    WebPDecodeClaim claim,
+    List<webp.WebPAnimFrameAddress> decoded,
+  ) {
     List<NativeFrameHandle> frames = const [];
     try {
-      frames = session.decode(claim);
+      frames = session.importDecodedFrames(claim, decoded);
       session.completeDecode(claim, frames, discard: isCancelled);
       _state = isCancelled ? TaskState.cancelled : TaskState.completed;
       notifyCompleted();
@@ -566,6 +592,16 @@ final class WebPDecodeTask extends SchedulerTask {
         _state = TaskState.failed;
         notifyFailed();
       }
+    }
+  }
+
+  void _fail(WebPDecodeClaim claim, Object error) {
+    session.completeDecode(claim, const [], error: error, discard: isCancelled);
+    if (isCancelled) {
+      notifyCompleted();
+    } else {
+      _state = TaskState.failed;
+      notifyFailed();
     }
   }
 }

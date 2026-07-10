@@ -938,6 +938,40 @@ int webp_playback_cursor_restart(WebPPlaybackCursor* cursor) {
     return WEBP_CURSOR_OK;
 }
 
+int webp_playback_cursor_rebind_source(WebPPlaybackCursor* cursor) {
+    if (!cursor) return WEBP_CURSOR_INVALID;
+    pthread_mutex_lock(&cursor->mutex);
+    WebPSourceState source_state;
+    if (webp_source_get_state(cursor->source, &source_state) != WEBP_SOURCE_OK) {
+        pthread_mutex_unlock(&cursor->mutex);
+        return WEBP_CURSOR_SOURCE_FAILED;
+    }
+    if (source_state.epoch == cursor->source_epoch) {
+        pthread_mutex_unlock(&cursor->mutex);
+        return WEBP_CURSOR_OK;
+    }
+    if (cursor->initialized) g_alive_contexts--;
+    free(cursor->composite_canvas);
+    free(cursor->frame_buf);
+    cursor->composite_canvas = NULL;
+    cursor->frame_buf = NULL;
+    cursor->frame_buf_size = 0;
+    cursor->source_epoch = source_state.epoch;
+    cursor->orig_canvas_w = 0;
+    cursor->orig_canvas_h = 0;
+    cursor->target_w = 0;
+    cursor->target_h = 0;
+    cursor->scale_x = 0;
+    cursor->scale_y = 0;
+    cursor->next_frame = 0;
+    cursor->prev_dispose = -1;
+    cursor->initialized = 0;
+    cursor->failed = 0;
+    cursor->last_error = WEBP_CURSOR_OK;
+    pthread_mutex_unlock(&cursor->mutex);
+    return WEBP_CURSOR_OK;
+}
+
 void webp_playback_cursor_set_thread_limit(WebPPlaybackCursor* cursor,
                                            int use_threads) {
     if (!cursor) return;

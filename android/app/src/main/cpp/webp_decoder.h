@@ -84,6 +84,8 @@ int webp_playback_cursor_get_frames(
 
 int webp_playback_cursor_restart(WebPPlaybackCursor* cursor);
 
+int webp_playback_cursor_rebind_source(WebPPlaybackCursor* cursor);
+
 void webp_playback_cursor_set_thread_limit(
     WebPPlaybackCursor* cursor,
     int use_threads);

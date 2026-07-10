@@ -40,6 +40,7 @@ Acceptance: append and partial loop can run concurrently without resetting sourc
 
 - Make DownloadSession the sole consumer of network chunks.
 - Replace overloaded progress/chunk events with explicit transport progress and source append offset.
+- Use a stream-only completion-length event for plain WebP responses; disable legacy history, final-byte assembly and duplicate partial persistence on this path.
 - Resume Range requests from native source committed length.
 - Unify partial/final artifact lifecycle and atomically promote sealed data.
 - Remove coordinator attach/detach/history replay and shared execution epoch.

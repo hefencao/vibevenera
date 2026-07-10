@@ -430,6 +430,8 @@ typedef _WebPPlaybackCursorGetFramesDart = int Function(
   Pointer<Void>, int, Pointer<Int64>);
 typedef _WebPPlaybackCursorRestartNative = Int32 Function(Pointer<Void>);
 typedef _WebPPlaybackCursorRestartDart = int Function(Pointer<Void>);
+typedef _WebPPlaybackCursorRebindSourceNative = Int32 Function(Pointer<Void>);
+typedef _WebPPlaybackCursorRebindSourceDart = int Function(Pointer<Void>);
 typedef _WebPPlaybackCursorSetThreadLimitNative = Void Function(
   Pointer<Void>, Int32);
 typedef _WebPPlaybackCursorSetThreadLimitDart = void Function(
@@ -541,6 +543,7 @@ class _WebPBindings {
   late final _WebPPlaybackCursorGetStateDart cursorGetState;
   late final _WebPPlaybackCursorGetFramesDart cursorGetFrames;
   late final _WebPPlaybackCursorRestartDart cursorRestart;
+  late final _WebPPlaybackCursorRebindSourceDart cursorRebindSource;
   late final _WebPPlaybackCursorSetThreadLimitDart cursorSetThreadLimit;
   late final _WebPPlaybackCursorDeleteDart cursorDelete;
   late final _WebPFreeBufferDart freeBuffer;
@@ -612,6 +615,11 @@ class _WebPBindings {
         _WebPPlaybackCursorGetFramesDart>('webp_playback_cursor_get_frames');
     cursorRestart = _lib.lookupFunction<_WebPPlaybackCursorRestartNative,
         _WebPPlaybackCursorRestartDart>('webp_playback_cursor_restart');
+    cursorRebindSource = _lib.lookupFunction<
+        _WebPPlaybackCursorRebindSourceNative,
+        _WebPPlaybackCursorRebindSourceDart>(
+      'webp_playback_cursor_rebind_source',
+    );
     cursorSetThreadLimit = _lib.lookupFunction<
         _WebPPlaybackCursorSetThreadLimitNative,
         _WebPPlaybackCursorSetThreadLimitDart>(
@@ -957,6 +965,7 @@ abstract interface class WebPFrameCursor {
   NativeWebPPlaybackCursorState get state;
   List<WebPAnimFrameAddress> decodeFrames(int count);
   void restart();
+  void rebindSource();
   void setThreadLimit(int useThreads);
   void dispose();
 }
@@ -1045,6 +1054,15 @@ final class NativeWebPPlaybackCursor implements WebPFrameCursor {
   }
 
   @override
+  void rebindSource() {
+    _checkActive();
+    final result = _bind.cursorRebindSource(_handle);
+    if (result != 0) {
+      throw StateError('Native WebP cursor rebind failed: $result');
+    }
+  }
+
+  @override
   void setThreadLimit(int useThreads) {
     _checkActive();
     _bind.cursorSetThreadLimit(_handle, useThreads);
@@ -1082,6 +1100,7 @@ class DecodeJob {
   final int targetW;
   final int targetH;
   final void Function(List<WebPAnimFrameAddress> frames) onComplete;
+  final void Function(Object error)? onError;
   final int dispatchedAt; // us, for queue wait time measurement
 
   DecodeJob({
@@ -1094,6 +1113,7 @@ class DecodeJob {
     required this.targetW,
     required this.targetH,
     required this.onComplete,
+    this.onError,
   }) : dispatchedAt = DateTime.now().microsecondsSinceEpoch;
 }
 
@@ -1299,9 +1319,12 @@ class WorkerPoolScheduler {
           final results = Int64List.fromList(cResults.asTypedList(n * 2));
           calloc.free(cResults);
           replyPort.send(results);
-        } else {
+        } else if (n == 0) {
           calloc.free(cResults);
           replyPort.send(Int64List(0));
+        } else {
+          calloc.free(cResults);
+          replyPort.send('Error: Native decode failed: $n');
         }
       } catch (e, stack) {
         TraceLog.error(
@@ -1429,7 +1452,9 @@ class WorkerPoolScheduler {
   void _runJob(DecodeJob job, int workerIndex) async {
     final port = _workerPorts[workerIndex];
     if (port == null) {
-      job.onComplete([]);
+      _activeDecoders.remove(job.decoderAddress);
+      job.onError?.call(StateError('WebP worker port is unavailable'));
+      _scheduleNext();
       return;
     }
 
@@ -1463,7 +1488,7 @@ class WorkerPoolScheduler {
           'WebP.Worker',
           'w$workerIndex error: $result',
         );
-        job.onComplete([]);
+        job.onError?.call(StateError(result.toString()));
       }
     } catch (e) {
       TraceLog.error(
@@ -1471,7 +1496,7 @@ class WorkerPoolScheduler {
         'w$workerIndex exception',
         error: e,
       );
-      job.onComplete([]);
+      job.onError?.call(e);
     } finally {
       _activeDecoders.remove(job.decoderAddress);
       _workerBusy[workerIndex] = false;

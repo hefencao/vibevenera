@@ -75,6 +75,8 @@ reset creates a new epoch and returns to idle/receiving
 - Range resume begins at source `committedLength`.
 - Transport cancellation caused by scheduler pressure becomes `paused`, not failed.
 - Partial/final persistence is managed through one artifact lifecycle and promoted atomically.
+- Plain streaming responses publish ordered chunks plus an explicit completion length; they do not retain legacy Dart history/partial storage or assemble final bytes.
+- Full-body output remains permitted only when response transformation requires it.
 
 ### WebPDecodeSession
 
@@ -83,6 +85,7 @@ reset creates a new epoch and returns to idle/receiving
 - Receives source/index availability through ordered native/source notification.
 - Page policy changes update demand without skipping source bytes or resetting cursor.
 - Visible attachment does not change source or transport state.
+- A display lease exists only while the completer has listeners; ImageCache residency alone creates no decode/upload demand.
 
 ### FrameHolder
 
@@ -103,6 +106,7 @@ reset creates a new epoch and returns to idle/receiving
 - One Dart/network chunk copy into final native input storage; no temporary native append copy.
 - No full history replay when a page becomes current.
 - No complete `Uint8List` assembly solely to finalize an already complete native source.
+- No Dart chunk concatenation or second partial artifact in the plain Session transport path.
 - No repeated full-buffer demux scan for each append threshold.
 - No decode/precreate task may occupy a network concurrency permit.
 - No per-frame state log in production tracing.

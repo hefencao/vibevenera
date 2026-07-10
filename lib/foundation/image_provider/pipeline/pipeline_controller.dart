@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
@@ -64,7 +63,6 @@ class PipelineController {
 
   InteractionState _interaction = InteractionState.idle;
   int _targetW = 0, _targetH = 0;
-  DecodedImageCache? _cache;
   int _currentIdx = 0;
   int _stableIdx = 0;
   int _readDirection = 1;
@@ -142,7 +140,6 @@ class PipelineController {
       _detachPolicyScope();
       _sessionId++;
     }
-    _cache = cache;
     _images = images;
     _cid = cid;
     _eid = eid;
@@ -178,7 +175,6 @@ class PipelineController {
       _detachPolicyScope();
       _sessionId++;
     }
-    _cache = cache;
     _images = images;
     _cid = cid;
     _eid = eid;
@@ -346,7 +342,6 @@ class PipelineController {
     // visible or other policy leases still reference them.
     resources.clear();
     _images = const [];
-    _cache = null;
     _currentKey = '';
     _nearKeys.clear();
     _prevKeys.clear();
@@ -424,12 +419,11 @@ class PipelineController {
       scopeId: scopeId,
       // The ImageStream is a display subscriber, not the page-policy owner.
       // Current/near promotion comes from _syncPolicyLeases; this baseline
-      // demand also supports standalone WebPImageProvider use without falsely
-      // promoting every precache listener to current.
+      // demand requests frame production but never starts or retains transport.
       demand: const WebPResourceDemand(
-        downloadPriority: 60,
+        downloadPriority: 0,
         decodePriority: 60,
-        allowDownload: true,
+        allowDownload: false,
         allowDecode: true,
         allowUpload: true,
         current: false,
@@ -502,7 +496,7 @@ class PipelineController {
           (lease.download.identity != downloadIdentity ||
               lease.decode.identity != decodeIdentity);
       if (identityChanged) {
-        lease!.detach();
+        lease.detach();
         _policyLeases.remove(entry.fullKey);
         lease = null;
       }

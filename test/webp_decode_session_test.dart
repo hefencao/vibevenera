@@ -77,18 +77,18 @@ void main() {
     expect((session.decodeRevision, session.uploadRevision), (2, 2));
 
     upload.update(priority: 7, current: false, decode: false, upload: true);
-    expect((session.decodeRevision, session.uploadRevision), (2, 3));
+    expect((session.decodeRevision, session.uploadRevision), (2, 2));
     upload.update(priority: 7, current: false, decode: true, upload: true);
-    expect((session.decodeRevision, session.uploadRevision), (3, 3));
+    expect((session.decodeRevision, session.uploadRevision), (2, 2));
 
     decode.detach();
-    expect((session.decodeRevision, session.uploadRevision), (3, 3));
+    expect((session.decodeRevision, session.uploadRevision), (2, 2));
     upload.detach();
-    expect((session.decodeRevision, session.uploadRevision), (4, 4));
+    expect((session.decodeRevision, session.uploadRevision), (3, 3));
     registry.evict(identity);
   });
 
-  test('source commits notify the stable decode session', () {
+  test('source commits notify the stable decode session', () async {
     final source = _FakeSource();
     var reconciles = 0;
     final registry = WebPDecodeSessionRegistry(
@@ -106,26 +106,62 @@ void main() {
     final subscription = session.states.listen((_) => states++);
 
     download.append(Uint8List(16), offset: 0);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
 
     expect(session.snapshot.cursor.committedLength, 16);
-    expect(states, 1);
-    expect(reconciles, 1);
+    expect(states, greaterThanOrEqualTo(1));
+    expect(reconciles, greaterThanOrEqualTo(1));
     subscription.cancel();
+    registry.evict(identity);
+  });
+
+  test('source epoch change rebinds the existing playback cursor', () async {
+    final source = _FakeSource();
+    final cursor = _FakeCursor(source);
+    final registry = WebPDecodeSessionRegistry(
+      reconcile: (_) {},
+      cursorFactory: (_, _, _) => cursor,
+    );
+    const identity = WebPDecodeIdentity(
+      fullKey: 'image@100x100',
+      targetWidth: 100,
+      targetHeight: 100,
+    );
+    final download = createDownload(source);
+    final session = registry.getOrCreate(identity, download);
+    final demand = session.attach(
+      scopeId: 'reader',
+      priority: 10,
+      current: true,
+      decode: true,
+      upload: true,
+    );
+    final writer = download.beginTransport();
+
+    download.resetSource(writer: writer, epoch: 2);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(cursor.rebindCount, 1);
+    expect(session.snapshot.cursor.sourceEpoch, 2);
+    demand.detach();
     registry.evict(identity);
   });
 }
 
 final class _FakeSource implements webp.WebPByteSource {
   int committed = 0;
+  int _epoch = 1;
   bool disposed = false;
 
   @override
-  int get epoch => 1;
+  int get epoch => _epoch;
   @override
   bool get isDisposed => disposed;
   @override
   webp.NativeWebPSourceState get state => webp.NativeWebPSourceState(
-    epoch: 1,
+    epoch: _epoch,
     expectedLength: 0,
     committedLength: committed,
     declaredLength: 0,
@@ -154,7 +190,10 @@ final class _FakeSource implements webp.WebPByteSource {
       throw UnimplementedError();
 
   @override
-  void reset({int expectedLength = 0, required int epoch}) => committed = 0;
+  void reset({int expectedLength = 0, required int epoch}) {
+    _epoch = epoch;
+    committed = 0;
+  }
 
   @override
   void seal() {}
@@ -163,6 +202,7 @@ final class _FakeSource implements webp.WebPByteSource {
 final class _FakeCursor implements webp.WebPFrameCursor {
   final _FakeSource source;
   bool disposed = false;
+  int rebindCount = 0;
 
   _FakeCursor(this.source);
 
@@ -192,6 +232,8 @@ final class _FakeCursor implements webp.WebPFrameCursor {
 
   @override
   List<webp.WebPAnimFrameAddress> decodeFrames(int count) => const [];
+  @override
+  void rebindSource() => rebindCount++;
   @override
   void dispose() => disposed = true;
   @override

@@ -12,6 +12,50 @@ import 'package:venera/network/webp_download_transport.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 void main() {
+  test('display-only demand does not start a transport', () async {
+    final scheduler = TaskScheduler.instance;
+    scheduler.clear();
+    addTearDown(scheduler.clear);
+    var transportStarted = false;
+    final coordinator = WebPSessionCoordinator(
+      scheduler: scheduler,
+      transportFactory: (_) => _NeverStartedTransport(
+        onExecute: () => transportStarted = true,
+      ),
+      sourceFactory: (_, _) => _FakeSource(),
+      cursorFactory: (source, _, _) => _FakeCursor(source),
+    );
+    final lease = coordinator.acquire(
+      downloadIdentity: const DownloadIdentity(
+        imageKey: 'image',
+        sourceKey: 'source',
+        cid: 'cid',
+        eid: 'eid',
+      ),
+      decodeIdentity: const WebPDecodeIdentity(
+        fullKey: 'image@100x100',
+        targetWidth: 100,
+        targetHeight: 100,
+      ),
+      scopeId: 'display',
+      demand: const WebPResourceDemand(
+        downloadPriority: 0,
+        decodePriority: 60,
+        allowDownload: false,
+        allowDecode: true,
+        allowUpload: true,
+        current: false,
+      ),
+    );
+
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transportStarted, isFalse);
+    expect(lease.download.transport, DownloadTransportState.idle);
+    lease.detach();
+    coordinator.dispose();
+  });
+
   test('logical detach does not cancel a receiving transport', () async {
     final scheduler = TaskScheduler.instance;
     scheduler.clear();
@@ -63,6 +107,22 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     coordinator.dispose();
   });
+}
+
+final class _NeverStartedTransport implements WebPTransport {
+  final void Function() onExecute;
+
+  _NeverStartedTransport({required this.onExecute});
+
+  @override
+  Future<File> execute(
+    DownloadSession session, {
+    CancelToken? cancelToken,
+    void Function(WebPTransportProgress progress)? onProgress,
+  }) {
+    onExecute();
+    throw StateError('Display demand must not execute transport');
+  }
 }
 
 final class _BlockingTransport implements WebPTransport {
@@ -160,6 +220,8 @@ final class _FakeCursor implements webp.WebPFrameCursor {
 
   @override
   List<webp.WebPAnimFrameAddress> decodeFrames(int count) => const [];
+  @override
+  void rebindSource() {}
   @override
   void dispose() => disposed = true;
   @override

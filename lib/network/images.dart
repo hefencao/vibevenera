@@ -142,7 +142,8 @@ class _SharedStream {
 
 class _DownloadResumeState {
   final BytesBuilder _buffer = BytesBuilder(copy: false);
-  int _baseBytes = 0;
+  int _baseBytes;
+  final bool retainBytes;
   int? expectedBytes;
   final _PartialImageCache? partialCache;
   final String? debugLabel;
@@ -152,7 +153,12 @@ class _DownloadResumeState {
   int _pendingPartialBytes = 0;
   static const _partialFlushBytes = 1024 * 1024;
 
-  _DownloadResumeState([this.partialCache, this.debugLabel]);
+  _DownloadResumeState([
+    this.partialCache,
+    this.debugLabel,
+    this.retainBytes = true,
+    this._baseBytes = 0,
+  ]);
 
   int get downloadedBytes =>
       partialCache?.memoryLength ?? _baseBytes + _buffer.length;
@@ -248,6 +254,10 @@ class _DownloadResumeState {
   Future<void> add(List<int> chunk) async {
     final cache = partialCache;
     if (chunk.isEmpty) return;
+    if (!retainBytes) {
+      _baseBytes += chunk.length;
+      return;
+    }
     if (cache == null) {
       _buffer.add(chunk);
       if (_baseBytes == 0 && !_checkedDeclaredBytes && _buffer.length >= 12) {
@@ -276,6 +286,9 @@ class _DownloadResumeState {
   }
 
   Future<Uint8List> takeBytes() async {
+    if (!retainBytes) {
+      throw StateError('Streaming download does not retain final bytes');
+    }
     if (partialCache != null) {
       await closePartial();
       final bytes = await partialCache?.read();
@@ -291,6 +304,13 @@ class _DownloadResumeState {
     }
     return _buffer.takeBytes();
   }
+
+  Future<({Uint8List? data, int downloadedBytes, int? expectedBytes})>
+  result() async => (
+        data: retainBytes ? await takeBytes() : null,
+        downloadedBytes: downloadedBytes,
+        expectedBytes: expectedBytes,
+      );
 }
 
 class _PartialImageCache {
@@ -524,7 +544,22 @@ abstract class ImageDownloader {
     int? resumeFromBytes,
     int? resumeExpectedBytes,
     bool replayPartial = true,
+    bool streamOnly = false,
   }) {
+    if (streamOnly) {
+      return _loadComicImage(
+        imageKey,
+        sourceKey,
+        cid,
+        eid,
+        cancelToken: cancelToken,
+        debugLabel: debugLabel,
+        resumeFromBytes: resumeFromBytes,
+        resumeExpectedBytes: resumeExpectedBytes,
+        replayPartial: false,
+        streamOnly: true,
+      );
+    }
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     final joined = joinLoadingComicImage(
       imageKey,
@@ -610,6 +645,7 @@ abstract class ImageDownloader {
     int? resumeFromBytes,
     int? resumeExpectedBytes,
     bool replayPartial = true,
+    bool streamOnly = false,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
     _throwIfCancelled(cancelToken);
@@ -660,7 +696,12 @@ abstract class ImageDownloader {
           replayPartial: shouldReplayPartial,
           resumeFromBytes: resumeOffset,
           resumeExpectedBytes: resumeExpected,
+          streamOnly: streamOnly,
         )) {
+          if (streamOnly) {
+            resumeOffset = event.currentBytes;
+            resumeExpected = event.totalBytes ?? resumeExpected;
+          }
           yield event;
         }
         config.onLoadFailed?.free();
@@ -673,8 +714,10 @@ abstract class ImageDownloader {
         if (sameUrlRetry > 0 && _isSameUrlRetryable(e)) {
           sameUrlRetry--;
           shouldReplayPartial = false;
-          resumeOffset = null;
-          resumeExpected = null;
+          if (!streamOnly) {
+            resumeOffset = null;
+            resumeExpected = null;
+          }
           _warnDownload(
             debugLabel,
             'RETRY sameUrl left=$sameUrlRetry url=${_shortDownloadKey(config.url)}',
@@ -757,6 +800,7 @@ abstract class ImageDownloader {
     bool replayPartial = true,
     int? resumeFromBytes,
     int? resumeExpectedBytes,
+    bool streamOnly = false,
   }) async* {
     String requestUrl = config.url;
     if (requestUrl.isEmpty) {
@@ -777,6 +821,7 @@ abstract class ImageDownloader {
       headers['Accept-Encoding'] = 'identity';
     }
     final canStreamDecode = config.modifyImage == null && config.onResponse == null;
+    final directStream = streamOnly && canStreamDecode;
     var streamChunkCount = 0;
     var pendingChunks = <Uint8List>[];
     var pendingLength = 0;
@@ -814,6 +859,7 @@ abstract class ImageDownloader {
           replayPartial: replayPartial,
           resumeFromBytes: resumeFromBytes,
           resumeExpectedBytes: resumeExpectedBytes,
+          streamOnly: directStream,
           onProgress: (current, total) {
             if (!progressEvents.isClosed) {
               progressEvents.add(
@@ -824,6 +870,16 @@ abstract class ImageDownloader {
           onChunk: (current, total, chunk) {
             if (!canStreamDecode) return;
             final data = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+            if (directStream) {
+              progressEvents.add(
+                ImageDownloadProgress(
+                  currentBytes: current,
+                  totalBytes: total,
+                  chunkBytes: data,
+                ),
+              );
+              return;
+            }
             pendingChunks.add(data);
             pendingLength += data.length;
             pendingCurrent = current;
@@ -842,7 +898,15 @@ abstract class ImageDownloader {
       yield event;
     }
     final raw = await rawFuture;
-    final Uint8List data = raw.data;
+    if (directStream) {
+      yield ImageDownloadProgress(
+        currentBytes: raw.downloadedBytes,
+        totalBytes: raw.expectedBytes,
+        done: true,
+      );
+      return;
+    }
+    final Uint8List data = raw.data!;
     final declared = _declaredWebPBytes(data);
     if (declared != null && data.length < declared) {
       throw io.HttpException(
@@ -864,7 +928,8 @@ abstract class ImageDownloader {
     );
   }
 
-  static Future<({Uint8List data, int? expectedBytes})> _downloadRawBytes({
+  static Future<({Uint8List? data, int downloadedBytes, int? expectedBytes})>
+  _downloadRawBytes({
     required String requestUrl,
     required String cacheKey,
     required String method,
@@ -875,12 +940,15 @@ abstract class ImageDownloader {
     required bool replayPartial,
     int? resumeFromBytes,
     int? resumeExpectedBytes,
+    bool streamOnly = false,
     void Function(int current, int? total)? onProgress,
     void Function(int current, int? total, List<int> chunk)? onChunk,
   }) async {
     final state = _DownloadResumeState(
-      _PartialImageCache(cacheKey),
+      streamOnly ? null : _PartialImageCache(cacheKey),
       debugLabel,
+      !streamOnly,
+      streamOnly ? resumeFromBytes ?? 0 : 0,
     );
     await state.initFromPartial();
     state.setExpectedBytes(resumeExpectedBytes);
@@ -907,7 +975,7 @@ abstract class ImageDownloader {
     }
     if (state.isComplete) {
       await state.closePartial();
-      return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+      return state.result();
     }
     try {
       return await _downloadRawBytesWithRhttp(
@@ -944,7 +1012,7 @@ abstract class ImageDownloader {
     }
   }
 
-  static Future<({Uint8List data, int? expectedBytes})>
+  static Future<({Uint8List? data, int downloadedBytes, int? expectedBytes})>
   _downloadRawBytesWithRhttp({
     required String requestUrl,
     required String method,
@@ -1030,7 +1098,7 @@ abstract class ImageDownloader {
         );
       } catch (e) {
         if (state.isComplete) {
-          return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+          return state.result();
         }
         if (!_isResumableDownloadError(e) || attempts >= _rhttpMaxAttempts) {
           rethrow;
@@ -1046,10 +1114,10 @@ abstract class ImageDownloader {
         );
       }
     }
-    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+    return state.result();
   }
 
-  static Future<({Uint8List data, int? expectedBytes})>
+  static Future<({Uint8List? data, int downloadedBytes, int? expectedBytes})>
   _downloadRawBytesWithIoClient({
     required String requestUrl,
     required String method,
@@ -1115,7 +1183,7 @@ abstract class ImageDownloader {
         );
       } catch (e) {
         if (state.isComplete) {
-          return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+          return state.result();
         }
         if (!_isResumableDownloadError(e) || attempts >= _ioMaxAttempts) rethrow;
         Log.warning(
@@ -1129,10 +1197,11 @@ abstract class ImageDownloader {
         client.close(force: true);
       }
     }
-    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+    return state.result();
   }
 
-  static Future<({Uint8List data, int? expectedBytes})> _readByteStream(
+  static Future<({Uint8List? data, int downloadedBytes, int? expectedBytes})>
+  _readByteStream(
     Stream<List<int>> stream, {
     required _DownloadResumeState state,
     CancelToken? cancelToken,
@@ -1180,7 +1249,7 @@ abstract class ImageDownloader {
       );
     }
     onProgress?.call(state.downloadedBytes, state.expectedBytes);
-    return (data: await state.takeBytes(), expectedBytes: state.expectedBytes);
+    return state.result();
   }
 
   static Stream<ImageDownloadProgress> _finalizeDownloadedImage(
@@ -1331,6 +1400,7 @@ class ImageDownloadProgress {
   final Uint8List? imageBytes;
   final Uint8List? chunkBytes;
   final bool reset;
+  final bool done;
 
   const ImageDownloadProgress({
     required this.currentBytes,
@@ -1338,5 +1408,6 @@ class ImageDownloadProgress {
     this.imageBytes,
     this.chunkBytes,
     this.reset = false,
+    this.done = false,
   });
 }
