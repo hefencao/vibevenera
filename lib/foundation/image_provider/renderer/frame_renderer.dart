@@ -101,3 +101,28 @@ final class FlutterImageRenderer implements FrameRenderer {
     return completer.future;
   }
 }
+
+/// Platform-facing backend used by [NativeTextureRenderer].
+///
+/// Android/iOS implementations may upload or bind the native RGBA handle to a
+/// texture without changing DownloadSession, WebPDecodeSession, or holder APIs.
+/// The backend takes ownership of [frame] when [submit] is called and must
+/// release it exactly once on both success and failure.
+abstract interface class NativeTextureFrameBackend {
+  Future<RenderedFrameHandle> submit(NativeFrameHandle frame);
+}
+
+/// Renderer adapter for a native texture backend.
+///
+/// The concrete platform backend is intentionally injected so the stable Dart
+/// source/session boundary does not import a particular MethodChannel, FFI, or
+/// texture plugin implementation.
+final class NativeTextureRenderer implements FrameRenderer {
+  final NativeTextureFrameBackend backend;
+
+  const NativeTextureRenderer(this.backend);
+
+  @override
+  Future<RenderedFrameHandle> render(NativeFrameHandle frame) =>
+      backend.submit(frame);
+}

@@ -116,7 +116,13 @@ abstract class PolicyAwareTask extends SchedulerTask {
 
   @override
   void execute() async {
-    if (isCancelled) return;
+    if (isCancelled) {
+      // A task may be cancelled after dispatch but before its scheduled
+      // execute microtask runs. It still owns a lane permit and must notify
+      // completion, otherwise that lane can remain permanently saturated.
+      notifyCompleted();
+      return;
+    }
 
     final ctx = _ctx;
     if (ctx == null || !permissionValid(ctx)) {
@@ -479,7 +485,13 @@ final class WebPDownloadTask extends SchedulerTask {
         _finished = true;
         notifyCompleted();
       } else {
-        if (writer?.active == true) session.fail(writer!, error);
+        if (writer?.active == true) {
+          session.fail(
+            writer!,
+            error,
+            retryable: error is! WebPSourceInvariantError,
+          );
+        }
         _state = TaskState.failed;
         _finished = true;
         _rejectWaiters(error, stack);
@@ -601,6 +613,10 @@ final class WebPFrameUploadTask extends SchedulerTask {
     RenderedFrameHandle? rendered;
     try {
       rendered = await renderer.render(claim.frame);
+      // The renderer contract owns the input handle, but release is idempotent
+      // and closes leaks from third-party renderer implementations that forget
+      // to release after a successful upload.
+      claim.frame.release();
       session.completeUpload(claim, rendered, discard: isCancelled);
       _state = isCancelled ? TaskState.cancelled : TaskState.completed;
       notifyCompleted();

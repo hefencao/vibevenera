@@ -62,6 +62,21 @@ final class WebPFrameHolder {
   WebPFrameHolder({required this.onDemand});
 
   Stream<WebPFrameHolderSnapshot> get states => _states.stream;
+
+  /// Emits an atomic initial snapshot before live holder changes.
+  Stream<WebPFrameHolderSnapshot> watch() {
+    _checkActive();
+    return Stream<WebPFrameHolderSnapshot>.multi((controller) {
+      final subscription = _states.stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      controller.add(snapshot);
+      controller.onCancel = subscription.cancel;
+    });
+  }
+
   WebPFrameDemand get demand => _demand;
   int get rawFrameCount => _raw.length;
   int get renderedFrameCount => _rendered.length;
@@ -104,6 +119,9 @@ final class WebPFrameHolder {
     }
     _demand = demand;
     if (!demand.retainRaw) clearRawFrames();
+    // Download-only/far demand retains the cursor and source, not expensive
+    // uploaded frame resources. This is buffer trimming, not holder eviction.
+    if (!demand.decode && !demand.upload) clearRenderedFrames();
     _changed();
   }
 

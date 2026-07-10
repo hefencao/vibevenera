@@ -112,6 +112,7 @@ final class WebPSessionCoordinator {
   final Set<WebPResourceLease> _leases = {};
   final Set<WebPDecodeIdentity> _pendingDecodeEvictions = {};
   final Set<DownloadIdentity> _pendingDownloadEvictions = {};
+  final Set<WebPDecodeSession> _retiredDecodes = {};
 
   WebPSessionCoordinator({
     required this.scheduler,
@@ -142,6 +143,7 @@ final class WebPSessionCoordinator {
     required WebPResourceDemand demand,
   }) {
     final download = downloads.getOrCreate(downloadIdentity);
+    _replaceDecodeBindingIfNeeded(decodeIdentity, download);
     final decode = decodes.getOrCreate(decodeIdentity, download);
     final lease = WebPResourceLease._(
       this,
@@ -152,6 +154,42 @@ final class WebPSessionCoordinator {
     );
     _leases.add(lease);
     return lease;
+  }
+
+
+  void _replaceDecodeBindingIfNeeded(
+    WebPDecodeIdentity identity,
+    DownloadSession download,
+  ) {
+    final existing = decodes.find(identity);
+    if (existing == null || identical(existing.download, download)) return;
+
+    final oldDownload = existing.download;
+    // A decode identity is unique among active bindings. When its source
+    // identity changes, revoke old leases and retire the old binding. A running
+    // upload may still own a native frame, so the old cursor is disposed only
+    // after its in-flight claims have completed.
+    for (final lease
+        in _leases.where((lease) => identical(lease.decode, existing)).toList()) {
+      lease.detach();
+    }
+    scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(existing));
+    scheduler.cancelInLane(SchedulerLane.upload, _uploadTaskKey(existing));
+    final retired = decodes.retire(identity);
+    if (retired != null) {
+      _retiredDecodes.add(retired);
+      retired.requestReconcile();
+    }
+    // The identity is about to be rebound. A pending eviction for the old
+    // binding must not accidentally target the replacement.
+    _pendingDecodeEvictions.remove(identity);
+
+    _pendingDownloadEvictions.add(oldDownload.identity);
+    scheduler.cancelInLane(
+      SchedulerLane.network,
+      _downloadTaskKey(oldDownload.identity),
+    );
+    _drainRetiredDecode(existing);
   }
 
   void detachScope(String scopeId) {
@@ -178,13 +216,16 @@ final class WebPSessionCoordinator {
       _pendingDecodeEvictions.add(session.identity);
       scheduler.cancelInLane(
         SchedulerLane.decode,
-        _decodeTaskKey(session.identity),
+        _decodeTaskKey(session),
       );
       scheduler.cancelInLane(
         SchedulerLane.upload,
-        _uploadTaskKey(session.identity),
+        _uploadTaskKey(session),
       );
       _drainDecodeEviction(session.identity);
+    }
+    for (final session in _retiredDecodes.toList()) {
+      _drainRetiredDecode(session);
     }
     for (final session in downloads.sessions.toList()) {
       if (session.hasDemand) continue;
@@ -255,6 +296,16 @@ final class WebPSessionCoordinator {
   }
 
   void _reconcileDecode(WebPDecodeSession session) {
+    if (session.isDisposed) {
+      _retiredDecodes.remove(session);
+      return;
+    }
+    if (_retiredDecodes.contains(session) ||
+        !identical(decodes.find(session.identity), session)) {
+      _retiredDecodes.add(session);
+      _drainRetiredDecode(session);
+      return;
+    }
     if (session.demandCount > 0) {
       _pendingDecodeEvictions.remove(session.identity);
     } else if (_pendingDecodeEvictions.contains(session.identity) &&
@@ -264,10 +315,11 @@ final class WebPSessionCoordinator {
     }
     if (session.isDisposed) return;
 
-    final decodeKey = _decodeTaskKey(session.identity);
-    if (!session.shouldDecode) {
+    final decodeKey = _decodeTaskKey(session);
+    if (!session.shouldDecode || !session.sourceDecodable) {
       scheduler.cancelInLane(SchedulerLane.decode, decodeKey);
     } else if (!session.decodeFailed &&
+        session.canScheduleDecode &&
         session.holder.needsDecode &&
         !scheduler.hasTaskInLane(SchedulerLane.decode, decodeKey)) {
       scheduler.submit(
@@ -286,7 +338,7 @@ final class WebPSessionCoordinator {
       );
     }
 
-    final uploadKey = _uploadTaskKey(session.identity);
+    final uploadKey = _uploadTaskKey(session);
     if (!session.shouldUpload) {
       scheduler.cancelInLane(SchedulerLane.upload, uploadKey);
     } else if (!session.uploadFailed &&
@@ -312,12 +364,32 @@ final class WebPSessionCoordinator {
 
   bool _drainDecodeEviction(WebPDecodeIdentity identity) {
     final session = decodes.find(identity);
-    if (session != null && session.demandCount > 0) return false;
-    scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(identity));
-    scheduler.cancelInLane(SchedulerLane.upload, _uploadTaskKey(identity));
-    final evicted = decodes.tryEvict(identity);
-    if (evicted || session == null) _pendingDecodeEvictions.remove(identity);
-    return evicted;
+    if (session == null) {
+      _pendingDecodeEvictions.remove(identity);
+      return false;
+    }
+    if (session.demandCount > 0) return false;
+    scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(session));
+    scheduler.cancelInLane(SchedulerLane.upload, _uploadTaskKey(session));
+    if (!session.canEvict) return false;
+    decodes.evict(identity);
+    _pendingDecodeEvictions.remove(identity);
+    return true;
+  }
+
+  bool _drainRetiredDecode(WebPDecodeSession session) {
+    if (session.isDisposed) {
+      _retiredDecodes.remove(session);
+      return true;
+    }
+    scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(session));
+    scheduler.cancelInLane(SchedulerLane.upload, _uploadTaskKey(session));
+    if (!session.canEvict) return false;
+    final downloadIdentity = session.download.identity;
+    session.evict();
+    _retiredDecodes.remove(session);
+    _drainDownloadEviction(downloadIdentity);
+    return true;
   }
 
   bool _drainDownloadEviction(DownloadIdentity identity) {
@@ -340,11 +412,15 @@ final class WebPSessionCoordinator {
       'webp-network:${identity.imageKey}@${identity.sourceKey}@'
       '${identity.cid}@${identity.eid}';
 
-  static String _decodeTaskKey(WebPDecodeIdentity identity) =>
-      'webp-decode:${identity.fullKey}:${identity.targetWidth}x'
-      '${identity.targetHeight}';
+  static String _decodeTaskKey(WebPDecodeSession session) {
+    final identity = session.identity;
+    return 'webp-decode:${identity.fullKey}:${identity.targetWidth}x'
+        '${identity.targetHeight}:${session.download.identity.cacheKey}';
+  }
 
-  static String _uploadTaskKey(WebPDecodeIdentity identity) =>
-      'webp-upload:${identity.fullKey}:${identity.targetWidth}x'
-      '${identity.targetHeight}';
+  static String _uploadTaskKey(WebPDecodeSession session) {
+    final identity = session.identity;
+    return 'webp-upload:${identity.fullKey}:${identity.targetWidth}x'
+        '${identity.targetHeight}:${session.download.identity.cacheKey}';
+  }
 }

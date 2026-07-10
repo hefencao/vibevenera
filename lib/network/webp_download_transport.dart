@@ -24,7 +24,8 @@ final class WebPTransportCancelled implements Exception {
   const WebPTransportCancelled([this.reason]);
 
   @override
-  String toString() => 'WebP transport cancelled${reason == null ? '' : ': $reason'}';
+  String toString() =>
+      'WebP transport cancelled${reason == null ? '' : ': $reason'}';
 }
 
 abstract interface class WebPTransport {
@@ -37,9 +38,9 @@ abstract interface class WebPTransport {
 
 /// Adapter around the existing Dart network stack.
 ///
-/// It is the only place that translates legacy ImageDownloadProgress events
-/// into explicit [offset, bytes] writes. Downstream consumers never infer an
-/// offset from a broadcast event and never replay chunk history.
+/// It owns one monotonic ingress cursor and is the only consumer of legacy
+/// ImageDownloadProgress chunk events. `currentBytes` is progress metadata;
+/// source offsets are never inferred from `currentBytes - chunk.length`.
 final class ImageDownloaderWebPTransport implements WebPTransport {
   final DownloadIdentity identity;
   final WebPDownloadArtifact Function(String cacheKey) artifactFactory;
@@ -60,16 +61,25 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     StreamIterator<ImageDownloadProgress>? iterator;
 
     try {
-      await artifact.restore(session, activeWriter);
+      final restored = await artifact.restore(
+        session,
+        activeWriter,
+        checkCancelled: () => _throwIfCancelled(cancelToken),
+      );
+      var ingress = _WebPIngress(
+        session: session,
+        writer: activeWriter,
+        artifact: artifact,
+        restored: restored,
+      );
       _throwIfCancelled(cancelToken);
 
-      final resumeOffset = session.committedLength;
+      final resumeOffset = restored.length;
       onProgress?.call(
         WebPTransportProgress(
           currentBytes: resumeOffset,
-          totalBytes: session.expectedLength > 0
-              ? session.expectedLength
-              : null,
+          totalBytes:
+              session.expectedLength > 0 ? session.expectedLength : null,
         ),
       );
 
@@ -83,8 +93,8 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
           resumeFromBytes: resumeOffset > 0 ? resumeOffset : null,
           resumeExpectedBytes:
               session.expectedLength > 0 ? session.expectedLength : null,
-          // A restored NativeWebPSource is already authoritative. Replaying the
-          // Dart-side partial history would create a second input path.
+          // Native source/artifact restoration is authoritative. The legacy
+          // broadcaster must not replay its own partial history.
           replayPartial: false,
         ),
       );
@@ -100,6 +110,11 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
             epoch: session.source.epoch + 1,
             expectedLength: event.totalBytes ?? 0,
           );
+          ingress = _WebPIngress.empty(
+            session: session,
+            writer: activeWriter,
+            artifact: artifact,
+          );
         } else {
           session.updateExpectedLength(
             event.totalBytes,
@@ -109,38 +124,46 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
 
         final chunk = event.chunkBytes;
         if (chunk != null && chunk.isNotEmpty) {
-          final end = event.currentBytes;
-          final start = end - chunk.length;
-          await _appendNormalized(
-            session,
-            activeWriter,
-            artifact,
-            chunk,
-            offset: start,
-          );
+          await ingress.append(chunk);
         }
 
         final finalBytes = event.imageBytes;
         if (finalBytes != null) {
-          await _appendFinalTail(
-            session,
-            activeWriter,
-            artifact,
-            finalBytes,
-          );
+          // One-shot legacy responses are valid initial input. Once any range
+          // has been committed, the final payload is only a completion/length
+          // signal and may not repair a discontinuous stream.
+          if (ingress.receivedLength == 0 && finalBytes.isNotEmpty) {
+            await ingress.append(finalBytes);
+          } else if (finalBytes.length != ingress.receivedLength) {
+            throw WebPSourceInvariantError(
+              'final payload cannot repair streaming input: final='
+              '${finalBytes.length}, committed=${ingress.receivedLength}, '
+              'epoch=${session.source.epoch}',
+            );
+          }
+
+          await ingress.finalizeContent(finalLength: finalBytes.length);
           session.updateExpectedLength(
             finalBytes.length,
             writer: activeWriter,
           );
           await artifact.flush();
           final file = await artifact.promote(
-            sealedLength: session.committedLength,
+            sealedLength: ingress.receivedLength,
           );
-          session.seal(activeWriter, file);
+          if (ingress.isFallback) {
+            session.sealFallback(
+              activeWriter,
+              file,
+              finalLength: ingress.receivedLength,
+            );
+          } else {
+            session.seal(activeWriter, file);
+          }
           onProgress?.call(
             WebPTransportProgress(
-              currentBytes: finalBytes.length,
-              totalBytes: finalBytes.length,
+              currentBytes: ingress.receivedLength,
+              totalBytes: ingress.receivedLength,
               done: true,
             ),
           );
@@ -149,7 +172,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
 
         onProgress?.call(
           WebPTransportProgress(
-            currentBytes: session.committedLength,
+            currentBytes: ingress.receivedLength,
             totalBytes: event.totalBytes,
           ),
         );
@@ -161,47 +184,6 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       await iterator?.cancel();
       await artifact.close();
     }
-  }
-
-  Future<void> _appendNormalized(
-    DownloadSession session,
-    DownloadWriterLease writer,
-    WebPDownloadArtifact artifact,
-    Uint8List bytes, {
-    required int offset,
-  }) async {
-    final committed = session.committedLength;
-    final end = offset + bytes.length;
-    if (end <= committed) return;
-    if (offset > committed) {
-      throw StateError(
-        'Network chunk gap: committed=$committed, chunk=$offset..$end',
-      );
-    }
-
-    final trim = committed - offset;
-    final tail = trim == 0 ? bytes : Uint8List.sublistView(bytes, trim);
-    await artifact.append(tail, offset: committed);
-    session.append(tail, offset: committed, writer: writer);
-  }
-
-  Future<void> _appendFinalTail(
-    DownloadSession session,
-    DownloadWriterLease writer,
-    WebPDownloadArtifact artifact,
-    Uint8List bytes,
-  ) async {
-    final committed = session.committedLength;
-    if (bytes.length < committed) {
-      throw StateError(
-        'Final WebP bytes are shorter than committed source: '
-        '${bytes.length}/$committed',
-      );
-    }
-    if (bytes.length == committed) return;
-    final tail = Uint8List.sublistView(bytes, committed);
-    await artifact.append(tail, offset: committed);
-    session.append(tail, offset: committed, writer: writer);
   }
 
   Future<bool> _moveNext(
@@ -225,6 +207,151 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
   void _throwIfCancelled(CancelToken? token) {
     if (token?.isCancelled == true) {
       throw WebPTransportCancelled('cancelled');
+    }
+  }
+}
+
+final class _WebPIngress {
+  final DownloadSession session;
+  final DownloadWriterLease writer;
+  final WebPDownloadArtifact artifact;
+
+  WebPArtifactContentKind _kind;
+  Uint8List _pendingPrefix;
+  bool _sourceContainsPrefix;
+  int _receivedLength;
+
+  _WebPIngress({
+    required this.session,
+    required this.writer,
+    required this.artifact,
+    required WebPArtifactRestoreState restored,
+  })  : _kind = restored.kind,
+        _pendingPrefix = restored.kind == WebPArtifactContentKind.unknown
+            ? restored.prefix
+            : Uint8List(0),
+        _sourceContainsPrefix = restored.sourceContainsPrefix,
+        _receivedLength = restored.length;
+
+  _WebPIngress.empty({
+    required this.session,
+    required this.writer,
+    required this.artifact,
+  })  : _kind = WebPArtifactContentKind.empty,
+        _pendingPrefix = Uint8List(0),
+        _sourceContainsPrefix = false,
+        _receivedLength = 0;
+
+  int get receivedLength => _receivedLength;
+  bool get isFallback => _kind == WebPArtifactContentKind.fallback;
+
+  Future<void> append(Uint8List bytes) async {
+    if (bytes.isEmpty) return;
+    if (!writer.active) throw const WebPTransportCancelled('stale writer');
+
+    final offset = _receivedLength;
+    await artifact.append(bytes, offset: offset);
+    // Cancellation is requested asynchronously. Do not let a writer that was
+    // retired while disk I/O was in progress mutate the native source. The
+    // durable artifact may be one chunk ahead and will be reconciled from its
+    // exact length by the next transport writer.
+    if (!writer.active) throw const WebPTransportCancelled('stale writer');
+    _receivedLength += bytes.length;
+
+    switch (_kind) {
+      case WebPArtifactContentKind.webp:
+        session.append(bytes, offset: offset, writer: writer);
+        return;
+      case WebPArtifactContentKind.fallback:
+        session.appendFallbackRange(
+          writer,
+          offset: offset,
+          length: bytes.length,
+        );
+        return;
+      case WebPArtifactContentKind.empty:
+      case WebPArtifactContentKind.unknown:
+        await _classifyAndCommit(bytes, priorOffset: offset);
+        return;
+    }
+  }
+
+  Future<void> finalizeContent({required int finalLength}) async {
+    if (finalLength != _receivedLength) {
+      throw WebPSourceInvariantError(
+        'final length $finalLength does not match ingress $_receivedLength',
+      );
+    }
+    if (_kind == WebPArtifactContentKind.empty ||
+        _kind == WebPArtifactContentKind.unknown) {
+      // Fewer than 12 bytes cannot be a RIFF/WEBP payload.
+      session.enterFallbackContent(
+        writer,
+        restoredLength: _receivedLength,
+      );
+      _kind = WebPArtifactContentKind.fallback;
+      _pendingPrefix = Uint8List(0);
+      _sourceContainsPrefix = false;
+    }
+  }
+
+  Future<void> _classifyAndCommit(
+    Uint8List bytes, {
+    required int priorOffset,
+  }) async {
+    final oldPrefix = _pendingPrefix;
+    final headerLength = oldPrefix.length + bytes.length;
+    if (headerLength < 12) {
+      final next = Uint8List(headerLength)
+        ..setRange(0, oldPrefix.length, oldPrefix)
+        ..setRange(oldPrefix.length, headerLength, bytes);
+      _pendingPrefix = next;
+      _kind = WebPArtifactContentKind.unknown;
+      return;
+    }
+
+    final header = Uint8List(12);
+    final prefixCopy = oldPrefix.length < 12 ? oldPrefix.length : 12;
+    if (prefixCopy > 0) {
+      header.setRange(0, prefixCopy, oldPrefix);
+    }
+    final remaining = 12 - prefixCopy;
+    if (remaining > 0) {
+      header.setRange(prefixCopy, 12, bytes, 0);
+    }
+    final classified = WebPDownloadArtifact.classifyPrefix(
+      header,
+      completeLength: _receivedLength,
+    );
+
+    if (classified == WebPArtifactContentKind.fallback) {
+      session.enterFallbackContent(
+        writer,
+        restoredLength: _receivedLength,
+      );
+      _kind = classified;
+      _pendingPrefix = Uint8List(0);
+      _sourceContainsPrefix = false;
+      return;
+    }
+
+    if (!_sourceContainsPrefix && oldPrefix.isNotEmpty) {
+      session.append(oldPrefix, offset: 0, writer: writer);
+    }
+    session.append(
+      bytes,
+      offset: session.sourceCommittedLength,
+      writer: writer,
+    );
+    _kind = WebPArtifactContentKind.webp;
+    _pendingPrefix = Uint8List(0);
+    _sourceContainsPrefix = true;
+
+    if (session.sourceCommittedLength != _receivedLength) {
+      throw WebPSourceInvariantError(
+        'classified WebP source length ${session.sourceCommittedLength} '
+        'does not match artifact $_receivedLength (prior=$priorOffset)',
+      );
     }
   }
 }

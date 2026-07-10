@@ -40,6 +40,7 @@ final class WebPDecodeSessionSnapshot {
   final WebPFrameHolderSnapshot frames;
   final Object? decodeError;
   final Object? uploadError;
+  final bool nativeExhaustedWithoutFrames;
 
   const WebPDecodeSessionSnapshot({
     required this.download,
@@ -53,6 +54,7 @@ final class WebPDecodeSessionSnapshot {
     required this.frames,
     required this.decodeError,
     required this.uploadError,
+    this.nativeExhaustedWithoutFrames = false,
   });
 }
 
@@ -142,7 +144,10 @@ final class WebPDecodeSession {
   int _uploadRevision = 1;
   int _observedSourceEpoch;
   int _observedCommittedLength;
+  DownloadTransportState _observedTransport;
   int? _decodeBlockedAtCommittedLength;
+  int _decodedFramesSinceRestart = 0;
+  bool _hasProducedFrame = false;
   Object? _decodeError;
   Object? _uploadError;
 
@@ -153,14 +158,35 @@ final class WebPDecodeSession {
     required void Function(WebPDecodeSession session) reconcile,
   })  : _reconcile = reconcile,
         _observedSourceEpoch = download.source.epoch,
-        _observedCommittedLength = download.committedLength {
+        _observedCommittedLength = download.sourceCommittedLength,
+        _observedTransport = download.transport {
     download.retainDecodeSession();
     holder = WebPFrameHolder(onDemand: _scheduleReconcile);
     _downloadSubscription = download.states.listen(_onDownloadState);
   }
 
   Stream<WebPDecodeSessionSnapshot> get states => _states.stream;
+
+  /// Atomically emits the current state followed by ordered live updates.
+  Stream<WebPDecodeSessionSnapshot> watch() {
+    _checkActive();
+    return Stream<WebPDecodeSessionSnapshot>.multi((controller) {
+      final subscription = _states.stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      controller.add(snapshot);
+      controller.onCancel = subscription.cancel;
+    });
+  }
+
   bool get isDisposed => _disposed;
+  bool get canEvict =>
+      !_disposed &&
+      _demands.isEmpty &&
+      holder.decodeInFlight == 0 &&
+      holder.uploadInFlight == 0;
   int get demandCount => _demands.length;
   int get decodeDemandCount =>
       _demands.values.where((demand) => demand.decode).length;
@@ -168,6 +194,23 @@ final class WebPDecodeSession {
       _demands.values.where((demand) => demand.upload).length;
   bool get shouldDecode => decodeDemandCount > 0;
   bool get shouldUpload => uploadDemandCount > 0;
+  bool get sourceDecodable => !download.fallbackContent;
+  bool get hasProducedFrame => _hasProducedFrame;
+  bool get canScheduleDecode {
+    if (!shouldDecode || !sourceDecodable) return false;
+    final committed = download.sourceCommittedLength;
+    if (_decodeBlockedAtCommittedLength != committed) return true;
+    if (holder.queuedFrameCount > 0 || holder.uploadInFlight > 0) {
+      return false;
+    }
+    return _decodedFramesSinceRestart > 0;
+  }
+
+  bool get nativeExhaustedWithoutFrames =>
+      download.transport == DownloadTransportState.sealed &&
+      !_hasProducedFrame &&
+      _decodeBlockedAtCommittedLength == download.sourceCommittedLength &&
+      holder.decodeInFlight == 0;
   bool get isCurrent => _demands.values.any((demand) => demand.current);
   int get desiredPriority =>
       _demands.values.fold(0, (a, b) => a > b.priority ? a : b.priority);
@@ -196,6 +239,7 @@ final class WebPDecodeSession {
         frames: holder.snapshot,
         decodeError: _decodeError,
         uploadError: _uploadError,
+        nativeExhaustedWithoutFrames: nativeExhaustedWithoutFrames,
       );
 
   WebPDecodeDemandLease attach({
@@ -226,25 +270,36 @@ final class WebPDecodeSession {
   }) {
     _checkActive();
     _syncSourceEpoch();
-    if (expectedRevision != _decodeRevision || !shouldDecode) return null;
+    if (expectedRevision != _decodeRevision ||
+        !shouldDecode ||
+        !sourceDecodable) {
+      return null;
+    }
 
+    final committed = download.sourceCommittedLength;
     final cursorState = cursor.state;
     if (!cursorState.ready ||
         cursorState.targetWidth <= 0 ||
         cursorState.targetHeight <= 0) {
+      _decodeBlockedAtCommittedLength = committed;
+      _schedulePublish();
       return null;
     }
 
-    final committed = download.committedLength;
     if (_decodeBlockedAtCommittedLength == committed) {
-      if (download.transport != DownloadTransportState.sealed ||
-          holder.queuedFrameCount > 0 ||
-          holder.uploadInFlight > 0) {
+      // A playback pass may restart only after every frame produced by that
+      // pass has left the holder. This works for both partial and sealed
+      // sources: partial input loops the currently complete ANMF frames while
+      // new bytes continue to append to the shared source.
+      if (holder.queuedFrameCount > 0 || holder.uploadInFlight > 0) {
         return null;
       }
-      // Complete sources may loop. Restart only after the consumer drained all
-      // frames; partial sources remain blocked until new bytes arrive.
+      // An empty pass means the source has not published a complete frame yet.
+      // Keep the session blocked until committedLength changes instead of
+      // spinning restart/decode on an incomplete RIFF chunk.
+      if (_decodedFramesSinceRestart <= 0) return null;
       cursor.restart();
+      _decodedFramesSinceRestart = 0;
       _decodeBlockedAtCommittedLength = null;
     }
 
@@ -320,6 +375,8 @@ final class WebPDecodeSession {
       if (frames.isEmpty) {
         _decodeBlockedAtCommittedLength = claim.sourceCommittedLength;
       } else {
+        _decodedFramesSinceRestart += frames.length;
+        _hasProducedFrame = true;
         _decodeBlockedAtCommittedLength = null;
       }
       holder.finishDecodeClaim(claim.reservedFrames, frames);
@@ -375,6 +432,7 @@ final class WebPDecodeSession {
     _uploadRevision++;
     cursor.restart();
     _decodeBlockedAtCommittedLength = null;
+    _decodedFramesSinceRestart = 0;
     holder.clearBufferedFrames();
     _decodeError = null;
     _uploadError = null;
@@ -384,8 +442,12 @@ final class WebPDecodeSession {
 
   void evict() {
     if (_disposed) return;
-    if (_demands.isNotEmpty) {
-      throw StateError('Cannot evict a demanded decode session');
+    if (!canEvict) {
+      throw StateError(
+        'Cannot evict decode session: demands=${_demands.length}, '
+        'decodeInFlight=${holder.decodeInFlight}, '
+        'uploadInFlight=${holder.uploadInFlight}',
+      );
     }
     _disposed = true;
     _decodeRevision++;
@@ -473,12 +535,15 @@ final class WebPDecodeSession {
     if (_disposed) return;
     _syncSourceEpoch();
     final committed = snapshot.source.committedLength;
-    if (committed != _observedCommittedLength) {
+    final becameSealed = snapshot.transport == DownloadTransportState.sealed &&
+        _observedTransport != DownloadTransportState.sealed;
+    _observedTransport = snapshot.transport;
+    if (committed != _observedCommittedLength || becameSealed) {
       _observedCommittedLength = committed;
       _decodeBlockedAtCommittedLength = null;
-      // An error on an incomplete frame may become recoverable when more bytes
-      // arrive. Sealed-source failures stay terminal because length no longer
-      // changes.
+      // New bytes or final index publication may make a previously incomplete
+      // frame decodable. Sealed-source errors produced after this final pass are
+      // terminal because neither length nor index can advance again.
       _decodeError = null;
     }
     _schedulePublish();
@@ -489,10 +554,13 @@ final class WebPDecodeSession {
     final epoch = download.source.epoch;
     if (epoch == _observedSourceEpoch) return;
     _observedSourceEpoch = epoch;
-    _observedCommittedLength = download.committedLength;
+    _observedCommittedLength = download.sourceCommittedLength;
+    _observedTransport = download.transport;
     _decodeRevision++;
     _uploadRevision++;
     _decodeBlockedAtCommittedLength = null;
+    _decodedFramesSinceRestart = 0;
+    _hasProducedFrame = false;
     _decodeError = null;
     _uploadError = null;
     cursor.restart();
@@ -583,22 +651,45 @@ final class WebPDecodeSessionRegistry {
 
   bool tryEvict(WebPDecodeIdentity identity) {
     final session = _sessions[identity];
-    if (session == null || session.demandCount > 0) return false;
+    if (session == null || !session.canEvict) return false;
     session.evict();
     _sessions.remove(identity);
     return true;
   }
 
+  /// Removes the active binding without disposing it.
+  ///
+  /// Source switches may need to create the replacement cursor immediately
+  /// while a cancelled upload from the old cursor is still unwinding. The
+  /// caller retains the returned session until [WebPDecodeSession.canEvict]
+  /// becomes true.
+  WebPDecodeSession? retire(WebPDecodeIdentity identity) {
+    final session = _sessions[identity];
+    if (session == null) return null;
+    if (session.demandCount > 0) {
+      throw StateError(
+        'Cannot retire demanded decode session: ${identity.fullKey}',
+      );
+    }
+    _sessions.remove(identity);
+    return session;
+  }
+
+  /// Explicit physical eviction. Logical detach must use [detachScope].
+  ///
+  /// This strict form is retained for coordinator code and unit tests that
+  /// expect an invalid active eviction to fail instead of being ignored.
   void evict(WebPDecodeIdentity identity) {
     final session = _sessions[identity];
     if (session == null) return;
-
-    if (session.demandCount > 0) {
+    if (!session.canEvict) {
       throw StateError(
-        'Cannot evict active decode session ${identity.fullKey}',
+        'Cannot evict active decode session: ${identity.fullKey}; '
+        'demands=${session.demandCount}, '
+        'decodeInFlight=${session.holder.decodeInFlight}, '
+        'uploadInFlight=${session.holder.uploadInFlight}',
       );
     }
-
     session.evict();
     _sessions.remove(identity);
   }
@@ -609,7 +700,18 @@ final class WebPDecodeSessionRegistry {
     }
   }
 
-  void dispose() => evictUndemanded();
+  void dispose() {
+    for (final session in _sessions.values) {
+      if (!session.canEvict) {
+        throw StateError(
+          'Cannot dispose active decode session ${session.identity.fullKey}',
+        );
+      }
+    }
+    for (final identity in _sessions.keys.toList()) {
+      evict(identity);
+    }
+  }
 
   static webp.WebPFrameCursor _createNativeCursor(
     webp.WebPByteSource source,

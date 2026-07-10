@@ -19,6 +19,9 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   bool _pumpScheduled = false;
   bool _pumping = false;
   bool _fallbackStarted = false;
+  bool _fallbackPumping = false;
+  int _fallbackFramesEmitted = 0;
+  ui.Codec? _fallbackCodec;
   bool _reportedTerminalError = false;
 
   _WebPSessionImageStreamCompleter(this._provider)
@@ -41,6 +44,8 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     unawaited(_holderSubscription?.cancel());
     unawaited(_downloadSubscription?.cancel());
     unawaited(_decodeSubscription?.cancel());
+    _fallbackCodec?.dispose();
+    _fallbackCodec = null;
     _lease?.detach();
     _lease = null;
     super.onDisposed();
@@ -65,21 +70,18 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         scopeId: _scopeId,
       );
       _lease = lease;
-      _holderSubscription = lease.decode.holder.states.listen(
+      _holderSubscription = lease.decode.holder.watch().listen(
         _onHolderState,
         onError: _reportError,
       );
-      _downloadSubscription = lease.download.states.listen(
+      _downloadSubscription = lease.download.watch().listen(
         _onDownloadState,
         onError: _reportError,
       );
-      _decodeSubscription = lease.decode.states.listen(
+      _decodeSubscription = lease.decode.watch().listen(
         _onDecodeState,
         onError: _reportError,
       );
-      _onDownloadState(lease.download.snapshot);
-      _onDecodeState(lease.decode.snapshot);
-      _onHolderState(lease.decode.holder.snapshot);
     } catch (error, stack) {
       _reportError(error, stack);
     }
@@ -101,11 +103,12 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
 
   void _onDownloadState(DownloadSessionSnapshot snapshot) {
     if (_disposed) return;
-    final current = snapshot.source.committedLength;
+    final current = snapshot.committedLength;
     reportImageChunkEvent(
       ImageChunkEvent(
         cumulativeBytesLoaded: current,
-        expectedTotalBytes: snapshot.expectedLength,
+        expectedTotalBytes:
+            snapshot.expectedLength > 0 ? snapshot.expectedLength : null,
       ),
     );
     if (snapshot.transport == DownloadTransportState.failed) {
@@ -114,18 +117,35 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     }
     if (snapshot.transport == DownloadTransportState.sealed) {
       _schedulePump();
-      _maybeDecodeFallback(snapshot);
+      if (snapshot.fallbackContent) {
+        unawaited(_maybeDecodeFallback(snapshot));
+      }
     }
   }
 
   void _onDecodeState(WebPDecodeSessionSnapshot snapshot) {
     if (_disposed) return;
     if (snapshot.decodeError != null) {
-      _reportError(snapshot.decodeError!);
+      // An incomplete ANMF payload may make the current decode pass fail until
+      // more source bytes arrive. WebPDecodeSession clears that error when
+      // committedLength advances, so only a sealed-source failure is terminal.
+      if (snapshot.download.transport == DownloadTransportState.sealed) {
+        unawaited(
+          _maybeDecodeFallback(
+            snapshot.download,
+            nativeError: snapshot.decodeError,
+          ),
+        );
+      }
       return;
     }
     if (snapshot.uploadError != null) {
       _reportError(snapshot.uploadError!);
+      return;
+    }
+    if (snapshot.download.transport == DownloadTransportState.sealed &&
+        snapshot.nativeExhaustedWithoutFrames) {
+      unawaited(_maybeDecodeFallback(snapshot.download));
       return;
     }
     if (snapshot.frames.renderedFrames > 0) _schedulePump();
@@ -136,12 +156,22 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     _pumpScheduled = true;
     scheduleMicrotask(() {
       _pumpScheduled = false;
-      unawaited(_pump());
+      if (_fallbackCodec != null) {
+        unawaited(_pumpFallback());
+      } else {
+        unawaited(_pump());
+      }
     });
   }
 
   Future<void> _pump() async {
-    if (_disposed || _pumping || !hasListeners || !_isLifecycleActive) return;
+    if (_disposed ||
+        _fallbackStarted ||
+        _pumping ||
+        !hasListeners ||
+        !_isLifecycleActive) {
+      return;
+    }
     final holder = _lease?.decode.holder;
     if (holder == null || holder.isDisposed) return;
 
@@ -186,12 +216,22 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         state != ui.AppLifecycleState.detached;
   }
 
-  Future<void> _maybeDecodeFallback(DownloadSessionSnapshot snapshot) async {
+  Future<void> _maybeDecodeFallback(
+    DownloadSessionSnapshot snapshot, {
+    Object? nativeError,
+  }) async {
     if (_fallbackStarted || _disposed) return;
     final lease = _lease;
-    if (lease == null || lease.decode.cursor.state.ready) return;
+    if (lease == null) return;
+    final eligible = snapshot.fallbackContent ||
+        nativeError != null ||
+        lease.decode.nativeExhaustedWithoutFrames;
+    if (!eligible) return;
     final file = snapshot.artifactFile;
-    if (file == null) return;
+    if (file == null) {
+      if (nativeError != null) _reportError(nativeError);
+      return;
+    }
 
     _fallbackStarted = true;
     try {
@@ -199,18 +239,94 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       // decode reconciler one turn before falling back to Flutter's generic
       // codec for a non-WebP/static image.
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      if (_disposed || lease.decode.cursor.state.ready) return;
+      if (_disposed) return;
+      if (!snapshot.fallbackContent &&
+          nativeError == null &&
+          lease.decode.hasProducedFrame) {
+        _fallbackStarted = false;
+        _schedulePump();
+        return;
+      }
       final bytes = await file.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      codec.dispose();
-      if (!_disposed) {
+      if (_disposed) {
+        codec.dispose();
+        return;
+      }
+      _fallbackCodec?.dispose();
+      _fallbackCodec = codec;
+      _fallbackFramesEmitted = 0;
+      _schedulePump();
+    } catch (error, stack) {
+      _reportError(
+        nativeError == null
+            ? error
+            : StateError(
+                'Native WebP decode failed ($nativeError); '
+                'fallback decode also failed ($error)',
+              ),
+        stack,
+      );
+    }
+  }
+
+  Future<void> _pumpFallback() async {
+    if (_disposed ||
+        _fallbackPumping ||
+        !hasListeners ||
+        !_isLifecycleActive) {
+      return;
+    }
+    final codec = _fallbackCodec;
+    if (codec == null) return;
+
+    _fallbackPumping = true;
+    try {
+      while (!_disposed &&
+          hasListeners &&
+          _isLifecycleActive &&
+          identical(_fallbackCodec, codec)) {
+        final repetitionCount = codec.repetitionCount;
+        final totalFrames = repetitionCount < 0
+            ? null
+            : codec.frameCount * (repetitionCount + 1);
+        if (totalFrames != null && _fallbackFramesEmitted >= totalFrames) {
+          codec.dispose();
+          if (identical(_fallbackCodec, codec)) _fallbackCodec = null;
+          return;
+        }
+
+        final frame = await codec.getNextFrame();
+        if (_disposed || !identical(_fallbackCodec, codec)) {
+          frame.image.dispose();
+          return;
+        }
         setImage(ImageInfo(image: frame.image, scale: _provider.scale));
-      } else {
-        frame.image.dispose();
+        _fallbackFramesEmitted++;
+
+        if (codec.frameCount <= 1) {
+          codec.dispose();
+          if (identical(_fallbackCodec, codec)) _fallbackCodec = null;
+          return;
+        }
+
+        final delay = frame.duration.inMicroseconds <= 0
+            ? const Duration(milliseconds: 100)
+            : Duration(
+                milliseconds: (frame.duration.inMilliseconds /
+                        webpPlaybackSpeed)
+                    .round()
+                    .clamp(8, 1000)
+                    .toInt(),
+              );
+        await Future<void>.delayed(delay);
       }
     } catch (error, stack) {
+      codec.dispose();
+      if (identical(_fallbackCodec, codec)) _fallbackCodec = null;
       _reportError(error, stack);
+    } finally {
+      _fallbackPumping = false;
     }
   }
 

@@ -33,6 +33,18 @@ final class DownloadIdentity {
 
 enum DownloadTransportState { idle, queued, receiving, paused, sealed, failed }
 
+final class WebPSourceInvariantError implements Exception {
+  final String message;
+  final Object? cause;
+
+  const WebPSourceInvariantError(this.message, [this.cause]);
+
+  @override
+  String toString() => cause == null
+      ? 'WebP source invariant failed: $message'
+      : 'WebP source invariant failed: $message ($cause)';
+}
+
 final class DownloadSessionSnapshot {
   final DownloadTransportState transport;
   final webp.NativeWebPSourceState source;
@@ -41,6 +53,8 @@ final class DownloadSessionSnapshot {
   final int dependentDecodeSessions;
   final int transportRevision;
   final int expectedLength;
+  final int committedLength;
+  final bool fallbackContent;
   final File? artifactFile;
   final Object? error;
 
@@ -52,6 +66,8 @@ final class DownloadSessionSnapshot {
     required this.dependentDecodeSessions,
     required this.transportRevision,
     required this.expectedLength,
+    this.committedLength = 0,
+    this.fallbackContent = false,
     required this.artifactFile,
     required this.error,
   });
@@ -110,6 +126,7 @@ final class DownloadSession {
 
   DownloadTransportState _transport = DownloadTransportState.idle;
   Object? _error;
+  bool _failureRetryable = false;
   File? _artifactFile;
   bool _disposed = false;
   bool _publishScheduled = false;
@@ -119,6 +136,8 @@ final class DownloadSession {
   int? _activeWriterRevision;
   DownloadWriterLease? _activeWriter;
   int _expectedLength;
+  bool _fallbackContent = false;
+  int _fallbackCommittedLength = 0;
   int _dependentDecodeSessions = 0;
 
   DownloadSession({
@@ -130,6 +149,22 @@ final class DownloadSession {
         _expectedLength = expectedLength;
 
   Stream<DownloadSessionSnapshot> get states => _states.stream;
+
+  /// Atomically subscribes to live changes and emits the current snapshot
+  /// first. Consumers never need a separate `listen` + `snapshot` sequence.
+  Stream<DownloadSessionSnapshot> watch() {
+    _checkActive();
+    return Stream<DownloadSessionSnapshot>.multi((controller) {
+      final subscription = _states.stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      controller.add(snapshot);
+      controller.onCancel = subscription.cancel;
+    });
+  }
+
   DownloadTransportState get transport => _transport;
   int get desiredPriority =>
       _demands.values.fold(0, (a, b) => a > b.priority ? a : b.priority);
@@ -137,7 +172,10 @@ final class DownloadSession {
   int get dependentDecodeSessions => _dependentDecodeSessions;
   int get transportRevision => _transportRevision;
   int get expectedLength => _expectedLength;
-  int get committedLength => source.state.committedLength;
+  int get sourceCommittedLength => source.state.committedLength;
+  int get committedLength =>
+      _fallbackContent ? _fallbackCommittedLength : sourceCommittedLength;
+  bool get fallbackContent => _fallbackContent;
   bool get hasDemand => _demands.isNotEmpty;
   bool get isDisposed => _disposed;
   bool get canEvict =>
@@ -154,6 +192,8 @@ final class DownloadSession {
         dependentDecodeSessions: _dependentDecodeSessions,
         transportRevision: _transportRevision,
         expectedLength: _expectedLength,
+        committedLength: committedLength,
+        fallbackContent: _fallbackContent,
         artifactFile: _artifactFile,
         error: _error,
       );
@@ -187,6 +227,7 @@ final class DownloadSession {
     _activeWriterRevision = revision;
     _activeWriter = writer;
     _error = null;
+    _failureRetryable = false;
     _artifactFile = null;
     _setTransport(DownloadTransportState.receiving);
     return writer;
@@ -226,12 +267,13 @@ final class DownloadSession {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
     final value = expectedLength ?? 0;
-    if (value <= 0 || value == _expectedLength) return;
+    if (value <= 0) return;
     if (value < committedLength) {
-      throw StateError(
-        'Expected length $value is smaller than committed $committedLength',
+      throw WebPSourceInvariantError(
+        'expected length $value is smaller than committed $committedLength',
       );
     }
+    if (value == _expectedLength) return;
     _expectedLength = value;
     _schedulePublish();
   }
@@ -248,16 +290,29 @@ final class DownloadSession {
   }) {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
+    if (_fallbackContent) {
+      throw const WebPSourceInvariantError(
+        'cannot append WebP bytes after entering fallback content mode',
+      );
+    }
     if (bytes.isEmpty) return;
-    final committed = committedLength;
+    final committed = sourceCommittedLength;
     if (offset != committed) {
-      throw StateError(
-        'WebP source gap/overlap: expected offset=$committed, got=$offset, '
+      throw WebPSourceInvariantError(
+        'gap/overlap: expected offset=$committed, got=$offset, '
         'length=${bytes.length}, epoch=${activeWriter.sourceEpoch}, '
         'writer=${activeWriter.revision}',
       );
     }
-    source.append(bytes, offset: offset);
+    try {
+      source.append(bytes, offset: offset);
+    } catch (error) {
+      throw WebPSourceInvariantError(
+        'native append rejected epoch=${activeWriter.sourceEpoch}, '
+        'offset=$offset, length=${bytes.length}',
+        error,
+      );
+    }
     _schedulePublish();
   }
 
@@ -269,13 +324,25 @@ final class DownloadSession {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
     if (epoch <= source.epoch) {
-      throw StateError('Source epoch must increase: $epoch <= ${source.epoch}');
+      throw WebPSourceInvariantError(
+        'source epoch must increase: $epoch <= ${source.epoch}',
+      );
     }
-    source.reset(epoch: epoch, expectedLength: expectedLength);
+    try {
+      source.reset(epoch: epoch, expectedLength: expectedLength);
+    } catch (error) {
+      throw WebPSourceInvariantError(
+        'native reset rejected epoch=$epoch expected=$expectedLength',
+        error,
+      );
+    }
     activeWriter._replaceEpoch(epoch);
+    _fallbackContent = false;
+    _fallbackCommittedLength = 0;
     _expectedLength = expectedLength;
     _artifactFile = null;
     _error = null;
+    _failureRetryable = false;
     _schedulePublish();
     return activeWriter;
   }
@@ -285,18 +352,110 @@ final class DownloadSession {
   void seal([DownloadWriterLease? writer, File? artifactFile]) {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
-    if (_expectedLength > 0 && committedLength != _expectedLength) {
-      throw StateError(
-        'Cannot seal incomplete source: $committedLength/$_expectedLength',
+    if (_fallbackContent) {
+      throw const WebPSourceInvariantError(
+        'fallback content must be finalized with sealFallback',
       );
     }
-    source.seal();
+    if (_expectedLength > 0 && sourceCommittedLength != _expectedLength) {
+      throw WebPSourceInvariantError(
+        'cannot seal incomplete source: $sourceCommittedLength/$_expectedLength',
+      );
+    }
+    try {
+      source.seal();
+    } catch (error) {
+      throw WebPSourceInvariantError(
+        'native seal rejected epoch=${activeWriter.sourceEpoch}, '
+        'length=$sourceCommittedLength',
+        error,
+      );
+    }
     _artifactFile = artifactFile;
+    _failureRetryable = false;
     _activeWriterRevision = null;
     _activeWriter = null;
     activeWriter._detach();
     _setTransport(DownloadTransportState.sealed);
     _scheduleReconcile();
+  }
+
+  /// Switches this download to the generic non-WebP artifact path.
+  ///
+  /// At most a small content-sniff prefix exists outside the artifact. No
+  /// compressed WebP history is replayed through this path.
+  void enterFallbackContent(
+    DownloadWriterLease writer, {
+    int restoredLength = 0,
+  }) {
+    _requireWriter(writer);
+    if (!_fallbackContent && sourceCommittedLength > 0) {
+      final nextEpoch = source.epoch + 1;
+      try {
+        source.reset(epoch: nextEpoch, expectedLength: 0);
+      } catch (error) {
+        throw WebPSourceInvariantError(
+          'failed to reset native source before fallback content',
+          error,
+        );
+      }
+      writer._replaceEpoch(nextEpoch);
+    }
+    _fallbackContent = true;
+    _fallbackCommittedLength = restoredLength;
+    _decodeSafePublish();
+  }
+
+  /// Advances the persisted generic-content range. The artifact itself owns
+  /// the bytes; the session owns only its contiguous length and lifecycle.
+  void appendFallbackRange(
+    DownloadWriterLease writer, {
+    required int offset,
+    required int length,
+  }) {
+    _requireWriter(writer);
+    if (!_fallbackContent) enterFallbackContent(writer);
+    if (length < 0 || offset != _fallbackCommittedLength) {
+      throw WebPSourceInvariantError(
+        'fallback range discontinuity: committed=$_fallbackCommittedLength, '
+        'offset=$offset, length=$length',
+      );
+    }
+    _fallbackCommittedLength += length;
+    _schedulePublish();
+  }
+
+  void sealFallback(
+    DownloadWriterLease writer,
+    File artifactFile, {
+    required int finalLength,
+  }) {
+    _requireWriter(writer);
+    if (!_fallbackContent || _fallbackCommittedLength != finalLength) {
+      throw WebPSourceInvariantError(
+        'invalid fallback seal: mode=$_fallbackContent, '
+        'committed=$_fallbackCommittedLength, final=$finalLength',
+      );
+    }
+    if (_expectedLength > 0 && finalLength != _expectedLength) {
+      throw WebPSourceInvariantError(
+        'fallback final length $finalLength does not match expected '
+        '$_expectedLength',
+      );
+    }
+    _artifactFile = artifactFile;
+    _failureRetryable = false;
+    _activeWriterRevision = null;
+    _activeWriter = null;
+    writer._detach();
+    _setTransport(DownloadTransportState.sealed);
+    _scheduleReconcile();
+  }
+
+  void _decodeSafePublish() {
+    _error = null;
+    _failureRetryable = false;
+    _schedulePublish();
   }
 
   void pause(DownloadWriterLease writer) {
@@ -319,24 +478,30 @@ final class DownloadSession {
     _scheduleReconcile();
   }
 
-  void fail(DownloadWriterLease writer, Object error) {
+  void fail(
+    DownloadWriterLease writer,
+    Object error, {
+    bool retryable = true,
+  }) {
     if (!_isWriterActive(writer)) return;
     _activeWriterRevision = null;
     _activeWriter = null;
     writer._detach();
     _error = error;
+    _failureRetryable = retryable;
     _setTransport(DownloadTransportState.failed);
     _scheduleReconcile();
   }
 
   /// Compatibility alias for the old lifecycle API.
-  void markFailed(Object error) {
+  void markFailed(Object error, {bool retryable = true}) {
     final writer = _activeWriter;
     if (writer != null) {
-      fail(writer, error);
+      fail(writer, error, retryable: retryable);
       return;
     }
     _error = error;
+    _failureRetryable = retryable;
     _setTransport(DownloadTransportState.failed);
     _scheduleReconcile();
   }
@@ -396,9 +561,12 @@ final class DownloadSession {
     // A failed transport is terminal for the current demand epoch. A later
     // attach/priority change is an explicit retry signal and reuses the same
     // source/artifact instead of constructing a second session.
-    if (_transport == DownloadTransportState.failed && _demands.isNotEmpty) {
+    if (_transport == DownloadTransportState.failed &&
+        _failureRetryable &&
+        _demands.isNotEmpty) {
       _transport = DownloadTransportState.paused;
       _error = null;
+      _failureRetryable = false;
     }
     _schedulePublish();
     _scheduleReconcile();
@@ -532,11 +700,15 @@ final class DownloadSessionRegistry {
   }
 
   void dispose() {
+    for (final session in _sessions.values) {
+      if (!session.canEvict) {
+        throw StateError(
+          'Cannot dispose active download session ${session.identity.cacheKey}',
+        );
+      }
+    }
     for (final identity in _sessions.keys.toList()) {
-      final session = _sessions[identity]!;
-      if (!session.canEvict) continue;
-      session.evict();
-      _sessions.remove(identity);
+      evict(identity);
     }
   }
 }

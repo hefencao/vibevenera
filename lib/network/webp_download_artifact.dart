@@ -8,6 +8,22 @@ import 'package:venera/foundation/image_provider/session/download_session.dart';
 
 typedef WebPArtifactPromoter = Future<File> Function(File source);
 
+enum WebPArtifactContentKind { empty, unknown, webp, fallback }
+
+final class WebPArtifactRestoreState {
+  final WebPArtifactContentKind kind;
+  final int length;
+  final Uint8List prefix;
+  final bool sourceContainsPrefix;
+
+  const WebPArtifactRestoreState({
+    required this.kind,
+    required this.length,
+    required this.prefix,
+    this.sourceContainsPrefix = false,
+  });
+}
+
 final class WebPDownloadArtifact {
   final File file;
   final WebPArtifactPromoter _promote;
@@ -30,39 +46,95 @@ final class WebPDownloadArtifact {
   int get length => _length;
   bool get isPromoted => _promoted;
 
-  /// Restores only the range not already present in the native source.
-  /// The same writer capability is used for restore and live network bytes, so
-  /// cancellation cannot introduce a second authoritative writer.
-  Future<void> restore(
+  /// Restores the authoritative range already persisted for this identity.
+  ///
+  /// WebP bytes are replayed only when reconstructing a process-local native
+  /// source after process/session creation. A retained native source at the
+  /// same committed offset is never replayed. Generic fallback content remains
+  /// artifact-owned and restores only its contiguous length.
+  Future<WebPArtifactRestoreState> restore(
     DownloadSession session,
-    DownloadWriterLease writer,
-  ) async {
+    DownloadWriterLease writer, {
+    void Function()? checkCancelled,
+  }) async {
     if (_initialized) throw StateError('WebP artifact is already initialized');
+    checkCancelled?.call();
     _initialized = true;
     final exists = await file.exists();
     _length = exists ? await file.length() : 0;
-    final committed = session.committedLength;
-    if (committed > _length) {
-      // The process-local native source cannot be reconstructed from a shorter
-      // durable artifact. Reset both sides and resume from zero instead of
-      // leaving the session permanently failed.
-      await reset();
+    checkCancelled?.call();
+    if (_length == 0) {
+      return WebPArtifactRestoreState(
+        kind: WebPArtifactContentKind.empty,
+        length: 0,
+        prefix: Uint8List(0),
+      );
+    }
+
+    final prefix = await _readPrefix();
+    checkCancelled?.call();
+    final kind = classifyPrefix(prefix, completeLength: _length);
+
+    if (kind == WebPArtifactContentKind.fallback) {
+      session.enterFallbackContent(writer, restoredLength: _length);
+      return WebPArtifactRestoreState(
+        kind: kind,
+        length: _length,
+        prefix: prefix,
+      );
+    }
+
+    if (kind == WebPArtifactContentKind.unknown) {
+      final sourceLength = session.sourceCommittedLength;
+      final mustReset = session.fallbackContent ||
+          (sourceLength != 0 && sourceLength != _length);
+      if (mustReset) {
+        session.resetSource(
+          writer: writer,
+          epoch: session.source.epoch + 1,
+          expectedLength: session.expectedLength,
+        );
+      }
+      final sourceContainsPrefix = !mustReset &&
+          !session.fallbackContent &&
+          session.sourceCommittedLength == _length;
+      return WebPArtifactRestoreState(
+        kind: kind,
+        length: _length,
+        prefix: prefix,
+        sourceContainsPrefix: sourceContainsPrefix,
+      );
+    }
+
+    if (session.fallbackContent || session.sourceCommittedLength > _length) {
       session.resetSource(
         writer: writer,
         epoch: session.source.epoch + 1,
         expectedLength: session.expectedLength,
       );
-      return;
     }
-    if (_length == committed) return;
 
-    var offset = committed;
-    await for (final chunk in file.openRead(committed)) {
-      if (!writer.active) throw StateError('WebP writer became stale on restore');
-      final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
-      session.append(bytes, offset: offset, writer: writer);
-      offset += bytes.length;
+    final committed = session.sourceCommittedLength;
+    if (committed < _length) {
+      var offset = committed;
+      await for (final chunk in file.openRead(committed)) {
+        checkCancelled?.call();
+        if (!writer.active) {
+          throw StateError('WebP writer became stale during artifact restore');
+        }
+        final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+        session.append(bytes, offset: offset, writer: writer);
+        offset += bytes.length;
+        checkCancelled?.call();
+      }
     }
+
+    return WebPArtifactRestoreState(
+      kind: kind,
+      length: _length,
+      prefix: prefix,
+      sourceContainsPrefix: true,
+    );
   }
 
   Future<void> append(Uint8List bytes, {required int offset}) async {
@@ -110,10 +182,38 @@ final class WebPDownloadArtifact {
 
   Future<void> close() => _closeSink();
 
+  Future<Uint8List> _readPrefix() async {
+    final count = _length < 12 ? _length : 12;
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in file.openRead(0, count)) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
   Future<void> _closeSink() async {
     final sink = _sink;
     _sink = null;
     await sink?.flush();
     await sink?.close();
+  }
+
+  static WebPArtifactContentKind classifyPrefix(
+    Uint8List prefix, {
+    required int completeLength,
+  }) {
+    if (completeLength == 0) return WebPArtifactContentKind.empty;
+    if (prefix.length < 12) return WebPArtifactContentKind.unknown;
+    final isRiff = prefix[0] == 0x52 &&
+        prefix[1] == 0x49 &&
+        prefix[2] == 0x46 &&
+        prefix[3] == 0x46;
+    final isWebP = prefix[8] == 0x57 &&
+        prefix[9] == 0x45 &&
+        prefix[10] == 0x42 &&
+        prefix[11] == 0x50;
+    return isRiff && isWebP
+        ? WebPArtifactContentKind.webp
+        : WebPArtifactContentKind.fallback;
   }
 }
