@@ -112,8 +112,10 @@ class _MigrationManager {
     for (final t in registry.runningNotIn(activeKeys)) {
       if (!t.cancelable) continue;
       if (t.retainWhenInactive) continue;
+      // Keep running tasks registered until their async cancellation path has
+      // unwound and notified the scheduler. Releasing the permit early allows
+      // two transports to write the same DownloadSession concurrently.
       t.cancel();
-      registry.remove(t.key);
     }
   }
 }
@@ -170,11 +172,21 @@ class _TaskLaneScheduler {
 
   void cancel(String key) {
     final task = _registry.find(key);
-    if (task != null) {
-      task.cancel();
+    if (task == null) return;
+    task.cancel();
+    if (_registry.isQueued(key)) {
       _queue.remove(task);
       _registry.remove(key);
+      _dispatchNext();
     }
+    // Running tasks keep their permit until notifyCompleted/notifyFailed.
+  }
+
+  void updatePriority(String key, int priority) {
+    final task = _registry.find(key);
+    if (task == null || task.priority == priority) return;
+    task.priority = priority;
+    _sortQueue();
   }
 
   void migrateTasks(Set<String> activeKeys, Map<String, int> newPriorities) {
@@ -184,14 +196,16 @@ class _TaskLaneScheduler {
   }
 
   void clear() {
-    for (final t in _queue) {
+    for (final t in _queue.toList()) {
       t.cancel();
+      _registry.remove(t.key);
     }
     _queue.clear();
     for (final t in _registry.runningTasks) {
+      // Keep running tasks registered until their async cleanup completes.
+      // Otherwise a later submit can overlap the old native/network writer.
       t.cancel();
     }
-    _registry.clear();
   }
 
   int get pendingCount => _queue.length + _registry.runningCount;
@@ -225,7 +239,13 @@ class _TaskLaneScheduler {
     SchedulerTask incoming,
     int oldPriority,
   ) {
+    // Same-key work represents the same session. Promotion updates the task in
+    // place; it must never cancel/recreate a running transport.
+    if (_registry.isRunning(existing.key)) return false;
     if (existing is DownloadTask && incoming is DownloadTask) return false;
+    if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
+      return false;
+    }
     return existing.cancelable &&
         incoming.priority - oldPriority >= preemptionThreshold;
   }
@@ -273,8 +293,9 @@ class _TaskLaneScheduler {
     if (lowest == null) return;
     if (incoming.priority - lowest.priority < preemptionThreshold) return;
 
+    // Cancellation is a request. The running permit is released only after
+    // the task has flushed/closed its resources and notifies completion.
     lowest.cancel();
-    _registry.remove(lowest.key);
   }
 }
 
@@ -301,6 +322,15 @@ class TaskScheduler {
   );
 
   void submit(SchedulerTask task) => _lanes[task.lane]!.submit(task);
+
+  bool hasTaskInLane(SchedulerLane lane, String key) =>
+      _lanes[lane]!.hasTask(key);
+
+  void updatePriority(SchedulerLane lane, String key, int priority) =>
+      _lanes[lane]!.updatePriority(key, priority);
+
+  void cancelInLane(SchedulerLane lane, String key) =>
+      _lanes[lane]!.cancel(key);
 
   void cancel(String key) {
     for (final lane in _lanes.values) {

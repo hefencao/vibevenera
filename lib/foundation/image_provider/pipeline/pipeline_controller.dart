@@ -1,19 +1,22 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/image_provider/session/download_session.dart';
+import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
+import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
+import 'package:venera/network/webp_download_transport.dart';
 
 import 'download_progress_publisher.dart';
 import 'download_ranker.dart';
 import 'pipeline_policy_applier.dart';
 import 'pipeline_window.dart';
 import 'preload_policy.dart';
-import 'pipeline_work_submitter.dart';
 import 'resource_entry.dart';
 import 'resource_manager.dart';
 import 'task_scheduler.dart';
-import 'webp_stream_decode_coordinator.dart';
 
 // ═══════════════════════════════════════════════════════════════
 // PipelineController — coordinates Policy → Resource → Scheduler
@@ -36,17 +39,10 @@ import 'webp_stream_decode_coordinator.dart';
 class PipelineController {
   static final PipelineController instance = PipelineController._();
   PipelineController._() {
-    _streamDecodes = WebPStreamDecodeCoordinator(
-      onHolderPublished: _completeStreamResultWaitersFor,
-    );
-    _workSubmitter = PipelineWorkSubmitter(
-      resources: resources,
+    _sessions = WebPSessionCoordinator(
       scheduler: _scheduler,
-      streamDecodes: _streamDecodes,
-      progress: _progress,
-      currentKey: () => _currentKey,
-      isSessionActive: (session) => session == _sessionId,
-      onBytesPublished: _completeStreamResultBytes,
+      transportFactory: (identity) => ImageDownloaderWebPTransport(identity),
+      onProgress: _onSessionProgress,
     );
   }
 
@@ -84,9 +80,8 @@ class PipelineController {
   String? _sourceKey;
   String _cid = '';
   String _eid = '';
-  late final WebPStreamDecodeCoordinator _streamDecodes;
-  final Map<String, List<Completer<dynamic>>> _streamResultWaiters = {};
-  late final PipelineWorkSubmitter _workSubmitter;
+  late final WebPSessionCoordinator _sessions;
+  final Map<String, WebPResourceLease> _policyLeases = {};
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -101,8 +96,19 @@ class PipelineController {
   // ── Public API ──────────────────────────────────────────────
 
   void setTargetSize(int w, int h) {
+    if (_targetW == w && _targetH == h) return;
     _targetW = w;
     _targetH = h;
+    if (_images.isEmpty) return;
+
+    // ResourceEntry is only a policy projection, but its fullKey includes the
+    // decode size. Drop that projection on rotation/viewport changes so one
+    // image cannot accidentally receive policy through two size entries.
+    _detachPolicyScope();
+    _sessionId++;
+    resources.clear();
+    _windowKey = -1;
+    _windowRuleIndex = -1;
   }
 
   InteractionState get interactionState => _interaction;
@@ -112,6 +118,7 @@ class PipelineController {
     _interaction = state;
     if (_images.isEmpty) {
       _applyPolicies(markDistant: false);
+      _syncPolicyLeases();
     } else {
       _applyWindow(protectJump: _provisionalIdx != null);
     }
@@ -127,7 +134,14 @@ class PipelineController {
     int preloadCount = 5,
   }) {
     final contextChanged =
-        !identical(_images, images) || _cid != cid || _eid != eid;
+        !identical(_images, images) ||
+        _cid != cid ||
+        _eid != eid ||
+        _sourceKey != sourceKey;
+    if (contextChanged && _images.isNotEmpty) {
+      _detachPolicyScope();
+      _sessionId++;
+    }
     _cache = cache;
     _images = images;
     _cid = cid;
@@ -156,7 +170,14 @@ class PipelineController {
     int preloadCount = 5,
   }) {
     final contextChanged =
-        !identical(_images, images) || _cid != cid || _eid != eid;
+        !identical(_images, images) ||
+        _cid != cid ||
+        _eid != eid ||
+        _sourceKey != sourceKey;
+    if (contextChanged && _images.isNotEmpty) {
+      _detachPolicyScope();
+      _sessionId++;
+    }
     _cache = cache;
     _images = images;
     _cid = cid;
@@ -273,7 +294,9 @@ class PipelineController {
     }
 
     // Ensure entries exist
-    String fullKey(String k) => _targetW > 0 ? '$k@${_targetW}x$_targetH' : k;
+    String fullKey(String k) => _targetW > 0 || _targetH > 0
+        ? '$k@${_targetW}x$_targetH'
+        : k;
     for (final key in {
       _currentKey,
       ..._nearKeys,
@@ -291,69 +314,36 @@ class PipelineController {
       );
     }
 
-    final activeImageKeys = _applyPolicies();
-    _streamDecodes.detachInactive(activeImageKeys, resources);
-
-    // Migrate existing tasks
-    final activeTaskKeys = <String>{};
-    final newPriorities = <String, int>{};
-    resources.forEach((e) {
-      if (activeImageKeys.contains(e.imageKey)) {
-        if (e.policy.allowDownload) {
-          activeTaskKeys.add(e.imageKey);
-        }
-        if (e.policy.allowDecode) {
-          activeTaskKeys.add(e.fullKey);
-        }
-      }
-      if (e.policy.downloadPriority > 0 || e.download.inProgress) {
-        newPriorities[e.imageKey] = _downloadRank(e);
-      }
-      if (e.policy.decodePriority > 0) {
-        newPriorities[e.fullKey] = e.policy.decodePriority;
-      }
-    });
-    _scheduler.migrateTasks(activeTaskKeys, newPriorities);
+    _applyPolicies();
+    _syncPolicyLeases();
 
     onWindowChanged?.call(_currentKey, _nearKeys, _prevKeys, {
       ..._farKeys,
       ..._keepKeys,
     });
-
-    // Submit work after holder ranges are published so newly created
-    // holders immediately receive the correct current/near/far policy.
-    _workSubmitter.submit(
-      sourceKey: _sourceKey,
-      cid: _cid,
-      eid: _eid,
-      targetWidth: _targetW,
-      targetHeight: _targetH,
-      cache: _cache,
-      session: _sessionId,
-    );
-    _workSubmitter.syncCurrentDownloadProgress();
   }
 
   void dispose() {
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
+    _detachPolicyScope();
     _sessionId++;
     _progress.reset();
-    _streamDecodes.clear();
+    _sessions.dispose();
     _scheduler.clear();
     resources.dispose();
-    _completeStreamResultWaiters(null);
   }
 
   void detachReaderSession() {
+    _detachPolicyScope();
     _sessionId++;
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
     _provisionalIdx = null;
     onWindowChanged = null;
     _progress.reset();
-    _streamDecodes.clear();
-    _scheduler.migrateTasks(const <String>{}, const <String, int>{});
+    // Logical detach only. Native sources and decode sessions survive while
+    // visible or other policy leases still reference them.
     resources.clear();
     _images = const [];
     _cache = null;
@@ -363,9 +353,10 @@ class PipelineController {
     _farKeys.clear();
     _keepKeys.clear();
     _offsetByKey.clear();
-    _completeStreamResultWaiters(null);
   }
 
+  /// Temporary compatibility projection for legacy callers. The session
+  /// pipeline does not consume these values and remains the sole authority.
   void publishExternalHolder(String imageKey, String fullKey, dynamic holder) {
     for (final peer in resources.getAllForImage(imageKey)) {
       if (peer.fullKey == fullKey) {
@@ -373,11 +364,12 @@ class PipelineController {
         peer.decode.markSuccess();
       }
     }
-    _completeStreamResultWaitersFor(fullKey, holder);
   }
 
   void publishExternalBytes(String imageKey, Uint8List bytes) {
-    _workSubmitter.publishBytes(imageKey, bytes);
+    for (final peer in resources.getAllForImage(imageKey)) {
+      peer.bytes = bytes;
+    }
   }
 
   void publishExternalDownloadProgress(
@@ -386,67 +378,66 @@ class PipelineController {
     int? total, {
     bool done = false,
   }) {
-    _workSubmitter.publishDownloadProgress(
+    for (final peer in resources.getAllForImage(imageKey)) {
+      peer.download.updateProgress(current, total);
+      peer.download.inProgress = !done;
+    }
+    _progress.update(
       imageKey,
       current,
       total,
+      currentKey: _currentKey,
       done: done,
     );
   }
 
-  bool hasStreamDecodeAttached(String fullKey) =>
-      _streamDecodes.hasAttached(fullKey);
+  bool hasStreamDecodeAttached(String fullKey) => false;
 
   bool isManagingFullKey(String fullKey) => resources.get(fullKey) != null;
 
-  Future<dynamic> waitForStreamResult(String fullKey) {
-    final entry = resources.get(fullKey);
-    final holder = entry?.holder;
-    if (holder != null) return Future.value(holder);
-    final bytes = entry?.bytes;
-    if (bytes != null) return Future.value(bytes);
-    final c = Completer<dynamic>();
-    _streamResultWaiters.putIfAbsent(fullKey, () => []).add(c);
-    return c.future;
-  }
+  Future<dynamic> waitForStreamResult(String fullKey) => Future.value(null);
 
-  void ensureStreamWork(String fullKey) {
-    final entry = resources.get(fullKey);
-    if (entry == null) return;
-    _workSubmitter.submitEntry(
-      entry,
-      sourceKey: _sourceKey,
-      cid: _cid,
-      eid: _eid,
-      targetWidth: _targetW,
-      targetHeight: _targetH,
-      cache: _cache,
-      session: _sessionId,
+  void ensureStreamWork(String fullKey) => _syncPolicyLeases();
+
+  WebPResourceLease acquireVisibleWebP({
+    required String imageKey,
+    required String? sourceKey,
+    required String cid,
+    required String eid,
+    required String fullKey,
+    required int targetWidth,
+    required int targetHeight,
+    required String scopeId,
+  }) {
+    return _sessions.acquire(
+      downloadIdentity: DownloadIdentity(
+        imageKey: imageKey,
+        sourceKey: sourceKey,
+        cid: cid,
+        eid: eid,
+      ),
+      decodeIdentity: WebPDecodeIdentity(
+        fullKey: fullKey,
+        targetWidth: targetWidth,
+        targetHeight: targetHeight,
+      ),
+      scopeId: scopeId,
+      // The ImageStream is a display subscriber, not the page-policy owner.
+      // Current/near promotion comes from _syncPolicyLeases; this baseline
+      // demand also supports standalone WebPImageProvider use without falsely
+      // promoting every precache listener to current.
+      demand: const WebPResourceDemand(
+        downloadPriority: 60,
+        decodePriority: 60,
+        allowDownload: true,
+        allowDecode: true,
+        allowUpload: true,
+        current: false,
+      ),
     );
   }
 
-  void _completeStreamResultWaiters(dynamic value) {
-    for (final waiters in _streamResultWaiters.values) {
-      for (final c in waiters) {
-        if (!c.isCompleted) c.complete(value);
-      }
-    }
-    _streamResultWaiters.clear();
-  }
-
-  void _completeStreamResultWaitersFor(String fullKey, dynamic value) {
-    final waiters = _streamResultWaiters.remove(fullKey);
-    if (waiters == null) return;
-    for (final c in waiters) {
-      if (!c.isCompleted) c.complete(value);
-    }
-  }
-
-  void _completeStreamResultBytes(String imageKey, Uint8List bytes) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      _completeStreamResultWaitersFor(peer.fullKey, bytes);
-    }
-  }
+  void evictUndemandedSessions() => _sessions.evictUndemanded();
 
   // ── Internal: priorities & policies ────────────────────────
 
@@ -464,6 +455,103 @@ class PipelineController {
         priority: priority,
       ),
       markDistant: markDistant,
+    );
+  }
+
+  String get _policyScopeId => 'reader:$_sessionId';
+
+  void _syncPolicyLeases() {
+    final liveFullKeys = <String>{};
+    resources.forEach((entry) {
+      final policy = entry.policy;
+      final demanded = policy.allowDownload ||
+          policy.allowDecode ||
+          policy.allowGpuUpload;
+      final downloadIdentity = DownloadIdentity(
+        imageKey: entry.imageKey,
+        sourceKey: entry.sourceKey,
+        cid: entry.cid,
+        eid: entry.eid,
+      );
+      final decodeIdentity = WebPDecodeIdentity(
+        fullKey: entry.fullKey,
+        targetWidth: _targetW,
+        targetHeight: _targetH,
+      );
+
+      if (!demanded) {
+        _policyLeases.remove(entry.fullKey)?.detach();
+        if (policy.allowEviction) {
+          _sessions.tryEvict(decodeIdentity, downloadIdentity);
+        }
+        return;
+      }
+
+      liveFullKeys.add(entry.fullKey);
+      final demand = WebPResourceDemand(
+        downloadPriority: policy.allowDownload ? _downloadRank(entry) : 0,
+        decodePriority: policy.decodePriority,
+        allowDownload: policy.allowDownload,
+        allowDecode: policy.allowDecode,
+        allowUpload: policy.allowGpuUpload,
+        current: entry.priority == PagePriority.current,
+      );
+
+      var lease = _policyLeases[entry.fullKey];
+      final identityChanged = lease != null &&
+          (lease.download.identity != downloadIdentity ||
+              lease.decode.identity != decodeIdentity);
+      if (identityChanged) {
+        lease!.detach();
+        _policyLeases.remove(entry.fullKey);
+        lease = null;
+      }
+
+      if (lease == null) {
+        lease = _sessions.acquire(
+          downloadIdentity: downloadIdentity,
+          decodeIdentity: decodeIdentity,
+          scopeId: _policyScopeId,
+          demand: demand,
+        );
+        _policyLeases[entry.fullKey] = lease;
+      } else {
+        lease.update(demand);
+      }
+    });
+
+    for (final fullKey in _policyLeases.keys.toList()) {
+      if (liveFullKeys.contains(fullKey)) continue;
+      _policyLeases.remove(fullKey)?.detach();
+    }
+  }
+
+  void _detachPolicyScope() {
+    for (final lease in _policyLeases.values.toList()) {
+      lease.detach();
+    }
+    _policyLeases.clear();
+    _sessions.detachScope(_policyScopeId);
+  }
+
+  void _onSessionProgress(
+    DownloadIdentity identity,
+    WebPTransportProgress progress,
+  ) {
+    for (final entry in resources.getAllForImage(identity.imageKey)) {
+      entry.download.updateProgress(
+        progress.currentBytes,
+        progress.totalBytes,
+      );
+      entry.download.inProgress = !progress.done;
+      if (progress.done) entry.download.lastError = null;
+    }
+    _progress.update(
+      identity.imageKey,
+      progress.currentBytes,
+      progress.totalBytes,
+      currentKey: _currentKey,
+      done: progress.done,
     );
   }
 

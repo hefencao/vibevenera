@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
+import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'webp_frame_holder.dart';
@@ -38,6 +38,8 @@ final class WebPDecodeSessionSnapshot {
   final int decodeRevision;
   final int uploadRevision;
   final WebPFrameHolderSnapshot frames;
+  final Object? decodeError;
+  final Object? uploadError;
 
   const WebPDecodeSessionSnapshot({
     required this.download,
@@ -49,6 +51,8 @@ final class WebPDecodeSessionSnapshot {
     required this.decodeRevision,
     required this.uploadRevision,
     required this.frames,
+    required this.decodeError,
+    required this.uploadError,
   });
 }
 
@@ -66,7 +70,8 @@ final class WebPDecodeDemandLease {
     required bool current,
     required bool decode,
     required bool upload,
-  }) => _session?._updateDemand(_id, priority, current, decode, upload);
+  }) =>
+      _session?._updateDemand(_id, priority, current, decode, upload);
 
   void detach() {
     final session = _session;
@@ -92,6 +97,32 @@ final class _WebPDecodeDemand {
   );
 }
 
+final class WebPDecodeClaim {
+  final int decodeRevision;
+  final int sourceEpoch;
+  final int sourceCommittedLength;
+  final int reservedFrames;
+  bool _completed = false;
+
+  WebPDecodeClaim._({
+    required this.decodeRevision,
+    required this.sourceEpoch,
+    required this.sourceCommittedLength,
+    required this.reservedFrames,
+  });
+}
+
+final class WebPUploadClaim {
+  final int uploadRevision;
+  final NativeFrameHandle frame;
+  bool _completed = false;
+
+  WebPUploadClaim._({
+    required this.uploadRevision,
+    required this.frame,
+  });
+}
+
 final class WebPDecodeSession {
   final WebPDecodeIdentity identity;
   final DownloadSession download;
@@ -100,24 +131,32 @@ final class WebPDecodeSession {
   final void Function(WebPDecodeSession session) _reconcile;
   final Map<int, _WebPDecodeDemand> _demands = {};
   final StreamController<WebPDecodeSessionSnapshot> _states =
-      StreamController.broadcast(sync: true);
+      StreamController.broadcast();
   late final StreamSubscription<DownloadSessionSnapshot> _downloadSubscription;
+
   bool _disposed = false;
+  bool _publishScheduled = false;
+  bool _reconcileScheduled = false;
   int _nextDemandId = 0;
   int _decodeRevision = 1;
   int _uploadRevision = 1;
+  int _observedSourceEpoch;
+  int _observedCommittedLength;
+  int? _decodeBlockedAtCommittedLength;
+  Object? _decodeError;
+  Object? _uploadError;
 
   WebPDecodeSession({
     required this.identity,
     required this.download,
     required this.cursor,
     required void Function(WebPDecodeSession session) reconcile,
-  }) : _reconcile = reconcile {
-    holder = WebPFrameHolder(onDemand: () => _reconcile(this));
-    _downloadSubscription = download.states.listen((_) {
-      _publish();
-      _reconcile(this);
-    });
+  })  : _reconcile = reconcile,
+        _observedSourceEpoch = download.source.epoch,
+        _observedCommittedLength = download.committedLength {
+    download.retainDecodeSession();
+    holder = WebPFrameHolder(onDemand: _scheduleReconcile);
+    _downloadSubscription = download.states.listen(_onDownloadState);
   }
 
   Stream<WebPDecodeSessionSnapshot> get states => _states.stream;
@@ -140,18 +179,24 @@ final class WebPDecodeSession {
       .fold(0, (a, b) => a > b.priority ? a : b.priority);
   int get decodeRevision => _decodeRevision;
   int get uploadRevision => _uploadRevision;
+  bool get decodeFailed => _decodeError != null;
+  bool get uploadFailed => _uploadError != null;
+
+  void requestReconcile() => _scheduleReconcile();
 
   WebPDecodeSessionSnapshot get snapshot => WebPDecodeSessionSnapshot(
-    download: download.snapshot,
-    cursor: cursor.state,
-    desiredPriority: desiredPriority,
-    demandCount: demandCount,
-    decodeDemandCount: decodeDemandCount,
-    uploadDemandCount: uploadDemandCount,
-    decodeRevision: _decodeRevision,
-    uploadRevision: _uploadRevision,
-    frames: holder.snapshot,
-  );
+        download: download.snapshot,
+        cursor: cursor.state,
+        desiredPriority: desiredPriority,
+        demandCount: demandCount,
+        decodeDemandCount: decodeDemandCount,
+        uploadDemandCount: uploadDemandCount,
+        decodeRevision: _decodeRevision,
+        uploadRevision: _uploadRevision,
+        frames: holder.snapshot,
+        decodeError: _decodeError,
+        uploadError: _uploadError,
+      );
 
   WebPDecodeDemandLease attach({
     required String scopeId,
@@ -161,8 +206,8 @@ final class WebPDecodeSession {
     required bool upload,
   }) {
     _checkActive();
-    final beforeDecode = _decodePolicy;
-    final beforeUpload = _uploadPolicy;
+    final beforeDecode = shouldDecode;
+    final beforeUpload = shouldUpload;
     final id = ++_nextDemandId;
     _demands[id] = _WebPDecodeDemand(
       scopeId,
@@ -175,31 +220,180 @@ final class WebPDecodeSession {
     return WebPDecodeDemandLease._(this, id, scopeId);
   }
 
-  List<webp.WebPAnimFrameAddress> decodeFrames(int count) {
+  WebPDecodeClaim? tryClaimDecode({
+    required int expectedRevision,
+    int maxBatch = 2,
+  }) {
     _checkActive();
-    if (!shouldDecode) throw StateError('Decode session has no decode demand');
-    final frames = cursor.decodeFrames(count);
-    _acceptFrames(frames);
-    _publish();
-    return frames;
+    _syncSourceEpoch();
+    if (expectedRevision != _decodeRevision || !shouldDecode) return null;
+
+    final cursorState = cursor.state;
+    if (!cursorState.ready ||
+        cursorState.targetWidth <= 0 ||
+        cursorState.targetHeight <= 0) {
+      return null;
+    }
+
+    final committed = download.committedLength;
+    if (_decodeBlockedAtCommittedLength == committed) {
+      if (download.transport != DownloadTransportState.sealed ||
+          holder.queuedFrameCount > 0 ||
+          holder.uploadInFlight > 0) {
+        return null;
+      }
+      // Complete sources may loop. Restart only after the consumer drained all
+      // frames; partial sources remain blocked until new bytes arrive.
+      cursor.restart();
+      _decodeBlockedAtCommittedLength = null;
+    }
+
+    final reserved = holder.claimDecodeBudget(maxBatch: maxBatch);
+    if (reserved <= 0) return null;
+    return WebPDecodeClaim._(
+      decodeRevision: _decodeRevision,
+      sourceEpoch: download.source.epoch,
+      sourceCommittedLength: committed,
+      reservedFrames: reserved,
+    );
+  }
+
+  List<NativeFrameHandle> decode(WebPDecodeClaim claim) {
+    _checkActive();
+    if (claim._completed) throw StateError('Decode claim is already completed');
+    if (!_isDecodeClaimCurrent(claim)) return const [];
+
+    final decoded = cursor.decodeFrames(claim.reservedFrames);
+    if (decoded.isEmpty) return const [];
+
+    final state = cursor.state;
+    if (!state.ready || state.targetWidth <= 0 || state.targetHeight <= 0) {
+      for (final frame in decoded) {
+        webp.nativePoolRelease(frame.address);
+      }
+      throw StateError('Playback cursor produced frames before target size');
+    }
+
+    return decoded
+        .map(
+          (frame) => NativeFrameHandle(
+            address: frame.address,
+            width: state.targetWidth,
+            height: state.targetHeight,
+            durationMs: frame.durationMs,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  void completeDecode(
+    WebPDecodeClaim claim,
+    List<NativeFrameHandle> frames, {
+    Object? error,
+    bool discard = false,
+  }) {
+    if (claim._completed) {
+      for (final frame in frames) {
+        frame.release();
+      }
+      return;
+    }
+    claim._completed = true;
+
+    final stale = discard || _disposed || !_isDecodeClaimCurrent(claim);
+    if (stale) {
+      for (final frame in frames) {
+        frame.release();
+      }
+      if (!holder.isDisposed) {
+        holder.finishDecodeClaim(claim.reservedFrames, const []);
+      }
+      _scheduleReconcile();
+      return;
+    }
+
+    if (error != null) {
+      _decodeError = error;
+      holder.finishDecodeClaim(claim.reservedFrames, const []);
+    } else {
+      _decodeError = null;
+      if (frames.isEmpty) {
+        _decodeBlockedAtCommittedLength = claim.sourceCommittedLength;
+      } else {
+        _decodeBlockedAtCommittedLength = null;
+      }
+      holder.finishDecodeClaim(claim.reservedFrames, frames);
+    }
+    _schedulePublish();
+    _scheduleReconcile();
+  }
+
+  WebPUploadClaim? tryClaimUpload({required int expectedRevision}) {
+    _checkActive();
+    if (expectedRevision != _uploadRevision || !shouldUpload) return null;
+    final frame = holder.claimRawFrame();
+    if (frame == null) return null;
+    return WebPUploadClaim._(
+      uploadRevision: _uploadRevision,
+      frame: frame,
+    );
+  }
+
+  void completeUpload(
+    WebPUploadClaim claim,
+    RenderedFrameHandle? rendered, {
+    Object? error,
+    bool discard = false,
+  }) {
+    if (claim._completed) {
+      rendered?.dispose();
+      return;
+    }
+    claim._completed = true;
+
+    final stale = discard ||
+        _disposed ||
+        claim.uploadRevision != _uploadRevision ||
+        !shouldUpload;
+    if (stale) {
+      rendered?.dispose();
+      if (!holder.isDisposed) holder.finishUploadClaim(null);
+      _scheduleReconcile();
+      return;
+    }
+
+    _uploadError = error;
+    holder.finishUploadClaim(error == null ? rendered : null);
+    if (error != null) rendered?.dispose();
+    _schedulePublish();
+    _scheduleReconcile();
   }
 
   void restartCursor() {
     _checkActive();
+    _decodeRevision++;
+    _uploadRevision++;
     cursor.restart();
-    holder.clearRawFrames();
-    holder.clearRenderedFrames();
-    _publish();
-    _reconcile(this);
+    _decodeBlockedAtCommittedLength = null;
+    holder.clearBufferedFrames();
+    _decodeError = null;
+    _uploadError = null;
+    _schedulePublish();
+    _scheduleReconcile();
   }
 
   void evict() {
     if (_disposed) return;
-    if (_demands.isNotEmpty) throw StateError('Cannot evict a demanded decode session');
+    if (_demands.isNotEmpty) {
+      throw StateError('Cannot evict a demanded decode session');
+    }
     _disposed = true;
-    _downloadSubscription.cancel();
+    _decodeRevision++;
+    _uploadRevision++;
+    unawaited(_downloadSubscription.cancel());
     holder.dispose();
     cursor.dispose();
+    download.releaseDecodeSession();
     _states.close();
   }
 
@@ -213,13 +407,14 @@ final class WebPDecodeSession {
     _checkActive();
     final demand = _demands[id];
     if (demand == null) return;
-    if (demand.priority == priority && demand.current == current &&
+    if (demand.priority == priority &&
+        demand.current == current &&
         demand.decode == decode &&
         demand.upload == upload) {
       return;
     }
-    final beforeDecode = _decodePolicy;
-    final beforeUpload = _uploadPolicy;
+    final beforeDecode = shouldDecode;
+    final beforeUpload = shouldUpload;
     demand.priority = priority;
     demand.current = current;
     demand.decode = decode;
@@ -231,63 +426,105 @@ final class WebPDecodeSession {
 
   void _removeDemand(int id) {
     if (_disposed) return;
-    final beforeDecode = _decodePolicy;
-    final beforeUpload = _uploadPolicy;
-    if (_demands.remove(id) != null) _demandChanged(beforeDecode, beforeUpload);
+    final beforeDecode = shouldDecode;
+    final beforeUpload = shouldUpload;
+    if (_demands.remove(id) != null) {
+      _demandChanged(beforeDecode, beforeUpload);
+    }
   }
 
   void _removeScope(String scopeId) {
     if (_disposed) return;
-    final beforeDecode = _decodePolicy;
-    final beforeUpload = _uploadPolicy;
+    final beforeDecode = shouldDecode;
+    final beforeUpload = shouldUpload;
     final count = _demands.length;
     _demands.removeWhere((_, demand) => demand.scopeId == scopeId);
-    if (_demands.length != count) _demandChanged(beforeDecode, beforeUpload);
+    if (_demands.length != count) {
+      _demandChanged(beforeDecode, beforeUpload);
+    }
   }
 
-  ({bool enabled, int priority}) get _decodePolicy =>
-      (enabled: shouldDecode, priority: decodePriority);
-  ({bool enabled, int priority}) get _uploadPolicy =>
-      (enabled: shouldUpload, priority: uploadPriority);
-
-  void _demandChanged(
-    ({bool enabled, int priority}) beforeDecode,
-    ({bool enabled, int priority}) beforeUpload,
-  ) {
-    if (beforeDecode != _decodePolicy) _decodeRevision++;
-    if (beforeUpload != _uploadPolicy) _uploadRevision++;
-    holder.updateDemand(WebPFrameDemand(
-      current: isCurrent,
-      decode: shouldDecode,
-      upload: shouldUpload,
-    ));
-    _publish();
-    _reconcile(this);
+  void _demandChanged(bool beforeDecode, bool beforeUpload) {
+    // Priority/current changes update queued/running task priority in place.
+    // Revisions invalidate work only when stage permission changes.
+    if (beforeDecode != shouldDecode) {
+      _decodeRevision++;
+      _decodeError = null;
+    }
+    if (beforeUpload != shouldUpload) {
+      _uploadRevision++;
+      _uploadError = null;
+    }
+    holder.updateDemand(
+      WebPFrameDemand(
+        current: isCurrent,
+        decode: shouldDecode,
+        upload: shouldUpload,
+        // Settling may disable upload while still decoding. Keep already decoded
+        // native frames so policy changes do not force a decode loop.
+        retainRaw: shouldDecode || shouldUpload,
+      ),
+    );
+    _schedulePublish();
+    _scheduleReconcile();
   }
 
-  void _publish() {
-    if (!_states.isClosed) _states.add(snapshot);
+  void _onDownloadState(DownloadSessionSnapshot snapshot) {
+    if (_disposed) return;
+    _syncSourceEpoch();
+    final committed = snapshot.source.committedLength;
+    if (committed != _observedCommittedLength) {
+      _observedCommittedLength = committed;
+      _decodeBlockedAtCommittedLength = null;
+      // An error on an incomplete frame may become recoverable when more bytes
+      // arrive. Sealed-source failures stay terminal because length no longer
+      // changes.
+      _decodeError = null;
+    }
+    _schedulePublish();
+    _scheduleReconcile();
+  }
+
+  void _syncSourceEpoch() {
+    final epoch = download.source.epoch;
+    if (epoch == _observedSourceEpoch) return;
+    _observedSourceEpoch = epoch;
+    _observedCommittedLength = download.committedLength;
+    _decodeRevision++;
+    _uploadRevision++;
+    _decodeBlockedAtCommittedLength = null;
+    _decodeError = null;
+    _uploadError = null;
+    cursor.restart();
+    holder.clearBufferedFrames();
+  }
+
+  bool _isDecodeClaimCurrent(WebPDecodeClaim claim) =>
+      !_disposed &&
+      claim.decodeRevision == _decodeRevision &&
+      claim.sourceEpoch == download.source.epoch &&
+      shouldDecode;
+
+  void _schedulePublish() {
+    if (_publishScheduled || _states.isClosed) return;
+    _publishScheduled = true;
+    scheduleMicrotask(() {
+      _publishScheduled = false;
+      if (!_states.isClosed) _states.add(snapshot);
+    });
+  }
+
+  void _scheduleReconcile() {
+    if (_reconcileScheduled || _disposed) return;
+    _reconcileScheduled = true;
+    scheduleMicrotask(() {
+      _reconcileScheduled = false;
+      if (!_disposed) _reconcile(this);
+    });
   }
 
   void _checkActive() {
     if (_disposed) throw StateError('Decode session is evicted');
-  }
-
-  void _acceptFrames(List<webp.WebPAnimFrameAddress> frames) {
-    if (frames.isEmpty) return;
-    final state = cursor.state;
-    if (!state.ready || state.targetWidth <= 0 || state.targetHeight <= 0) {
-      for (final frame in frames) {
-        webp.nativePoolRelease(frame.address);
-      }
-      throw StateError('Playback cursor produced frames before target size');
-    }
-    holder.addRawFrames(frames.map((frame) => NativeFrameHandle(
-      address: frame.address,
-      width: state.targetWidth,
-      height: state.targetHeight,
-      durationMs: frame.durationMs,
-    )));
   }
 }
 
@@ -344,24 +581,35 @@ final class WebPDecodeSessionRegistry {
     }
   }
 
+  bool tryEvict(WebPDecodeIdentity identity) {
+    final session = _sessions[identity];
+    if (session == null || session.demandCount > 0) return false;
+    session.evict();
+    _sessions.remove(identity);
+    return true;
+  }
+
   void evict(WebPDecodeIdentity identity) {
     final session = _sessions[identity];
     if (session == null) return;
+
+    if (session.demandCount > 0) {
+      throw StateError(
+        'Cannot evict active decode session ${identity.fullKey}',
+      );
+    }
+
     session.evict();
     _sessions.remove(identity);
   }
 
-  void dispose() {
-    for (final session in _sessions.values) {
-      if (session.demandCount > 0) {
-        throw StateError('Cannot dispose demanded decode sessions');
-      }
+  void evictUndemanded() {
+    for (final identity in _sessions.keys.toList()) {
+      tryEvict(identity);
     }
-    for (final session in _sessions.values) {
-      session.evict();
-    }
-    _sessions.clear();
   }
+
+  void dispose() => evictUndemanded();
 
   static webp.WebPFrameCursor _createNativeCursor(
     webp.WebPByteSource source,

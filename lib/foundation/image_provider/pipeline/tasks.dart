@@ -7,7 +7,9 @@ import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
+import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
+import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/network/webp_download_transport.dart';
 
@@ -42,6 +44,7 @@ abstract class SchedulerTask {
 
   void Function(SchedulerTask task)? _onCompleted;
   void Function(SchedulerTask task)? _onFailed;
+  bool _terminalNotified = false;
 
   void setCompletionHandlers({
     required void Function(SchedulerTask task) onCompleted,
@@ -51,8 +54,17 @@ abstract class SchedulerTask {
     _onFailed = onFailed;
   }
 
-  void notifyCompleted() => _onCompleted?.call(this);
-  void notifyFailed() => _onFailed?.call(this);
+  void notifyCompleted() {
+    if (_terminalNotified) return;
+    _terminalNotified = true;
+    _onCompleted?.call(this);
+  }
+
+  void notifyFailed() {
+    if (_terminalNotified) return;
+    _terminalNotified = true;
+    _onFailed?.call(this);
+  }
 
   void cancel() {
     if (_state == TaskState.queued || _state == TaskState.running) {
@@ -125,6 +137,10 @@ abstract class PolicyAwareTask extends SchedulerTask {
         notifyFailed();
         return;
       }
+    } finally {
+      // Running tasks stay registered while asynchronous cancellation unwinds.
+      // Notify the scheduler only after resources have actually been released.
+      if (isCancelled) notifyCompleted();
     }
   }
 
@@ -418,16 +434,36 @@ final class WebPDownloadTask extends SchedulerTask {
   }
 
   @override
-  void execute() async {
-    if (isCancelled) return;
-    _cancelToken = CancelToken();
+  void execute() {
+    unawaited(_run());
+  }
+
+  Future<void> _run() async {
+    if (isCancelled) {
+      _finished = true;
+      notifyCompleted();
+      return;
+    }
+
+    DownloadWriterLease? writer;
     try {
+      _cancelToken = CancelToken();
+      final activeWriter = session.beginTransport();
+      writer = activeWriter;
       final file = await transport.execute(
         session,
         cancelToken: _cancelToken,
         onProgress: onProgress,
       );
-      if (isCancelled) return;
+
+      // New transports seal atomically before returning. Legacy/custom
+      // transports may only return the completed file; finish the same active
+      // writer here so their old execute signature remains valid.
+      if (activeWriter.active) {
+        session.seal(activeWriter, file);
+      }
+
+      // A late cancellation must not turn a completed download into a failure.
       _state = TaskState.completed;
       _finished = true;
       for (final waiter in _waiters) {
@@ -436,14 +472,19 @@ final class WebPDownloadTask extends SchedulerTask {
       _waiters.clear();
       notifyCompleted();
     } catch (error, stack) {
-      if (isCancelled) return;
-      _state = TaskState.failed;
-      _finished = true;
-      for (final waiter in _waiters) {
-        if (!waiter.isCompleted) waiter.completeError(error, stack);
+      final cancelled = isCancelled || error is WebPTransportCancelled;
+      if (cancelled) {
+        if (writer?.active == true) session.pause(writer!);
+        _rejectWaiters(error, stack);
+        _finished = true;
+        notifyCompleted();
+      } else {
+        if (writer?.active == true) session.fail(writer!, error);
+        _state = TaskState.failed;
+        _finished = true;
+        _rejectWaiters(error, stack);
+        notifyFailed();
       }
-      _waiters.clear();
-      notifyFailed();
     } finally {
       _cancelToken = null;
     }
@@ -454,11 +495,132 @@ final class WebPDownloadTask extends SchedulerTask {
     if (_finished || isCancelled) return;
     _cancelToken?.cancel('WebP transport paused');
     super.cancel();
-    session.markPaused();
+    _rejectWaiters(const WebPTransportCancelled('cancelled'));
+    // Do not mark the session paused here. The task remains registered as a
+    // running task until transport.execute has unwound and flushed its artifact.
+  }
+
+  void _rejectWaiters(Object error, [StackTrace? stack]) {
     for (final waiter in _waiters) {
-      if (!waiter.isCompleted) waiter.completeError('WebP transport paused');
+      if (!waiter.isCompleted) waiter.completeError(error, stack);
     }
     _waiters.clear();
+  }
+}
+
+final class WebPDecodeTask extends SchedulerTask {
+  final WebPDecodeSession session;
+  final int maxBatch;
+
+  WebPDecodeTask({
+    required super.key,
+    required super.generation,
+    required super.priority,
+    required this.session,
+    this.maxBatch = 2,
+  }) : super(cancelable: true);
+
+  @override
+  SchedulerLane get lane => SchedulerLane.decode;
+
+  @override
+  void execute() {
+    if (isCancelled) {
+      notifyCompleted();
+      return;
+    }
+    final claim = session.tryClaimDecode(
+      expectedRevision: generation,
+      maxBatch: maxBatch,
+    );
+    if (claim == null) {
+      _state = TaskState.completed;
+      notifyCompleted();
+      session.requestReconcile();
+      return;
+    }
+
+    List<NativeFrameHandle> frames = const [];
+    try {
+      frames = session.decode(claim);
+      session.completeDecode(claim, frames, discard: isCancelled);
+      _state = isCancelled ? TaskState.cancelled : TaskState.completed;
+      notifyCompleted();
+    } catch (error) {
+      session.completeDecode(claim, frames, error: error, discard: isCancelled);
+      if (isCancelled) {
+        notifyCompleted();
+      } else {
+        _state = TaskState.failed;
+        notifyFailed();
+      }
+    }
+  }
+}
+
+final class WebPFrameUploadTask extends SchedulerTask {
+  final WebPDecodeSession session;
+  final FrameRenderer renderer;
+
+  WebPFrameUploadTask({
+    required super.key,
+    required super.generation,
+    required super.priority,
+    required this.session,
+    required this.renderer,
+  }) : super(cancelable: true);
+
+  @override
+  SchedulerLane get lane => SchedulerLane.upload;
+
+  @override
+  void execute() {
+    if (isCancelled) {
+      notifyCompleted();
+      return;
+    }
+
+    WebPUploadClaim? claim;
+    try {
+      claim = session.tryClaimUpload(expectedRevision: generation);
+    } catch (_) {
+      _state = TaskState.failed;
+      notifyFailed();
+      return;
+    }
+    if (claim == null) {
+      _state = TaskState.completed;
+      notifyCompleted();
+      session.requestReconcile();
+      return;
+    }
+    unawaited(_render(claim));
+  }
+
+  Future<void> _render(WebPUploadClaim claim) async {
+    RenderedFrameHandle? rendered;
+    try {
+      rendered = await renderer.render(claim.frame);
+      session.completeUpload(claim, rendered, discard: isCancelled);
+      _state = isCancelled ? TaskState.cancelled : TaskState.completed;
+      notifyCompleted();
+    } catch (error) {
+      // Renderer owns the native frame after render() is called, but release is
+      // idempotent and protects custom renderer implementations on failure.
+      claim.frame.release();
+      session.completeUpload(
+        claim,
+        rendered,
+        error: error,
+        discard: isCancelled,
+      );
+      if (isCancelled) {
+        notifyCompleted();
+      } else {
+        _state = TaskState.failed;
+        notifyFailed();
+      }
+    }
   }
 }
 

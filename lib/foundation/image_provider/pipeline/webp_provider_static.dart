@@ -101,37 +101,26 @@ void _onWebPPageChanged({
   required String? sourceKey,
   DecodedImageCache? cache,
 }) {
-  DecoderManager.instance.cache = cache;
-  DecoderManager.instance.decodeService.updateGeneration(
-    DecoderManager.instance.generation + 1,
-  );
-
-  String fk(int i) => (i >= 0 && i < images.length) ? images[i] : '';
-  final current = fk(currentPageIndex);
-  PipelineController.instance.onWindowChanged =
+  final pipeline = PipelineController.instance;
+  final (targetWidth, targetHeight) = _calculateWebPTargetSize(context);
+  pipeline.setTargetSize(targetWidth, targetHeight);
+  pipeline.onWindowChanged =
       (currentKey, decodeNextKeys, decodePrevKeys, downloadOnlyKeys) {
-        DecoderManager.instance.setPageRange(
-          currentKey: currentKey,
-          nextKeys: decodeNextKeys,
-          lastKeys: decodePrevKeys,
-          precacheKeys: downloadOnlyKeys,
-        );
-
-        if (cache != null) {
-          cache.setActivePages(
-            [
-              currentKey,
-              ...decodeNextKeys,
-              ...decodePrevKeys,
-            ].where((k) => k.isNotEmpty),
-          );
-        }
-      };
-
-  DecoderManager.instance.setPageRange(
-    currentKey: current,
-    nextKeys: const <String>{},
-    lastKeys: const <String>{},
-    precacheKeys: const <String>{},
+    if (cache == null) return;
+    cache.setActivePages(
+      [
+        currentKey,
+        ...decodeNextKeys,
+        ...decodePrevKeys,
+      ].where((key) => key.isNotEmpty),
+    );
+  };
+  pipeline.onPageRangeChanged(
+    currentIdx: currentPageIndex,
+    images: images,
+    cid: cid,
+    eid: eid,
+    sourceKey: sourceKey,
+    cache: cache,
   );
 }

@@ -17,6 +17,11 @@ import 'package:venera/utils/webp_decoder.dart' as webp;
 import 'io/image_loader.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
+import 'renderer/frame_renderer.dart';
+import 'session/download_session.dart';
+import 'session/webp_decode_session.dart';
+import 'session/webp_frame_holder.dart';
+import 'session/webp_session_coordinator.dart';
 
 part 'runtime/webp_common.dart';
 part 'runtime/webp_frame_buffer.dart';
@@ -29,6 +34,7 @@ part 'io/webp_provider_loader.dart';
 part 'runtime/webp_playback_controller.dart';
 part 'io/webp_load_result.dart';
 part 'runtime/webp_stream_completer.dart';
+part 'runtime/webp_session_completer.dart';
 
 class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   final String imageKey;
@@ -72,14 +78,7 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   ImageStreamCompleter loadImage(
     WebPImageProvider key,
     ImageDecoderCallback decode,
-  ) {
-    final chunkEvents = StreamController<ImageChunkEvent>();
-    return _WebPImageStreamCompleter(
-      _loadImageAsync(chunkEvents: chunkEvents),
-      key,
-      chunkEvents: chunkEvents.stream,
-    );
-  }
+  ) => _WebPSessionImageStreamCompleter(key);
 
   // ── Public static helpers ──────────────────────────────────
 
@@ -148,17 +147,13 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
         cache: cache,
       );
 
-  static void clearAll() => DecoderManager.instance.clearAll();
+  static void clearAll() => PipelineController.instance.evictUndemandedSessions();
 
   static void setInteractionState(InteractionState state) {
     PipelineController.instance.setInteractionState(state);
-    DecoderManager.instance.setInteractionState(state);
   }
 
   static bool get isJumpingInteraction =>
       PipelineController.instance.interactionState == InteractionState.jumping;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// 6. ImageStreamCompleter — simple, delegates animation to holder
-// ═══════════════════════════════════════════════════════════════
