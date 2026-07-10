@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:isolate';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -9,33 +9,45 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/images.dart';
 
+import 'image_data_validator.dart';
 import 'local_file_loader.dart';
 import 'network_loader.dart';
 
 export 'local_file_loader.dart' show tryLoadLocalFile;
 
-/// Unified image byte loader — eliminates duplicate local/cache/network logic.
+String imageCacheKey(
+  String imageKey,
+  String? sourceKey,
+  String cid,
+  String eid,
+) => '$imageKey@$sourceKey@$cid@$eid';
+
+Future<void> evictImageDiskCache(
+  String imageKey,
+  String? sourceKey,
+  String cid,
+  String eid,
+) => CacheManager().delete(imageCacheKey(imageKey, sourceKey, cid, eid));
+
+/// Unified image byte loader.
 ///
 /// Load order:
-///   1. local file path / file://
-///   2. disk cache
+///   1. local file path / file:// (delegated unchanged to IOOverride)
+///   2. validated disk cache
 ///   3. network image
-///
-/// All paths go through [fetchImageBytes] entry, with automatic per-key
-/// deduplication in [ImageDownloader]. For independent streams, use
-/// [fetchImageBytesRaw].
 Future<Uint8List?> _readValidCacheFile(String cacheKey, File cacheFile) async {
-  final fileSize = await cacheFile.length();
-  final path = cacheFile.path;
-  final bytes = fileSize > 1024 * 1024
-      ? await Isolate.run(() => File(path).readAsBytesSync())
-      : await cacheFile.readAsBytes();
-  if (bytes.isEmpty) return null;
-  if (ImageDownloader.isIncompleteWebPBytes(bytes)) {
+  final validation = await ImageDataValidator.validateFile(cacheFile);
+  if (!validation.valid) {
     await CacheManager().delete(cacheKey);
+    Log.warning('Image cache rejected', '$cacheKey: ${validation.reason}');
     return null;
   }
-  return bytes;
+
+  final fileSize = await cacheFile.length();
+  final path = cacheFile.path;
+  return fileSize > 1024 * 1024
+      ? Isolate.run(() => File(path).readAsBytesSync())
+      : cacheFile.readAsBytes();
 }
 
 Future<Uint8List?> _tryReadDiskCache(
@@ -44,16 +56,35 @@ Future<Uint8List?> _tryReadDiskCache(
   String cid,
   String eid,
 ) async {
-  final cacheKey = '$imageKey@$sourceKey@$cid@$eid';
+  final cacheKey = imageCacheKey(imageKey, sourceKey, cid, eid);
   try {
     final cacheFile = await CacheManager().findCache(cacheKey);
     if (cacheFile != null && await cacheFile.exists()) {
-      return await _readValidCacheFile(cacheKey, cacheFile);
+      return _readValidCacheFile(cacheKey, cacheFile);
     }
-  } catch (e) {
-    Log.error('Disk cache check failed for $imageKey', e);
+  } catch (error, stackTrace) {
+    Log.error('Disk cache check failed for $imageKey', error, stackTrace);
   }
   return null;
+}
+
+Future<Uint8List> _validateDownloadedBytes(
+  Uint8List bytes, {
+  required String imageKey,
+  required String? sourceKey,
+  required String cid,
+  required String eid,
+}) async {
+  final validation = ImageDataValidator.validateBytes(bytes);
+  if (validation.valid) return bytes;
+
+  // ImageDownloader may already have persisted this response. Remove the
+  // identity cache immediately so the next attempt cannot decode the same
+  // partial/HTML payload again.
+  await evictImageDiskCache(imageKey, sourceKey, cid, eid);
+  throw InvalidImageDataException(
+    '${validation.reason}; key=$imageKey, bytes=${bytes.length}',
+  );
 }
 
 Future<Uint8List> fetchImageBytes(
@@ -66,13 +97,15 @@ Future<Uint8List> fetchImageBytes(
   void Function(ImageDownloadProgress event)? onEvent,
   CancelToken? cancelToken,
 }) async {
+  // Do not strip or convert file://. File(imageKey) is intentionally routed
+  // through the application's IOOverride.
   final local = await tryLoadLocalFile(imageKey);
   if (local != null) return local;
 
   final cached = await _tryReadDiskCache(imageKey, sourceKey, cid, eid);
   if (cached != null) return cached;
 
-  return loadNetworkImageBytes(
+  final bytes = await loadNetworkImageBytes(
     imageKey,
     sourceKey,
     cid,
@@ -81,6 +114,13 @@ Future<Uint8List> fetchImageBytes(
     debugLabel: debugLabel,
     onEvent: onEvent,
     cancelToken: cancelToken,
+  );
+  return _validateDownloadedBytes(
+    bytes,
+    imageKey: imageKey,
+    sourceKey: sourceKey,
+    cid: cid,
+    eid: eid,
   );
 }
 
@@ -97,12 +137,19 @@ Future<Uint8List> fetchImageBytesRaw(
   final cached = await _tryReadDiskCache(imageKey, sourceKey, cid, eid);
   if (cached != null) return cached;
 
-  return loadNetworkImageBytesRaw(
+  final bytes = await loadNetworkImageBytesRaw(
     imageKey,
     sourceKey,
     cid,
     eid,
     debugLabel: debugLabel,
+  );
+  return _validateDownloadedBytes(
+    bytes,
+    imageKey: imageKey,
+    sourceKey: sourceKey,
+    cid: cid,
+    eid: eid,
   );
 }
 

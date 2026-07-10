@@ -133,12 +133,16 @@ class _TaskLaneScheduler {
   final List<SchedulerTask> _queue = [];
   final int maxConcurrent;
   final int preemptionThreshold;
+  final int reservedHighPrioritySlots;
+  final int highPriorityThreshold;
   final void Function(SchedulerTask task) onCompleted;
   final void Function(SchedulerTask task) onFailed;
 
   _TaskLaneScheduler({
     required this.maxConcurrent,
     required this.preemptionThreshold,
+    this.reservedHighPrioritySlots = 0,
+    this.highPriorityThreshold = 1 << 30,
     required this.onCompleted,
     required this.onFailed,
   });
@@ -252,10 +256,26 @@ class _TaskLaneScheduler {
 
   void _dispatchNext() {
     while (_queue.isNotEmpty) {
-      if (_registry.runningCount >= maxConcurrent) {
-        _preemptLowestRunningFor(_queue.first);
-        if (_registry.runningCount >= maxConcurrent) return;
+      final next = _queue.first;
+      final highPriority = next.priority >= highPriorityThreshold;
+      final running = _registry.runningCount;
+
+      if (!highPriority && running >= maxConcurrent) return;
+
+      if (highPriority && running >= maxConcurrent) {
+        // Normal work may fully use the lane. When current-page work arrives,
+        // request cancellation of the lowest-ranked task and use at most one
+        // temporary hand-off slot while that asynchronous cancellation unwinds.
+        // This avoids permanently reducing network capacity from 3 to 2 and
+        // still prevents a current page from waiting on a slow transport close.
+        final handoffLimit = maxConcurrent + reservedHighPrioritySlots;
+        if (reservedHighPrioritySlots <= 0 || running >= handoffLimit) {
+          _preemptLowestRunningFor(next);
+          return;
+        }
+        if (!_preemptLowestRunningFor(next)) return;
       }
+
       final task = _queue.removeAt(0);
       _registry.promoteToRunning(task);
       scheduleMicrotask(() {
@@ -282,20 +302,22 @@ class _TaskLaneScheduler {
     _dispatchNext();
   }
 
-  void _preemptLowestRunningFor(SchedulerTask incoming) {
+  bool _preemptLowestRunningFor(SchedulerTask incoming) {
     SchedulerTask? lowest;
     for (final task in _registry.runningTasks) {
-      if (!task.cancelable) continue;
+      if (!task.cancelable || task.isCancelled) continue;
       if (lowest == null || task.priority < lowest.priority) {
         lowest = task;
       }
     }
-    if (lowest == null) return;
-    if (incoming.priority - lowest.priority < preemptionThreshold) return;
+    if (lowest == null) return false;
+    if (incoming.priority - lowest.priority < preemptionThreshold) return false;
 
-    // Cancellation is a request. The running permit is released only after
-    // the task has flushed/closed its resources and notifies completion.
+    // Cancellation is a request. The task remains registered until its async
+    // cleanup notifies completion. A single high-priority hand-off slot may be
+    // used meanwhile; same-key work is never preempted/recreated.
     lowest.cancel();
+    return true;
   }
 }
 
@@ -308,18 +330,43 @@ class TaskScheduler {
 
   TaskScheduler._() {
     _lanes = {
-      SchedulerLane.network: _createLane(3),
-      SchedulerLane.decode: _createLane(2),
-      SchedulerLane.upload: _createLane(2),
+      // Near/far transport work may occupy two permits. The third permit is
+      // reserved for a current-page rank (DownloadRanker current >= 950), so a
+      // page switch does not wait for an unrelated range request to unwind.
+      SchedulerLane.network: _createLane(
+        3,
+        reservedHighPrioritySlots: 1,
+        highPriorityThreshold: 950,
+      ),
+      // Keep one dispatch slot available for current-page decode/upload. Near
+      // prefetch can fill the remaining slots but cannot make a page switch
+      // wait behind two long 4K jobs.
+      SchedulerLane.decode: _createLane(
+        3,
+        reservedHighPrioritySlots: 1,
+        highPriorityThreshold: 90,
+      ),
+      SchedulerLane.upload: _createLane(
+        2,
+        reservedHighPrioritySlots: 1,
+        highPriorityThreshold: 90,
+      ),
     };
   }
 
-  _TaskLaneScheduler _createLane(int maxConcurrent) => _TaskLaneScheduler(
-    maxConcurrent: maxConcurrent,
-    preemptionThreshold: 40,
-    onCompleted: onTaskCompleted,
-    onFailed: onTaskFailed,
-  );
+  _TaskLaneScheduler _createLane(
+    int maxConcurrent, {
+    int reservedHighPrioritySlots = 0,
+    int highPriorityThreshold = 1 << 30,
+  }) =>
+      _TaskLaneScheduler(
+        maxConcurrent: maxConcurrent,
+        preemptionThreshold: 40,
+        reservedHighPrioritySlots: reservedHighPrioritySlots,
+        highPriorityThreshold: highPriorityThreshold,
+        onCompleted: onTaskCompleted,
+        onFailed: onTaskFailed,
+      );
 
   void submit(SchedulerTask task) => _lanes[task.lane]!.submit(task);
 

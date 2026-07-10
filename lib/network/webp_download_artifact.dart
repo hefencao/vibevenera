@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:venera/foundation/cache_manager.dart';
+import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 
 typedef WebPArtifactPromoter = Future<File> Function(File source);
@@ -15,12 +16,16 @@ final class WebPArtifactRestoreState {
   final int length;
   final Uint8List prefix;
   final bool sourceContainsPrefix;
+  final int? declaredLength;
+  final bool complete;
 
   const WebPArtifactRestoreState({
     required this.kind,
     required this.length,
     required this.prefix,
     this.sourceContainsPrefix = false,
+    this.declaredLength,
+    this.complete = false,
   });
 }
 
@@ -33,7 +38,7 @@ final class WebPDownloadArtifact {
   bool _promoted = false;
 
   WebPDownloadArtifact(this.file, {required WebPArtifactPromoter promote})
-      : _promote = promote;
+    : _promote = promote;
 
   factory WebPDownloadArtifact.forCacheKey(String cacheKey) {
     final name = md5.convert(cacheKey.codeUnits).toString();
@@ -46,12 +51,10 @@ final class WebPDownloadArtifact {
   int get length => _length;
   bool get isPromoted => _promoted;
 
-  /// Restores the authoritative range already persisted for this identity.
+  /// Restores the authoritative contiguous range already persisted.
   ///
-  /// WebP bytes are replayed only when reconstructing a process-local native
-  /// source after process/session creation. A retained native source at the
-  /// same committed offset is never replayed. Generic fallback content remains
-  /// artifact-owned and restores only its contiguous length.
+  /// A retained native source at the same offset is not replayed. A process-
+  /// local source recreated after restart is rebuilt once from the artifact.
   Future<WebPArtifactRestoreState> restore(
     DownloadSession session,
     DownloadWriterLease writer, {
@@ -60,9 +63,9 @@ final class WebPDownloadArtifact {
     if (_initialized) throw StateError('WebP artifact is already initialized');
     checkCancelled?.call();
     _initialized = true;
-    final exists = await file.exists();
-    _length = exists ? await file.length() : 0;
+    _length = await file.exists() ? await file.length() : 0;
     checkCancelled?.call();
+
     if (_length == 0) {
       return WebPArtifactRestoreState(
         kind: WebPArtifactContentKind.empty,
@@ -74,6 +77,32 @@ final class WebPDownloadArtifact {
     final prefix = await _readPrefix();
     checkCancelled?.call();
     final kind = classifyPrefix(prefix, completeLength: _length);
+    final declaredLength = kind == WebPArtifactContentKind.webp
+        ? ImageDataValidator.webPDeclaredLength(prefix)
+        : null;
+
+    if (declaredLength != null) {
+      if (_length > declaredLength) {
+        // The file contains an overlap/old response tail. It cannot be repaired
+        // by trimming because its source identity/validator is unknown.
+        await reset();
+        session.resetSource(
+          writer: writer,
+          epoch: session.source.epoch + 1,
+          expectedLength: 0,
+        );
+        return WebPArtifactRestoreState(
+          kind: WebPArtifactContentKind.empty,
+          length: 0,
+          prefix: Uint8List(0),
+        );
+      }
+      session.updateExpectedLength(
+        declaredLength,
+        writer: writer,
+        authoritative: true,
+      );
+    }
 
     if (kind == WebPArtifactContentKind.fallback) {
       session.enterFallbackContent(writer, restoredLength: _length);
@@ -86,16 +115,18 @@ final class WebPDownloadArtifact {
 
     if (kind == WebPArtifactContentKind.unknown) {
       final sourceLength = session.sourceCommittedLength;
-      final mustReset = session.fallbackContent ||
+      final mustReset =
+          session.fallbackContent ||
           (sourceLength != 0 && sourceLength != _length);
       if (mustReset) {
         session.resetSource(
           writer: writer,
           epoch: session.source.epoch + 1,
-          expectedLength: session.expectedLength,
+          expectedLength: 0,
         );
       }
-      final sourceContainsPrefix = !mustReset &&
+      final sourceContainsPrefix =
+          !mustReset &&
           !session.fallbackContent &&
           session.sourceCommittedLength == _length;
       return WebPArtifactRestoreState(
@@ -110,8 +141,15 @@ final class WebPDownloadArtifact {
       session.resetSource(
         writer: writer,
         epoch: session.source.epoch + 1,
-        expectedLength: session.expectedLength,
+        expectedLength: declaredLength ?? 0,
       );
+      if (declaredLength != null) {
+        session.updateExpectedLength(
+          declaredLength,
+          writer: writer,
+          authoritative: true,
+        );
+      }
     }
 
     final committed = session.sourceCommittedLength;
@@ -125,7 +163,24 @@ final class WebPDownloadArtifact {
         final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
         session.append(bytes, offset: offset, writer: writer);
         offset += bytes.length;
-        checkCancelled?.call();
+      }
+    }
+
+    final complete = declaredLength != null && _length == declaredLength;
+    if (complete) {
+      final validation = await ImageDataValidator.validateFile(file);
+      if (!validation.valid) {
+        await reset();
+        session.resetSource(
+          writer: writer,
+          epoch: session.source.epoch + 1,
+          expectedLength: 0,
+        );
+        return WebPArtifactRestoreState(
+          kind: WebPArtifactContentKind.empty,
+          length: 0,
+          prefix: Uint8List(0),
+        );
       }
     }
 
@@ -134,6 +189,8 @@ final class WebPDownloadArtifact {
       length: _length,
       prefix: prefix,
       sourceContainsPrefix: true,
+      declaredLength: declaredLength,
+      complete: complete,
     );
   }
 
@@ -167,6 +224,7 @@ final class WebPDownloadArtifact {
     await reset();
   }
 
+  /// Validates the durable file before it becomes the shared final cache.
   Future<File> promote({required int sealedLength}) async {
     if (!_initialized) throw StateError('WebP artifact is not initialized');
     if (_length != sealedLength) {
@@ -175,7 +233,26 @@ final class WebPDownloadArtifact {
       );
     }
     await _closeSink();
+
+    final validation = await ImageDataValidator.validateFile(file);
+    if (!validation.valid) {
+      throw InvalidImageDataException(
+        'artifact ${file.path}: ${validation.reason}',
+      );
+    }
+
     final promoted = await _promote(file);
+    final promotedValidation = await ImageDataValidator.validateFile(promoted);
+    if (!promotedValidation.valid) {
+      try {
+        await promoted.delete();
+      } on FileSystemException {
+        // Best effort cleanup.
+      }
+      throw InvalidImageDataException(
+        'promoted cache ${promoted.path}: ${promotedValidation.reason}',
+      );
+    }
     _promoted = true;
     return promoted;
   }
@@ -204,11 +281,13 @@ final class WebPDownloadArtifact {
   }) {
     if (completeLength == 0) return WebPArtifactContentKind.empty;
     if (prefix.length < 12) return WebPArtifactContentKind.unknown;
-    final isRiff = prefix[0] == 0x52 &&
+    final isRiff =
+        prefix[0] == 0x52 &&
         prefix[1] == 0x49 &&
         prefix[2] == 0x46 &&
         prefix[3] == 0x46;
-    final isWebP = prefix[8] == 0x57 &&
+    final isWebP =
+        prefix[8] == 0x57 &&
         prefix[9] == 0x45 &&
         prefix[10] == 0x42 &&
         prefix[11] == 0x50;

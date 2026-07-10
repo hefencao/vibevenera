@@ -328,9 +328,27 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
 
   Future<File?> _localFile() async {
     final key = identity.imageKey;
-    if (!key.startsWith('file://') && key.contains('://')) return null;
+    final explicitFileUri = key.startsWith('file://');
+
+    // Keep file:// untouched. The project's IOOverrides implementation is
+    // responsible for resolving it to the actual local/SAF file.
+    if (!explicitFileUri && key.contains('://')) {
+      return null;
+    }
+
     final file = File(key);
-    return await file.exists() ? file : null;
+    if (await file.exists()) {
+      return file;
+    }
+
+    if (explicitFileUri) {
+      throw FileSystemException(
+        'Local image file does not exist',
+        key,
+      );
+    }
+
+    return null;
   }
 }
 

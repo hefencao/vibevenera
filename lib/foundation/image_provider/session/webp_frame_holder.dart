@@ -95,19 +95,16 @@ final class WebPFrameHolder {
       _decodeInFlight == 0 &&
       effectiveBufferedFrameCount < targetFrameCount;
   bool get needsUpload =>
-      !_disposed &&
-      _demand.upload &&
-      _uploadInFlight == 0 &&
-      _raw.isNotEmpty;
+      !_disposed && _demand.upload && _uploadInFlight == 0 && _raw.isNotEmpty;
 
   WebPFrameHolderSnapshot get snapshot => WebPFrameHolderSnapshot(
-        demand: _demand,
-        rawFrames: _raw.length,
-        renderedFrames: _rendered.length,
-        decodeInFlight: _decodeInFlight,
-        uploadInFlight: _uploadInFlight,
-        disposed: _disposed,
-      );
+    demand: _demand,
+    rawFrames: _raw.length,
+    renderedFrames: _rendered.length,
+    decodeInFlight: _decodeInFlight,
+    uploadInFlight: _uploadInFlight,
+    disposed: _disposed,
+  );
 
   void updateDemand(WebPFrameDemand demand) {
     _checkActive();
@@ -145,7 +142,9 @@ final class WebPFrameHolder {
       }
       return;
     }
-    _decodeInFlight = (_decodeInFlight - reservedFrames).clamp(0, 1 << 30).toInt();
+    _decodeInFlight = (_decodeInFlight - reservedFrames)
+        .clamp(0, 1 << 30)
+        .toInt();
     _raw.addAll(frames);
     _changed();
   }

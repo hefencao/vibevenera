@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 /// ImageProvider adapter for the Phase 3 session pipeline.
 ///
@@ -15,6 +15,9 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   StreamSubscription<DownloadSessionSnapshot>? _downloadSubscription;
   StreamSubscription<WebPDecodeSessionSnapshot>? _decodeSubscription;
 
+  static const Duration _detachGrace = Duration(milliseconds: 750);
+
+  Timer? _detachTimer;
   bool _disposed = false;
   bool _pumpScheduled = false;
   bool _pumping = false;
@@ -23,16 +26,22 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   int _fallbackFramesEmitted = 0;
   ui.Codec? _fallbackCodec;
   bool _reportedTerminalError = false;
+  int _lastChunkReportMs = 0;
+  int _lastBufferReportMs = 0;
+  int _lastBufferedFrames = -1;
 
   _WebPSessionImageStreamCompleter(this._provider)
-      : _scopeId = 'visible:${identityHashCode(_provider)}:'
-            '${DateTime.now().microsecondsSinceEpoch}' {
+    : _scopeId =
+          'visible:${identityHashCode(_provider)}:'
+          '${DateTime.now().microsecondsSinceEpoch}' {
     WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void addListener(ImageStreamListener listener) {
     super.addListener(listener);
+    _detachTimer?.cancel();
+    _detachTimer = null;
     if (_lease == null) _attach();
     _schedulePump();
   }
@@ -40,13 +49,15 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   @override
   void removeListener(ImageStreamListener listener) {
     super.removeListener(listener);
-    if (!hasListeners) _detachVisible();
+    if (!hasListeners) _scheduleVisibleDetach();
   }
 
   @override
   void onDisposed() {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
+    _detachTimer?.cancel();
+    _detachTimer = null;
     _detachVisible();
     _fallbackCodec?.dispose();
     _fallbackCodec = null;
@@ -89,6 +100,14 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     }
   }
 
+  void _scheduleVisibleDetach() {
+    _detachTimer?.cancel();
+    _detachTimer = Timer(_detachGrace, () {
+      _detachTimer = null;
+      if (!_disposed && !hasListeners) _detachVisible();
+    });
+  }
+
   void _detachVisible() {
     final holderSubscription = _holderSubscription;
     final downloadSubscription = _downloadSubscription;
@@ -107,12 +126,18 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     if (_disposed) return;
     final lease = _lease;
     if (lease?.decode.isCurrent == true) {
-      PipelineController.instance.updateCurrentBufferedFrames(
-        snapshot.renderedFrames +
-            snapshot.rawFrames +
-            snapshot.decodeInFlight +
-            snapshot.uploadInFlight,
-      );
+      final buffered =
+          snapshot.renderedFrames +
+          snapshot.rawFrames +
+          snapshot.decodeInFlight +
+          snapshot.uploadInFlight;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (buffered != _lastBufferedFrames &&
+          (buffered == 0 || now - _lastBufferReportMs >= 50)) {
+        _lastBufferedFrames = buffered;
+        _lastBufferReportMs = now;
+        PipelineController.instance.updateCurrentBufferedFrames(buffered);
+      }
     }
     if (snapshot.renderedFrames > 0) _schedulePump();
   }
@@ -120,15 +145,29 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   void _onDownloadState(DownloadSessionSnapshot snapshot) {
     if (_disposed) return;
     final current = snapshot.committedLength;
-    reportImageChunkEvent(
-      ImageChunkEvent(
-        cumulativeBytesLoaded: current,
-        expectedTotalBytes:
-            snapshot.expectedLength > 0 ? snapshot.expectedLength : null,
-      ),
-    );
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final terminal =
+        snapshot.transport == DownloadTransportState.sealed ||
+        (snapshot.transport == DownloadTransportState.failed &&
+            !snapshot.failureRetryable);
+    if (terminal || current == 0 || now - _lastChunkReportMs >= 100) {
+      _lastChunkReportMs = now;
+      reportImageChunkEvent(
+        ImageChunkEvent(
+          cumulativeBytesLoaded: current,
+          expectedTotalBytes: snapshot.expectedLength > 0
+              ? snapshot.expectedLength
+              : null,
+        ),
+      );
+    }
     if (snapshot.transport == DownloadTransportState.failed) {
-      _reportError(snapshot.error ?? StateError('WebP download failed'));
+      // Retryable network failures retain source/artifact/cursor state. The
+      // coordinator retries after backoff; reporting an ImageStream terminal
+      // error here would permanently disable a stream that can still recover.
+      if (!snapshot.failureRetryable) {
+        _reportError(snapshot.error ?? StateError('WebP download failed'));
+      }
       return;
     }
     if (snapshot.transport == DownloadTransportState.sealed) {
@@ -206,7 +245,7 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
 
         final duration = frame.durationMs <= 0
             ? 100
-            : frame.durationMs.clamp(16, 200).toInt();
+            : frame.durationMs.clamp(16, 1000).toInt();
         final image = frame.detachImage();
         frame.dispose();
         setImage(ImageInfo(image: image, scale: _provider.scale));
@@ -239,7 +278,8 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     if (_fallbackStarted || _disposed) return;
     final lease = _lease;
     if (lease == null) return;
-    final eligible = snapshot.fallbackContent ||
+    final eligible =
+        snapshot.fallbackContent ||
         nativeError != null ||
         lease.decode.nativeExhaustedWithoutFrames;
     if (!eligible) return;
@@ -262,6 +302,12 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         _fallbackStarted = false;
         _schedulePump();
         return;
+      }
+      final validation = await ImageDataValidator.validateFile(file);
+      if (!validation.valid) {
+        throw InvalidImageDataException(
+          'Invalid cached image artifact: ${validation.reason}',
+        );
       }
       final bytes = await file.readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
@@ -287,10 +333,7 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   }
 
   Future<void> _pumpFallback() async {
-    if (_disposed ||
-        _fallbackPumping ||
-        !hasListeners ||
-        !_isLifecycleActive) {
+    if (_disposed || _fallbackPumping || !hasListeners || !_isLifecycleActive) {
       return;
     }
     final codec = _fallbackCodec;
@@ -329,11 +372,11 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         final delay = frame.duration.inMicroseconds <= 0
             ? const Duration(milliseconds: 100)
             : Duration(
-                milliseconds: (frame.duration.inMilliseconds /
-                        webpPlaybackSpeed)
-                    .round()
-                    .clamp(8, 1000)
-                    .toInt(),
+                milliseconds:
+                    (frame.duration.inMilliseconds / webpPlaybackSpeed)
+                        .round()
+                        .clamp(8, 1000)
+                        .toInt(),
               );
         await Future<void>.delayed(delay);
       }

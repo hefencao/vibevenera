@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:venera/foundation/image_provider/pipeline/task_scheduler.dart';
 import 'package:venera/foundation/image_provider/pipeline/tasks.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
@@ -105,7 +107,8 @@ final class WebPSessionCoordinator {
   final void Function(
     DownloadIdentity identity,
     WebPTransportProgress progress,
-  )? onProgress;
+  )?
+  onProgress;
 
   late final DownloadSessionRegistry downloads;
   late final WebPDecodeSessionRegistry decodes;
@@ -113,6 +116,7 @@ final class WebPSessionCoordinator {
   final Set<WebPDecodeIdentity> _pendingDecodeEvictions = {};
   final Set<DownloadIdentity> _pendingDownloadEvictions = {};
   final Set<WebPDecodeSession> _retiredDecodes = {};
+  final Map<DownloadIdentity, Timer> _retryTimers = {};
 
   WebPSessionCoordinator({
     required this.scheduler,
@@ -124,7 +128,8 @@ final class WebPSessionCoordinator {
       webp.WebPByteSource source,
       int targetWidth,
       int targetHeight,
-    )? cursorFactory,
+    )?
+    cursorFactory,
   }) {
     downloads = DownloadSessionRegistry(
       reconcile: _reconcileDownload,
@@ -145,17 +150,10 @@ final class WebPSessionCoordinator {
     final download = downloads.getOrCreate(downloadIdentity);
     _replaceDecodeBindingIfNeeded(decodeIdentity, download);
     final decode = decodes.getOrCreate(decodeIdentity, download);
-    final lease = WebPResourceLease._(
-      this,
-      scopeId,
-      download,
-      decode,
-      demand,
-    );
+    final lease = WebPResourceLease._(this, scopeId, download, decode, demand);
     _leases.add(lease);
     return lease;
   }
-
 
   void _replaceDecodeBindingIfNeeded(
     WebPDecodeIdentity identity,
@@ -170,7 +168,9 @@ final class WebPSessionCoordinator {
     // upload may still own a native frame, so the old cursor is disposed only
     // after its in-flight claims have completed.
     for (final lease
-        in _leases.where((lease) => identical(lease.decode, existing)).toList()) {
+        in _leases
+            .where((lease) => identical(lease.decode, existing))
+            .toList()) {
       lease.detach();
     }
     scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(existing));
@@ -214,14 +214,8 @@ final class WebPSessionCoordinator {
     for (final session in decodes.sessions.toList()) {
       if (session.demandCount > 0) continue;
       _pendingDecodeEvictions.add(session.identity);
-      scheduler.cancelInLane(
-        SchedulerLane.decode,
-        _decodeTaskKey(session),
-      );
-      scheduler.cancelInLane(
-        SchedulerLane.upload,
-        _uploadTaskKey(session),
-      );
+      scheduler.cancelInLane(SchedulerLane.decode, _decodeTaskKey(session));
+      scheduler.cancelInLane(SchedulerLane.upload, _uploadTaskKey(session));
       _drainDecodeEviction(session.identity);
     }
     for (final session in _retiredDecodes.toList()) {
@@ -241,6 +235,10 @@ final class WebPSessionCoordinator {
   }
 
   void dispose() {
+    for (final timer in _retryTimers.values) {
+      timer.cancel();
+    }
+    _retryTimers.clear();
     for (final lease in _leases.toList()) {
       lease.detach();
     }
@@ -258,6 +256,7 @@ final class WebPSessionCoordinator {
     final key = _downloadTaskKey(session.identity);
 
     if (!session.hasDemand) {
+      _cancelRetry(session.identity);
       // A running transport is retained and may finish. Queued/paused work has
       // no consumer and can be removed without destroying the source.
       if (session.transport != DownloadTransportState.receiving &&
@@ -267,8 +266,16 @@ final class WebPSessionCoordinator {
       return;
     }
 
-    if (session.transport == DownloadTransportState.sealed ||
-        session.transport == DownloadTransportState.failed) {
+    if (session.transport == DownloadTransportState.sealed) {
+      _cancelRetry(session.identity);
+      return;
+    }
+    if (session.transport == DownloadTransportState.failed) {
+      if (session.failureRetryable) {
+        _scheduleRetry(session);
+      } else {
+        _cancelRetry(session.identity);
+      }
       return;
     }
 
@@ -281,6 +288,7 @@ final class WebPSessionCoordinator {
       return;
     }
 
+    _cancelRetry(session.identity);
     scheduler.submit(
       WebPDownloadTask(
         key: key,
@@ -289,8 +297,7 @@ final class WebPSessionCoordinator {
         cancelable: true,
         session: session,
         transport: transportFactory(session.identity),
-        onProgress: (progress) =>
-            onProgress?.call(session.identity, progress),
+        onProgress: (progress) => onProgress?.call(session.identity, progress),
       ),
     );
   }
@@ -393,19 +400,37 @@ final class WebPSessionCoordinator {
   }
 
   bool _drainDownloadEviction(DownloadIdentity identity) {
+    _cancelRetry(identity);
     final session = downloads.find(identity);
     if (session != null && session.hasDemand) return false;
     if (session != null &&
         session.transport != DownloadTransportState.receiving) {
-      scheduler.cancelInLane(
-        SchedulerLane.network,
-        _downloadTaskKey(identity),
-      );
+      scheduler.cancelInLane(SchedulerLane.network, _downloadTaskKey(identity));
     }
     if (session != null && !session.canEvict) return false;
     final evicted = downloads.tryEvict(identity);
     if (evicted || session == null) _pendingDownloadEvictions.remove(identity);
     return evicted;
+  }
+
+  void _scheduleRetry(DownloadSession session) {
+    if (_retryTimers.containsKey(session.identity) ||
+        !session.hasDemand ||
+        !session.failureRetryable ||
+        session.isDisposed) {
+      return;
+    }
+    final exponent = (session.failureCount - 1).clamp(0, 4).toInt();
+    final delayMs = 400 * (1 << exponent);
+    _retryTimers[session.identity] = Timer(Duration(milliseconds: delayMs), () {
+      _retryTimers.remove(session.identity);
+      if (session.isDisposed || !session.hasDemand) return;
+      session.retryFailedTransport();
+    });
+  }
+
+  void _cancelRetry(DownloadIdentity identity) {
+    _retryTimers.remove(identity)?.cancel();
   }
 
   static String _downloadTaskKey(DownloadIdentity identity) =>

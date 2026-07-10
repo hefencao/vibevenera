@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 class WebPPlaybackState {
   bool hasShownFirstFrame = false;
@@ -137,9 +137,11 @@ class WebPPlaybackController {
         break;
       }
 
-      final pipelineAttached =
-          PipelineController.instance.hasStreamDecodeAttached(holder.key);
-      if (holder.streamNeedsResume && _progressiveSub == null && !pipelineAttached) {
+      final pipelineAttached = PipelineController.instance
+          .hasStreamDecodeAttached(holder.key);
+      if (holder.streamNeedsResume &&
+          _progressiveSub == null &&
+          !pipelineAttached) {
         _progressiveSub = provider._resumeStreamingIntoHolder(
           holder,
           onDone: () => _progressiveSub = null,
@@ -150,10 +152,7 @@ class WebPPlaybackController {
           'WebP.Stream.Visible',
           'RELOAD failed-stream ${holder.shortKey} ${holder.streamError}',
         );
-        final nh = await _reloadAndRestart(
-          holder,
-          forceFullDecode: true,
-        );
+        final nh = await _reloadAndRestart(holder, forceFullDecode: true);
         if (nh != null) {
           holder = nh;
           _activeHolder = holder;
@@ -211,7 +210,8 @@ class WebPPlaybackController {
   }
 
   Future<bool> _pauseIfInactive(DecoderHolder holder) async {
-    if (DecoderManager.instance.isActiveImageKey(provider.imageKey)) return false;
+    if (DecoderManager.instance.isActiveImageKey(provider.imageKey))
+      return false;
     if (_progressiveSub != null &&
         holder.decoder.isStreaming &&
         !holder.decoder.streamIsComplete) {

@@ -14,6 +14,7 @@ import 'package:venera/network/images.dart';
 import 'package:venera/utils/trace_log.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
+import 'io/image_data_validator.dart';
 import 'io/image_loader.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
@@ -67,7 +68,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   static (int, int) calculateTargetSize(BuildContext context) =>
       _calculateWebPTargetSize(context);
 
-
   static bool isLikelyWebP(String imageKey) => _isLikelyWebP(imageKey);
 
   @override
@@ -96,20 +96,19 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     double scale = 1.0,
     Uint8List? providedBytes,
     bool onlyIfCached = false,
-  }) =>
-      _ensureWebPHolder(
-        imageKey: imageKey,
-        fullKey: fullKey,
-        cache: cache,
-        sourceKey: sourceKey,
-        cid: cid,
-        eid: eid,
-        targetWidth: targetWidth,
-        targetHeight: targetHeight,
-        scale: scale,
-        providedBytes: providedBytes,
-        onlyIfCached: onlyIfCached,
-      );
+  }) => _ensureWebPHolder(
+    imageKey: imageKey,
+    fullKey: fullKey,
+    cache: cache,
+    sourceKey: sourceKey,
+    cid: cid,
+    eid: eid,
+    targetWidth: targetWidth,
+    targetHeight: targetHeight,
+    scale: scale,
+    providedBytes: providedBytes,
+    onlyIfCached: onlyIfCached,
+  );
 
   @override
   bool operator ==(Object other) {
@@ -136,18 +135,18 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     required String eid,
     required String? sourceKey,
     DecodedImageCache? cache,
-  }) =>
-      _onWebPPageChanged(
-        currentPageIndex: currentPageIndex,
-        images: images,
-        context: context,
-        cid: cid,
-        eid: eid,
-        sourceKey: sourceKey,
-        cache: cache,
-      );
+  }) => _onWebPPageChanged(
+    currentPageIndex: currentPageIndex,
+    images: images,
+    context: context,
+    cid: cid,
+    eid: eid,
+    sourceKey: sourceKey,
+    cache: cache,
+  );
 
-  static void clearAll() => PipelineController.instance.evictUndemandedSessions();
+  static void clearAll() =>
+      PipelineController.instance.evictUndemandedSessions();
 
   static void setInteractionState(InteractionState state) {
     PipelineController.instance.setInteractionState(state);
@@ -156,4 +155,3 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   static bool get isJumpingInteraction =>
       PipelineController.instance.interactionState == InteractionState.jumping;
 }
-

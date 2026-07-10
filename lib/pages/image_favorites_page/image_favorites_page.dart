@@ -10,7 +10,7 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/history.dart';
-import 'package:venera/foundation/image_provider/image_favorites_provider.dart';
+import 'package:venera/foundation/image_provider/image_favorites.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/image_favorites_page/type.dart';
 import 'package:venera/pages/reader/reader.dart';

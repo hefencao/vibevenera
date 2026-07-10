@@ -79,7 +79,9 @@ final class WebPDownloadArtifact {
   Future<File> promote({required int sealedLength}) async {
     if (!_initialized) throw StateError('WebP artifact is not initialized');
     if (_length != sealedLength) {
-      throw StateError('WebP artifact final length mismatch: $_length/$sealedLength');
+      throw StateError(
+        'WebP artifact final length mismatch: $_length/$sealedLength',
+      );
     }
     await _closeSink();
     final file = await _promote(this.file);

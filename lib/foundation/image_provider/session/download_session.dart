@@ -55,6 +55,8 @@ final class DownloadSessionSnapshot {
   final int expectedLength;
   final int committedLength;
   final bool fallbackContent;
+  final bool failureRetryable;
+  final int failureCount;
   final File? artifactFile;
   final Object? error;
 
@@ -68,6 +70,8 @@ final class DownloadSessionSnapshot {
     required this.expectedLength,
     this.committedLength = 0,
     this.fallbackContent = false,
+    this.failureRetryable = false,
+    this.failureCount = 0,
     required this.artifactFile,
     required this.error,
   });
@@ -127,6 +131,8 @@ final class DownloadSession {
   DownloadTransportState _transport = DownloadTransportState.idle;
   Object? _error;
   bool _failureRetryable = false;
+  int _failureCount = 0;
+  bool _expectedLengthAuthoritative = false;
   File? _artifactFile;
   bool _disposed = false;
   bool _publishScheduled = false;
@@ -145,8 +151,8 @@ final class DownloadSession {
     required this.source,
     required void Function(DownloadSession session) reconcile,
     int expectedLength = 0,
-  })  : _reconcile = reconcile,
-        _expectedLength = expectedLength;
+  }) : _reconcile = reconcile,
+       _expectedLength = expectedLength;
 
   Stream<DownloadSessionSnapshot> get states => _states.stream;
 
@@ -172,6 +178,9 @@ final class DownloadSession {
   int get dependentDecodeSessions => _dependentDecodeSessions;
   int get transportRevision => _transportRevision;
   int get expectedLength => _expectedLength;
+  bool get expectedLengthAuthoritative => _expectedLengthAuthoritative;
+  bool get failureRetryable => _failureRetryable;
+  int get failureCount => _failureCount;
   int get sourceCommittedLength => source.state.committedLength;
   int get committedLength =>
       _fallbackContent ? _fallbackCommittedLength : sourceCommittedLength;
@@ -185,18 +194,20 @@ final class DownloadSession {
       _activeWriter == null;
 
   DownloadSessionSnapshot get snapshot => DownloadSessionSnapshot(
-        transport: _transport,
-        source: source.state,
-        desiredPriority: desiredPriority,
-        demandCount: demandCount,
-        dependentDecodeSessions: _dependentDecodeSessions,
-        transportRevision: _transportRevision,
-        expectedLength: _expectedLength,
-        committedLength: committedLength,
-        fallbackContent: _fallbackContent,
-        artifactFile: _artifactFile,
-        error: _error,
-      );
+    transport: _transport,
+    source: source.state,
+    desiredPriority: desiredPriority,
+    demandCount: demandCount,
+    dependentDecodeSessions: _dependentDecodeSessions,
+    transportRevision: _transportRevision,
+    expectedLength: _expectedLength,
+    committedLength: committedLength,
+    fallbackContent: _fallbackContent,
+    failureRetryable: _failureRetryable,
+    failureCount: _failureCount,
+    artifactFile: _artifactFile,
+    error: _error,
+  );
 
   DownloadDemandLease attach({required String scopeId, required int priority}) {
     _checkActive();
@@ -263,18 +274,41 @@ final class DownloadSession {
   void updateExpectedLength(
     int? expectedLength, {
     DownloadWriterLease? writer,
+    bool authoritative = false,
   }) {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
     final value = expectedLength ?? 0;
     if (value <= 0) return;
-    if (value < committedLength) {
-      throw WebPSourceInvariantError(
-        'expected length $value is smaller than committed $committedLength',
-      );
+
+    // HTTP Content-Length on a resumed request may describe only the remaining
+    // range. It is progress metadata, not a source invariant. Once the RIFF
+    // header publishes its declared size, only another authoritative value may
+    // replace it.
+    if (_expectedLengthAuthoritative) {
+      if (!authoritative) return;
+      if (value != _expectedLength) {
+        throw WebPSourceInvariantError(
+          'conflicting authoritative lengths: $_expectedLength/$value',
+        );
+      }
+      return;
     }
-    if (value == _expectedLength) return;
+    if (value < committedLength) {
+      if (authoritative) {
+        throw WebPSourceInvariantError(
+          'authoritative length $value is smaller than committed '
+          '$committedLength',
+        );
+      }
+      return;
+    }
+    if (value == _expectedLength &&
+        (!authoritative || _expectedLengthAuthoritative)) {
+      return;
+    }
     _expectedLength = value;
+    if (authoritative) _expectedLengthAuthoritative = true;
     _schedulePublish();
   }
 
@@ -340,6 +374,7 @@ final class DownloadSession {
     _fallbackContent = false;
     _fallbackCommittedLength = 0;
     _expectedLength = expectedLength;
+    _expectedLengthAuthoritative = false;
     _artifactFile = null;
     _error = null;
     _failureRetryable = false;
@@ -373,6 +408,7 @@ final class DownloadSession {
     }
     _artifactFile = artifactFile;
     _failureRetryable = false;
+    _failureCount = 0;
     _activeWriterRevision = null;
     _activeWriter = null;
     activeWriter._detach();
@@ -403,6 +439,7 @@ final class DownloadSession {
     }
     _fallbackContent = true;
     _fallbackCommittedLength = restoredLength;
+    _expectedLengthAuthoritative = false;
     _decodeSafePublish();
   }
 
@@ -445,6 +482,7 @@ final class DownloadSession {
     }
     _artifactFile = artifactFile;
     _failureRetryable = false;
+    _failureCount = 0;
     _activeWriterRevision = null;
     _activeWriter = null;
     writer._detach();
@@ -478,17 +516,14 @@ final class DownloadSession {
     _scheduleReconcile();
   }
 
-  void fail(
-    DownloadWriterLease writer,
-    Object error, {
-    bool retryable = true,
-  }) {
+  void fail(DownloadWriterLease writer, Object error, {bool retryable = true}) {
     if (!_isWriterActive(writer)) return;
     _activeWriterRevision = null;
     _activeWriter = null;
     writer._detach();
     _error = error;
     _failureRetryable = retryable;
+    _failureCount++;
     _setTransport(DownloadTransportState.failed);
     _scheduleReconcile();
   }
@@ -502,8 +537,26 @@ final class DownloadSession {
     }
     _error = error;
     _failureRetryable = retryable;
+    _failureCount++;
     _setTransport(DownloadTransportState.failed);
     _scheduleReconcile();
+  }
+
+  /// Re-enters the paused state after coordinator backoff. The source and
+  /// artifact remain unchanged and the next task resumes at committedLength.
+  bool retryFailedTransport() {
+    _checkActive();
+    if (_transport != DownloadTransportState.failed ||
+        !_failureRetryable ||
+        _demands.isEmpty ||
+        _activeWriter != null) {
+      return false;
+    }
+    _failureRetryable = false;
+    _error = null;
+    _setTransport(DownloadTransportState.paused);
+    _scheduleReconcile();
+    return true;
   }
 
   void retainDecodeSession() {
@@ -558,16 +611,6 @@ final class DownloadSession {
   }
 
   void _demandChanged() {
-    // A failed transport is terminal for the current demand epoch. A later
-    // attach/priority change is an explicit retry signal and reuses the same
-    // source/artifact instead of constructing a second session.
-    if (_transport == DownloadTransportState.failed &&
-        _failureRetryable &&
-        _demands.isNotEmpty) {
-      _transport = DownloadTransportState.paused;
-      _error = null;
-      _failureRetryable = false;
-    }
     _schedulePublish();
     _scheduleReconcile();
   }
@@ -633,16 +676,18 @@ final class DownloadSession {
 final class DownloadSessionRegistry {
   final Map<DownloadIdentity, DownloadSession> _sessions = {};
   final void Function(DownloadSession session) reconcile;
-  final webp.WebPByteSource Function(int expectedLength, int epoch) sourceFactory;
+  final webp.WebPByteSource Function(int expectedLength, int epoch)
+  sourceFactory;
 
   DownloadSessionRegistry({
     required this.reconcile,
     webp.WebPByteSource Function(int expectedLength, int epoch)? sourceFactory,
-  }) : sourceFactory = sourceFactory ??
-            ((expectedLength, epoch) => webp.createNativeWebPSource(
-                  expectedLength: expectedLength,
-                  epoch: epoch,
-                ));
+  }) : sourceFactory =
+           sourceFactory ??
+           ((expectedLength, epoch) => webp.createNativeWebPSource(
+             expectedLength: expectedLength,
+             epoch: epoch,
+           ));
 
   Iterable<DownloadSession> get sessions => _sessions.values;
 
@@ -650,16 +695,15 @@ final class DownloadSessionRegistry {
     DownloadIdentity identity, {
     int expectedLength = 0,
     int epoch = 1,
-  }) =>
-      _sessions.putIfAbsent(
-        identity,
-        () => DownloadSession(
-          identity: identity,
-          source: sourceFactory(expectedLength, epoch),
-          reconcile: reconcile,
-          expectedLength: expectedLength,
-        ),
-      );
+  }) => _sessions.putIfAbsent(
+    identity,
+    () => DownloadSession(
+      identity: identity,
+      source: sourceFactory(expectedLength, epoch),
+      reconcile: reconcile,
+      expectedLength: expectedLength,
+    ),
+  );
 
   DownloadSession? find(DownloadIdentity identity) => _sessions[identity];
 

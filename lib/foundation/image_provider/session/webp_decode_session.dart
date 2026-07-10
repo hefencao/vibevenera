@@ -72,8 +72,7 @@ final class WebPDecodeDemandLease {
     required bool current,
     required bool decode,
     required bool upload,
-  }) =>
-      _session?._updateDemand(_id, priority, current, decode, upload);
+  }) => _session?._updateDemand(_id, priority, current, decode, upload);
 
   void detach() {
     final session = _session;
@@ -119,10 +118,7 @@ final class WebPUploadClaim {
   final NativeFrameHandle frame;
   bool _completed = false;
 
-  WebPUploadClaim._({
-    required this.uploadRevision,
-    required this.frame,
-  });
+  WebPUploadClaim._({required this.uploadRevision, required this.frame});
 }
 
 final class WebPDecodeSession {
@@ -156,10 +152,10 @@ final class WebPDecodeSession {
     required this.download,
     required this.cursor,
     required void Function(WebPDecodeSession session) reconcile,
-  })  : _reconcile = reconcile,
-        _observedSourceEpoch = download.source.epoch,
-        _observedCommittedLength = download.sourceCommittedLength,
-        _observedTransport = download.transport {
+  }) : _reconcile = reconcile,
+       _observedSourceEpoch = download.source.epoch,
+       _observedCommittedLength = download.sourceCommittedLength,
+       _observedTransport = download.transport {
     download.retainDecodeSession();
     holder = WebPFrameHolder(onDemand: _scheduleReconcile);
     _downloadSubscription = download.states.listen(_onDownloadState);
@@ -228,19 +224,19 @@ final class WebPDecodeSession {
   void requestReconcile() => _scheduleReconcile();
 
   WebPDecodeSessionSnapshot get snapshot => WebPDecodeSessionSnapshot(
-        download: download.snapshot,
-        cursor: cursor.state,
-        desiredPriority: desiredPriority,
-        demandCount: demandCount,
-        decodeDemandCount: decodeDemandCount,
-        uploadDemandCount: uploadDemandCount,
-        decodeRevision: _decodeRevision,
-        uploadRevision: _uploadRevision,
-        frames: holder.snapshot,
-        decodeError: _decodeError,
-        uploadError: _uploadError,
-        nativeExhaustedWithoutFrames: nativeExhaustedWithoutFrames,
-      );
+    download: download.snapshot,
+    cursor: cursor.state,
+    desiredPriority: desiredPriority,
+    demandCount: demandCount,
+    decodeDemandCount: decodeDemandCount,
+    uploadDemandCount: uploadDemandCount,
+    decodeRevision: _decodeRevision,
+    uploadRevision: _uploadRevision,
+    frames: holder.snapshot,
+    decodeError: _decodeError,
+    uploadError: _uploadError,
+    nativeExhaustedWithoutFrames: nativeExhaustedWithoutFrames,
+  );
 
   WebPDecodeDemandLease attach({
     required String scopeId,
@@ -420,10 +416,7 @@ final class WebPDecodeSession {
     if (expectedRevision != _uploadRevision || !shouldUpload) return null;
     final frame = holder.claimRawFrame();
     if (frame == null) return null;
-    return WebPUploadClaim._(
-      uploadRevision: _uploadRevision,
-      frame: frame,
-    );
+    return WebPUploadClaim._(uploadRevision: _uploadRevision, frame: frame);
   }
 
   void completeUpload(
@@ -438,7 +431,8 @@ final class WebPDecodeSession {
     }
     claim._completed = true;
 
-    final stale = discard ||
+    final stale =
+        discard ||
         _disposed ||
         claim.uploadRevision != _uploadRevision ||
         !shouldUpload;
@@ -565,7 +559,8 @@ final class WebPDecodeSession {
     if (_disposed) return;
     _syncSourceEpoch();
     final committed = snapshot.source.committedLength;
-    final becameSealed = snapshot.transport == DownloadTransportState.sealed &&
+    final becameSealed =
+        snapshot.transport == DownloadTransportState.sealed &&
         _observedTransport != DownloadTransportState.sealed;
     _observedTransport = snapshot.transport;
     if (committed != _observedCommittedLength || becameSealed) {
@@ -633,7 +628,8 @@ final class WebPDecodeSessionRegistry {
     webp.WebPByteSource source,
     int targetWidth,
     int targetHeight,
-  ) cursorFactory;
+  )
+  cursorFactory;
 
   WebPDecodeSessionRegistry({
     required this.reconcile,
@@ -641,7 +637,8 @@ final class WebPDecodeSessionRegistry {
       webp.WebPByteSource source,
       int targetWidth,
       int targetHeight,
-    )? cursorFactory,
+    )?
+    cursorFactory,
   }) : cursorFactory = cursorFactory ?? _createNativeCursor;
 
   Iterable<WebPDecodeSession> get sessions => _sessions.values;
@@ -653,7 +650,9 @@ final class WebPDecodeSessionRegistry {
     final existing = _sessions[identity];
     if (existing != null) {
       if (!identical(existing.download, download)) {
-        throw StateError('Decode identity is bound to another download session');
+        throw StateError(
+          'Decode identity is bound to another download session',
+        );
       }
       return existing;
     }

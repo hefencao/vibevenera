@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
@@ -317,7 +318,10 @@ class DownloadTask extends PolicyAwareTask {
   @override
   Future<void> doExecute(ExecutionContext ctx) async {
     _cancelToken = CancelToken();
-    Log.info('WebP.Pipeline.Flow', 'DOWNLOAD-START ${_exec.imageKey.split('/').last}');
+    Log.info(
+      'WebP.Pipeline.Flow',
+      'DOWNLOAD-START ${_exec.imageKey.split('/').last}',
+    );
 
     try {
       final bytes = await _exec.execute(
@@ -490,7 +494,7 @@ final class WebPDownloadTask extends SchedulerTask {
           session.fail(
             writer!,
             error,
-            retryable: error is! WebPSourceInvariantError,
+            retryable: _isRetryableWebPDownloadError(error),
           );
         }
         _state = TaskState.failed;
@@ -511,6 +515,36 @@ final class WebPDownloadTask extends SchedulerTask {
     _rejectWaiters(const WebPTransportCancelled('cancelled'));
     // Do not mark the session paused here. The task remains registered as a
     // running task until transport.execute has unwound and flushed its artifact.
+  }
+
+  bool _isRetryableWebPDownloadError(Object error) {
+    if (error is WebPSourceInvariantError) return false;
+    if (error is InvalidImageDataException) {
+      // The transport discards the corrupt artifact and advances the source
+      // epoch before rethrowing. Allow one clean redownload, then surface a
+      // terminal error instead of looping on a server text/error response.
+      return session.failureCount == 0;
+    }
+    int? statusCode;
+    try {
+      final dynamic dynamicError = error;
+      final dynamic value = dynamicError.response?.statusCode;
+      if (value is int) statusCode = value;
+    } catch (_) {
+      // The downloader may throw a non-Dio exception.
+    }
+    if (statusCode != null && statusCode >= 400 && statusCode < 500) {
+      return statusCode == 408 ||
+          statusCode == 409 ||
+          statusCode == 425 ||
+          statusCode == 429;
+    }
+    final message = error.toString();
+    if (message.contains('Invalid Status Code: 403') ||
+        message.contains('Invalid Status Code: 404')) {
+      return false;
+    }
+    return true;
   }
 
   void _rejectWaiters(Object error, [StackTrace? stack]) {
@@ -680,19 +714,20 @@ final class WebPFrameUploadTask extends SchedulerTask {
 // 9. PrecreateTask — pre-creates decoder holders
 // ───────────────────────────────────────────────────────────────
 
-typedef PrecreateHolderFactory = Future<dynamic> Function({
-  required String imageKey,
-  required String fullKey,
-  DecodedImageCache? cache,
-  String? sourceKey,
-  required String cid,
-  required String eid,
-  int targetWidth,
-  int targetHeight,
-  double scale,
-  Uint8List? providedBytes,
-  bool onlyIfCached,
-});
+typedef PrecreateHolderFactory =
+    Future<dynamic> Function({
+      required String imageKey,
+      required String fullKey,
+      DecodedImageCache? cache,
+      String? sourceKey,
+      required String cid,
+      required String eid,
+      int targetWidth,
+      int targetHeight,
+      double scale,
+      Uint8List? providedBytes,
+      bool onlyIfCached,
+    });
 
 class PrecreateTask extends PolicyAwareTask {
   final DecodedImageCache? cache;

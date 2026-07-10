@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
-import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/foundation/image_provider/webp_image.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 

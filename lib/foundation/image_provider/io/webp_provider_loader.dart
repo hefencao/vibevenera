@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 extension _WebPImageProviderLoader on WebPImageProvider {
   // ── Image loading ──────────────────────────────────────────

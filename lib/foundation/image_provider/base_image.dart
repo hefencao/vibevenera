@@ -1,8 +1,10 @@
 import 'dart:async' show Future, StreamController, scheduleMicrotask;
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui show Codec;
 import 'dart:ui';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:venera/foundation/cache_manager.dart';
@@ -15,19 +17,19 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   static const int maxImagePixel = 2560 * 1440;
 
   static TargetImageSize _getTargetSize(int width, int height) {
-    // ignore invalid size
     if (width <= 0 || height <= 0) {
       return TargetImageSize(width: width, height: height);
     }
-    // ignore too wide or too tall image
     final imageRatio = width / height;
     if (imageRatio > 2 || imageRatio < 0.5) {
       return TargetImageSize(width: width, height: height);
     }
-    // resize if too large
     if (width * height > maxImagePixel) {
       final ratio = sqrt(maxImagePixel / (width * height));
-      return TargetImageSize(width: (width * ratio).round(), height: (height * ratio).round());
+      return TargetImageSize(
+        width: (width * ratio).round(),
+        height: (height * ratio).round(),
+      );
     }
     return TargetImageSize(width: width, height: height);
   }
@@ -55,85 +57,73 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
     ImageDecoderCallback decode,
   ) async {
     try {
-      int retryTime = 1;
-
-      bool stop = false;
-
-      chunkEvents.onCancel = () {
-        stop = true;
-      };
+      var retryTime = 1;
+      var stop = false;
+      chunkEvents.onCancel = () => stop = true;
 
       Uint8List? data;
-
       while (data == null && !stop) {
         try {
           data = await load(chunkEvents, () {
-            if (stop) {
-              throw const _ImageLoadingStopException();
-            }
+            if (stop) throw const _ImageLoadingStopException();
           });
         } on _ImageLoadingStopException {
           rethrow;
-        } catch (e) {
-          if (e.toString().contains("Invalid Status Code: 404")) {
+        } catch (error) {
+          final message = error.toString();
+          if (message.contains('Invalid Status Code: 404') ||
+              message.contains('Invalid Status Code: 403')) {
             rethrow;
           }
-          if (e.toString().contains("Invalid Status Code: 403")) {
-            rethrow;
-          }
-          if (e.toString().contains("handshake")) {
-            if (retryTime < 5) {
-              retryTime = 5;
-            }
+          if (message.contains('handshake') && retryTime < 5) {
+            retryTime = 5;
           }
           retryTime <<= 1;
-          if (retryTime > (1 << 3) || stop) {
-            rethrow;
-          }
-          await Future.delayed(Duration(seconds: retryTime));
+          if (retryTime > (1 << 3) || stop) rethrow;
+          await Future<void>.delayed(Duration(seconds: retryTime));
         }
       }
 
-      if (stop) {
-        throw const _ImageLoadingStopException();
-      }
-
-      if (data!.isEmpty) {
-        throw Exception("Empty image data");
-      }
+      if (stop) throw const _ImageLoadingStopException();
+      if (data == null || data.isEmpty) throw Exception('Empty image data');
 
       try {
         final buffer = await ImmutableBuffer.fromUint8List(data);
-        return await decode(
+        return decode(
           buffer,
           getTargetSize: enableResize ? _getTargetSize : null,
         );
-      } catch (e) {
-        await CacheManager().delete(this.key);
+      } catch (error) {
+        await evictInvalidCache();
         if (data.length < 2 * 1024) {
-          // data is too short, it's likely that the data is text, not image
+          String? text;
           try {
-            var text =
-                const Utf8Codec(allowMalformed: false).decoder.convert(data);
-            throw Exception("Expected image data, but got text: $text");
-          } catch (e) {
-            // ignore
+            text = const Utf8Codec(allowMalformed: false).decode(data);
+          } on FormatException {
+            // Binary data; preserve the original decoder error.
+          }
+          if (text != null) {
+            throw Exception('Expected image data, but got text: $text');
           }
         }
         rethrow;
       }
     } on _ImageLoadingStopException {
       rethrow;
-    } catch (e, s) {
+    } catch (error, stackTrace) {
       scheduleMicrotask(() {
         PaintingBinding.instance.imageCache.evict(key);
       });
-      Log.error("Image Loading", e, s);
+      Log.error('Image Loading', error, stackTrace);
       rethrow;
     } finally {
-      chunkEvents.close();
+      if (!chunkEvents.isClosed) await chunkEvents.close();
     }
   }
+
+  /// Override when the provider uses a cache key different from [key], or when
+  /// invalid transformed output must not evict the original network bytes.
+  Future<void> evictInvalidCache() => CacheManager().delete(key);
 
   Future<Uint8List> load(
     StreamController<ImageChunkEvent> chunkEvents,
@@ -143,17 +133,14 @@ abstract class BaseImageProvider<T extends BaseImageProvider<T>>
   String get key;
 
   @override
-  bool operator ==(Object other) {
-    return other is BaseImageProvider<T> && key == other.key;
-  }
+  bool operator ==(Object other) =>
+      other is BaseImageProvider<T> && key == other.key;
 
   @override
   int get hashCode => key.hashCode;
 
   @override
-  String toString() {
-    return "$runtimeType($key)";
-  }
+  String toString() => '$runtimeType($key)';
 
   bool get enableResize => false;
 }

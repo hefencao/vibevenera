@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 (int, int) _calculateWebPTargetSize(BuildContext context) {
   final mq = MediaQuery.of(context);
@@ -106,15 +106,18 @@ void _onWebPPageChanged({
   pipeline.setTargetSize(targetWidth, targetHeight);
   pipeline.onWindowChanged =
       (currentKey, decodeNextKeys, decodePrevKeys, downloadOnlyKeys) {
-    if (cache == null) return;
-    cache.setActivePages(
-      [
-        currentKey,
-        ...decodeNextKeys,
-        ...decodePrevKeys,
-      ].where((key) => key.isNotEmpty),
-    );
-  };
+        if (cache == null) return;
+        String cacheKey(String imageKey) => targetWidth > 0 || targetHeight > 0
+            ? '$imageKey@${targetWidth}x$targetHeight'
+            : imageKey;
+        cache.setActivePages(
+          [
+            currentKey,
+            ...decodeNextKeys,
+            ...decodePrevKeys,
+          ].where((key) => key.isNotEmpty).map(cacheKey),
+        );
+      };
   pipeline.onPageRangeChanged(
     currentIdx: currentPageIndex,
     images: images,

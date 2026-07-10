@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 class DecoderManager {
   static final DecoderManager instance = DecoderManager._();

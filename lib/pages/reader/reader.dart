@@ -30,7 +30,7 @@ import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart'
 import 'package:venera/foundation/image_provider/pipeline/pipeline_controller.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
 import 'package:venera/foundation/image_provider/pipeline/resource_entry.dart';
-import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/foundation/image_provider/webp_image.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';

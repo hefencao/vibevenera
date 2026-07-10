@@ -1,4 +1,4 @@
-part of '../webp_image_provider.dart';
+part of '../webp_image.dart';
 
 class HolderDecodeService {
   final webp.WorkerPoolScheduler _pool = webp.WorkerPoolScheduler.instance;

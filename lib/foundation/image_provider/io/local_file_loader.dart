@@ -8,10 +8,8 @@ import 'package:venera/foundation/log.dart';
 /// Delegates to `File()` — on Android, `_IOOverrides.createFile`
 /// transparently handles SAF paths.
 ///
-/// Returns null if not a local file, needs network loading.
-///
-/// For files larger than 1MB, use Isolate.run to avoid blocking
-/// the main isolate during synchronous filesystem work.
+/// IMPORTANT: the file:// prefix is intentionally preserved. IOOverride owns
+/// its interpretation; converting it to a URI/path here can break SAF access.
 Future<Uint8List?> tryLoadLocalFile(String imageKey) async {
   if (imageKey.contains('://') && !imageKey.startsWith('file://')) return null;
 
@@ -24,11 +22,11 @@ Future<Uint8List?> tryLoadLocalFile(String imageKey) async {
 
     if (fileSize > 1024 * 1024 && !isFileScheme) {
       final path = file.path;
-      return await Isolate.run(() => File(path).readAsBytesSync());
+      return Isolate.run(() => File(path).readAsBytesSync());
     }
-    return await file.readAsBytes();
-  } catch (e) {
-    Log.error('Local file load failed for $imageKey', e);
+    return file.readAsBytes();
+  } catch (error, stackTrace) {
+    Log.error('Local file load failed for $imageKey', error, stackTrace);
     return null;
   }
 }

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:venera/foundation/image_provider/webp_image_provider.dart';
+import 'package:venera/foundation/image_provider/webp_image.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/trace_log.dart';
@@ -30,8 +30,7 @@ class WebPStreamDecodeCoordinator {
     String? sourceKey,
     String cid,
     String eid,
-  ) =>
-      ImageDownloader.isLoadingComicImage(imageKey, sourceKey, cid, eid);
+  ) => ImageDownloader.isLoadingComicImage(imageKey, sourceKey, cid, eid);
 
   void markDownloadStale(ResourceEntry entry) {
     final holder = DecoderManager.instance.getHolder(entry.fullKey);
@@ -50,7 +49,8 @@ class WebPStreamDecodeCoordinator {
     if (!entry.policy.allowDecode || !entry.policy.allowGpuUpload) return null;
     if (!_attached.add(entry.fullKey)) return null;
     final existingHolder = DecoderManager.instance.getHolder(entry.fullKey);
-    DecoderHolder? holder = existingHolder != null &&
+    DecoderHolder? holder =
+        existingHolder != null &&
             !existingHolder.disposed &&
             existingHolder.decoder.isStreaming &&
             !existingHolder.decoder.streamIsComplete
@@ -93,6 +93,7 @@ class WebPStreamDecodeCoordinator {
       holder?.releaseStreamOwner('pipeline');
       if (holder == null && d != null && !d.isDisposed) d.dispose();
     }
+
     _disposers[entry.fullKey] = dispose;
 
     void onEvent(ImageDownloadProgress event) {
@@ -200,6 +201,7 @@ class WebPStreamDecodeCoordinator {
         }
       }
     }
+
     return (onEvent: onEvent, dispose: dispose);
   }
 
@@ -235,7 +237,8 @@ class WebPStreamDecodeCoordinator {
     late StreamSubscription<ImageDownloadProgress> sub;
     sub = stream.listen(
       (event) {
-        final active = entry.download.inProgress &&
+        final active =
+            entry.download.inProgress &&
             entry.policy.allowDecode &&
             entry.policy.allowGpuUpload &&
             !entry.hasBytes;
@@ -270,7 +273,8 @@ class WebPStreamDecodeCoordinator {
     for (final fullKey in _subs.keys.toList()) {
       final imageKey = _baseKey(fullKey);
       final entry = resources.get(fullKey);
-      final active = entry != null &&
+      final active =
+          entry != null &&
           ((entry.download.inProgress && !entry.hasBytes) ||
               activeImageKeys.contains(imageKey));
       if (!active) detach(fullKey);

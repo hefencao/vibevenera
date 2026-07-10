@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
@@ -132,22 +133,31 @@ class PipelineController {
     int preloadCount = 5,
   }) {
     final contextChanged =
-        !identical(_images, images) ||
+        !_sameImages(_images, images) ||
         _cid != cid ||
         _eid != eid ||
         _sourceKey != sourceKey;
+    final pageChanged = !_hasCurrentIdx || currentIdx != _currentIdx;
+    final preloadChanged = _preloadCount != preloadCount;
     if (contextChanged && _images.isNotEmpty) {
       _detachPolicyScope();
       _sessionId++;
     }
-    _images = images;
+    if (contextChanged) {
+      // Keep an immutable snapshot. Reader widgets commonly rebuild a new List
+      // instance on every page change; object identity must not define a reader
+      // session or all policy leases will be torn down on every swipe.
+      _images = List<String>.unmodifiable(images);
+    }
     _cid = cid;
     _eid = eid;
     _sourceKey = sourceKey;
     _preloadCount = preloadCount;
-    _currentBufferedFrames = 0;
-    _windowKey = -1;
-    _windowRuleIndex = -1;
+    if (contextChanged || pageChanged || preloadChanged) {
+      _currentBufferedFrames = 0;
+      _windowKey = -1;
+      _windowRuleIndex = -1;
+    }
     if (contextChanged) {
       _hasCurrentIdx = false;
       _jumpProtectionTimer?.cancel();
@@ -167,22 +177,28 @@ class PipelineController {
     int preloadCount = 5,
   }) {
     final contextChanged =
-        !identical(_images, images) ||
+        !_sameImages(_images, images) ||
         _cid != cid ||
         _eid != eid ||
         _sourceKey != sourceKey;
+    final pageChanged = !_hasCurrentIdx || currentIdx != _currentIdx;
+    final preloadChanged = _preloadCount != preloadCount;
     if (contextChanged && _images.isNotEmpty) {
       _detachPolicyScope();
       _sessionId++;
     }
-    _images = images;
+    if (contextChanged) {
+      _images = List<String>.unmodifiable(images);
+    }
     _cid = cid;
     _eid = eid;
     _sourceKey = sourceKey;
     _preloadCount = preloadCount;
-    _currentBufferedFrames = 0;
-    _windowKey = -1;
-    _windowRuleIndex = -1;
+    if (contextChanged || pageChanged || preloadChanged) {
+      _currentBufferedFrames = 0;
+      _windowKey = -1;
+      _windowRuleIndex = -1;
+    }
     if (contextChanged || !_hasCurrentIdx) {
       _hasCurrentIdx = true;
       _stableIdx = currentIdx;
@@ -290,9 +306,8 @@ class PipelineController {
     }
 
     // Ensure entries exist
-    String fullKey(String k) => _targetW > 0 || _targetH > 0
-        ? '$k@${_targetW}x$_targetH'
-        : k;
+    String fullKey(String k) =>
+        _targetW > 0 || _targetH > 0 ? '$k@${_targetW}x$_targetH' : k;
     for (final key in {
       _currentKey,
       ..._nearKeys,
@@ -312,6 +327,7 @@ class PipelineController {
 
     _applyPolicies();
     _syncPolicyLeases();
+    _syncCurrentDownloadProgress();
 
     onWindowChanged?.call(_currentKey, _nearKeys, _prevKeys, {
       ..._farKeys,
@@ -419,11 +435,12 @@ class PipelineController {
       scopeId: scopeId,
       // The ImageStream is a display subscriber, not the page-policy owner.
       // Current/near promotion comes from _syncPolicyLeases; this baseline
-      // demand requests frame production but never starts or retains transport.
+      // demand is a low-priority safety net for standalone/first-build races.
+      // It still uses the same DownloadSession and never opens a second stream.
       demand: const WebPResourceDemand(
-        downloadPriority: 0,
+        downloadPriority: 60,
         decodePriority: 60,
-        allowDownload: false,
+        allowDownload: true,
         allowDecode: true,
         allowUpload: true,
         current: false,
@@ -444,10 +461,8 @@ class PipelineController {
       prevKeys: _prevKeys,
       farKeys: _farKeys,
       keepKeys: _keepKeys,
-      downloadRank: (entry, priority) => _downloadRank(
-        entry,
-        priority: priority,
-      ),
+      downloadRank: (entry, priority) =>
+          _downloadRank(entry, priority: priority),
       markDistant: markDistant,
     );
   }
@@ -458,9 +473,8 @@ class PipelineController {
     final liveFullKeys = <String>{};
     resources.forEach((entry) {
       final policy = entry.policy;
-      final demanded = policy.allowDownload ||
-          policy.allowDecode ||
-          policy.allowGpuUpload;
+      final demanded =
+          policy.allowDownload || policy.allowDecode || policy.allowGpuUpload;
       final downloadIdentity = DownloadIdentity(
         imageKey: entry.imageKey,
         sourceKey: entry.sourceKey,
@@ -492,11 +506,12 @@ class PipelineController {
       );
 
       var lease = _policyLeases[entry.fullKey];
-      final identityChanged = lease != null &&
+      final identityChanged =
+          lease != null &&
           (lease.download.identity != downloadIdentity ||
               lease.decode.identity != decodeIdentity);
       if (identityChanged) {
-        lease.detach();
+        lease!.detach();
         _policyLeases.remove(entry.fullKey);
         lease = null;
       }
@@ -533,20 +548,64 @@ class PipelineController {
     WebPTransportProgress progress,
   ) {
     for (final entry in resources.getAllForImage(identity.imageKey)) {
-      entry.download.updateProgress(
-        progress.currentBytes,
-        progress.totalBytes,
-      );
+      if (entry.sourceKey != identity.sourceKey ||
+          entry.cid != identity.cid ||
+          entry.eid != identity.eid) {
+        continue;
+      }
+      entry.download.updateProgress(progress.currentBytes, progress.totalBytes);
       entry.download.inProgress = !progress.done;
       if (progress.done) entry.download.lastError = null;
     }
+
+    // Old retained sessions may still finish after a chapter/source switch.
+    // Publish only when the complete DownloadIdentity matches the page that is
+    // current now; comparing imageKey alone can show another session's bytes.
+    final currentLease = _currentPolicyLease;
+    final isCurrentIdentity =
+        currentLease != null && currentLease.download.identity == identity;
     _progress.update(
       identity.imageKey,
       progress.currentBytes,
       progress.totalBytes,
-      currentKey: _currentKey,
+      currentKey: isCurrentIdentity ? identity.imageKey : '',
+      progressKey: identity.cacheKey,
       done: progress.done,
     );
+  }
+
+  WebPResourceLease? get _currentPolicyLease {
+    if (_currentKey.isEmpty) return null;
+    final fullKey = _targetW > 0 || _targetH > 0
+        ? '$_currentKey@${_targetW}x$_targetH'
+        : _currentKey;
+    return _policyLeases[fullKey];
+  }
+
+  void _syncCurrentDownloadProgress() {
+    if (_currentKey.isEmpty) {
+      _progress.syncCurrentSession(
+        imageKey: '',
+        progressKey: '',
+        snapshot: null,
+      );
+      return;
+    }
+    final lease = _currentPolicyLease;
+    _progress.syncCurrentSession(
+      imageKey: _currentKey,
+      progressKey: lease?.download.identity.cacheKey ?? _currentKey,
+      snapshot: lease?.download.snapshot,
+    );
+  }
+
+  static bool _sameImages(List<String> left, List<String> right) {
+    if (identical(left, right)) return true;
+    if (left.length != right.length) return false;
+    for (var i = 0; i < left.length; i++) {
+      if (left[i] != right[i]) return false;
+    }
+    return true;
   }
 
   int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
@@ -564,5 +623,4 @@ class PipelineController {
   }
 
   static String _flowKey(String key) => key.isEmpty ? '-' : key.split('/').last;
-
 }
