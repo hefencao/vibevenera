@@ -14,11 +14,14 @@ import 'resource_entry.dart';
 // 5. SchedulerTask — base with explicit lifecycle
 // ───────────────────────────────────────────────────────────────
 
+enum SchedulerLane { network, decode, upload }
+
 abstract class SchedulerTask {
   final String key;
   final int generation;
   int priority;
   bool cancelable;
+  SchedulerLane get lane;
 
   /// [FIX-7] Explicit lifecycle state.
   TaskState _state = TaskState.queued;
@@ -221,6 +224,9 @@ class DownloadTask extends PolicyAwareTask {
   bool _waitersCompleted = false;
   CancelToken? _cancelToken;
 
+  @override
+  SchedulerLane get lane => SchedulerLane.network;
+
   DownloadTask({
     required super.key,
     required super.generation,
@@ -394,6 +400,9 @@ class PrecreateTask extends PolicyAwareTask {
   final String? _sourceKey;
   final String _cid, _eid;
   final PrecreateHolderFactory _holderFactory;
+
+  @override
+  SchedulerLane get lane => SchedulerLane.decode;
 
   /// Completers waiting for the holder to be created.
   final List<Completer<dynamic>> _holderCompleters = [];

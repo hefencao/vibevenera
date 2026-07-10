@@ -237,6 +237,206 @@ typedef _WebPAnimStreamDecoderSetThreadLimitDart = void Function(
 typedef _WebPAnimStreamDecoderDeleteNative = Void Function(Pointer<Void> ctx);
 typedef _WebPAnimStreamDecoderDeleteDart = void Function(Pointer<Void> ctx);
 
+final class _NativeWebPSourceState extends Struct {
+  @Uint64()
+  external int epoch;
+  @Uint64()
+  external int expectedLength;
+  @Uint64()
+  external int committedLength;
+  @Uint64()
+  external int declaredLength;
+  @Uint64()
+  external int parsedOffset;
+  @Int32()
+  external int sealed;
+  @Int32()
+  external int failed;
+  @Int32()
+  external int lastError;
+  @Int32()
+  external int canvasWidth;
+  @Int32()
+  external int canvasHeight;
+  @Int32()
+  external int loopCount;
+  @Int32()
+  external int frameCount;
+  @Int32()
+  external int animated;
+}
+
+class NativeWebPSourceState {
+  final int epoch;
+  final int expectedLength;
+  final int committedLength;
+  final int declaredLength;
+  final int parsedOffset;
+  final bool sealed;
+  final bool failed;
+  final int lastError;
+  final int canvasWidth;
+  final int canvasHeight;
+  final int loopCount;
+  final int frameCount;
+  final bool animated;
+
+  const NativeWebPSourceState({
+    required this.epoch,
+    required this.expectedLength,
+    required this.committedLength,
+    required this.declaredLength,
+    required this.parsedOffset,
+    required this.sealed,
+    required this.failed,
+    required this.lastError,
+    required this.canvasWidth,
+    required this.canvasHeight,
+    required this.loopCount,
+    required this.frameCount,
+    required this.animated,
+  });
+}
+
+class NativeWebPFrameDescriptor {
+  final int payloadOffset;
+  final int payloadLength;
+  final int xOffset;
+  final int yOffset;
+  final int width;
+  final int height;
+  final int durationMs;
+  final int disposeMethod;
+  final int blendMethod;
+  final bool hasAlpha;
+
+  const NativeWebPFrameDescriptor({
+    required this.payloadOffset,
+    required this.payloadLength,
+    required this.xOffset,
+    required this.yOffset,
+    required this.width,
+    required this.height,
+    required this.durationMs,
+    required this.disposeMethod,
+    required this.blendMethod,
+    required this.hasAlpha,
+  });
+}
+
+abstract interface class WebPByteSource {
+  int get epoch;
+  bool get isDisposed;
+  NativeWebPSourceState get state;
+  void append(Uint8List bytes, {required int offset});
+  void seal();
+  void reset({int expectedLength = 0, required int epoch});
+  NativeWebPFrameDescriptor frameAt(int index);
+  void dispose();
+}
+
+final class _NativeWebPSourceFrame extends Struct {
+  @Uint64()
+  external int payloadOffset;
+  @Uint64()
+  external int payloadLength;
+  @Int32()
+  external int xOffset;
+  @Int32()
+  external int yOffset;
+  @Int32()
+  external int width;
+  @Int32()
+  external int height;
+  @Int32()
+  external int durationMs;
+  @Int32()
+  external int disposeMethod;
+  @Int32()
+  external int blendMethod;
+  @Int32()
+  external int hasAlpha;
+}
+
+typedef _WebPSourceNewNative = Pointer<Void> Function(Uint64, Uint64);
+typedef _WebPSourceNewDart = Pointer<Void> Function(int, int);
+typedef _WebPSourceReserveNative = Pointer<Uint8> Function(
+  Pointer<Void>, Uint64, Uint64, Uint64);
+typedef _WebPSourceReserveDart = Pointer<Uint8> Function(
+  Pointer<Void>, int, int, int);
+typedef _WebPSourceCommitNative = Int32 Function(
+  Pointer<Void>, Uint64, Uint64, Uint64);
+typedef _WebPSourceCommitDart = int Function(Pointer<Void>, int, int, int);
+typedef _WebPSourceSealNative = Int32 Function(Pointer<Void>, Uint64);
+typedef _WebPSourceSealDart = int Function(Pointer<Void>, int);
+typedef _WebPSourceResetNative = Int32 Function(
+  Pointer<Void>, Uint64, Uint64);
+typedef _WebPSourceResetDart = int Function(Pointer<Void>, int, int);
+typedef _WebPSourceGetStateNative = Int32 Function(
+  Pointer<Void>, Pointer<_NativeWebPSourceState>);
+typedef _WebPSourceGetStateDart = int Function(
+  Pointer<Void>, Pointer<_NativeWebPSourceState>);
+typedef _WebPSourceGetFrameNative = Int32 Function(
+  Pointer<Void>, Int32, Pointer<_NativeWebPSourceFrame>);
+typedef _WebPSourceGetFrameDart = int Function(
+  Pointer<Void>, int, Pointer<_NativeWebPSourceFrame>);
+typedef _WebPSourceDeleteNative = Void Function(Pointer<Void>);
+typedef _WebPSourceDeleteDart = void Function(Pointer<Void>);
+
+final class _NativeWebPPlaybackCursorState extends Struct {
+  @Uint64()
+  external int sourceEpoch;
+  @Uint64()
+  external int committedLength;
+  @Int32()
+  external int canvasWidth;
+  @Int32()
+  external int canvasHeight;
+  @Int32()
+  external int targetWidth;
+  @Int32()
+  external int targetHeight;
+  @Int32()
+  external int availableFrames;
+  @Int32()
+  external int nextFrame;
+  @Int32()
+  external int loopCount;
+  @Int32()
+  external int ready;
+  @Int32()
+  external int sourceSealed;
+  @Int32()
+  external int atAvailableEnd;
+  @Int32()
+  external int complete;
+  @Int32()
+  external int failed;
+  @Int32()
+  external int lastError;
+}
+
+typedef _WebPPlaybackCursorNewNative = Pointer<Void> Function(
+  Pointer<Void>, Int32, Int32);
+typedef _WebPPlaybackCursorNewDart = Pointer<Void> Function(
+  Pointer<Void>, int, int);
+typedef _WebPPlaybackCursorGetStateNative = Int32 Function(
+  Pointer<Void>, Pointer<_NativeWebPPlaybackCursorState>);
+typedef _WebPPlaybackCursorGetStateDart = int Function(
+  Pointer<Void>, Pointer<_NativeWebPPlaybackCursorState>);
+typedef _WebPPlaybackCursorGetFramesNative = Int32 Function(
+  Pointer<Void>, Int32, Pointer<Int64>);
+typedef _WebPPlaybackCursorGetFramesDart = int Function(
+  Pointer<Void>, int, Pointer<Int64>);
+typedef _WebPPlaybackCursorRestartNative = Int32 Function(Pointer<Void>);
+typedef _WebPPlaybackCursorRestartDart = int Function(Pointer<Void>);
+typedef _WebPPlaybackCursorSetThreadLimitNative = Void Function(
+  Pointer<Void>, Int32);
+typedef _WebPPlaybackCursorSetThreadLimitDart = void Function(
+  Pointer<Void>, int);
+typedef _WebPPlaybackCursorDeleteNative = Void Function(Pointer<Void>);
+typedef _WebPPlaybackCursorDeleteDart = void Function(Pointer<Void>);
+
 typedef _WebPInitNativeNative = Void Function();
 typedef _WebPInitNativeDart = void Function();
 
@@ -329,6 +529,20 @@ class _WebPBindings {
   late final _WebPAnimStreamDecoderGetFramesDart streamGetFrames;
   late final _WebPAnimStreamDecoderSetThreadLimitDart streamSetThreadLimit;
   late final _WebPAnimStreamDecoderDeleteDart streamDelete;
+  late final _WebPSourceNewDart sourceNew;
+  late final _WebPSourceReserveDart sourceReserve;
+  late final _WebPSourceCommitDart sourceCommit;
+  late final _WebPSourceSealDart sourceSeal;
+  late final _WebPSourceResetDart sourceReset;
+  late final _WebPSourceGetStateDart sourceGetState;
+  late final _WebPSourceGetFrameDart sourceGetFrame;
+  late final _WebPSourceDeleteDart sourceDelete;
+  late final _WebPPlaybackCursorNewDart cursorNew;
+  late final _WebPPlaybackCursorGetStateDart cursorGetState;
+  late final _WebPPlaybackCursorGetFramesDart cursorGetFrames;
+  late final _WebPPlaybackCursorRestartDart cursorRestart;
+  late final _WebPPlaybackCursorSetThreadLimitDart cursorSetThreadLimit;
+  late final _WebPPlaybackCursorDeleteDart cursorDelete;
   late final _WebPFreeBufferDart freeBuffer;
   late final _WebPNativePoolAcquireDart poolAcquire;
   late final _WebPInitNativeDart initNative;
@@ -374,6 +588,37 @@ class _WebPBindings {
         _WebPAnimStreamDecoderSetThreadLimitDart>('webp_anim_stream_decoder_set_thread_limit');
     streamDelete = _lib.lookupFunction<_WebPAnimStreamDecoderDeleteNative,
         _WebPAnimStreamDecoderDeleteDart>('webp_anim_stream_decoder_delete');
+    sourceNew = _lib.lookupFunction<_WebPSourceNewNative,
+        _WebPSourceNewDart>('webp_source_new');
+    sourceReserve = _lib.lookupFunction<_WebPSourceReserveNative,
+        _WebPSourceReserveDart>('webp_source_reserve');
+    sourceCommit = _lib.lookupFunction<_WebPSourceCommitNative,
+        _WebPSourceCommitDart>('webp_source_commit');
+    sourceSeal = _lib.lookupFunction<_WebPSourceSealNative,
+        _WebPSourceSealDart>('webp_source_seal');
+    sourceReset = _lib.lookupFunction<_WebPSourceResetNative,
+        _WebPSourceResetDart>('webp_source_reset');
+    sourceGetState = _lib.lookupFunction<_WebPSourceGetStateNative,
+        _WebPSourceGetStateDart>('webp_source_get_state');
+    sourceGetFrame = _lib.lookupFunction<_WebPSourceGetFrameNative,
+        _WebPSourceGetFrameDart>('webp_source_get_frame');
+    sourceDelete = _lib.lookupFunction<_WebPSourceDeleteNative,
+        _WebPSourceDeleteDart>('webp_source_delete');
+    cursorNew = _lib.lookupFunction<_WebPPlaybackCursorNewNative,
+        _WebPPlaybackCursorNewDart>('webp_playback_cursor_new');
+    cursorGetState = _lib.lookupFunction<_WebPPlaybackCursorGetStateNative,
+        _WebPPlaybackCursorGetStateDart>('webp_playback_cursor_get_state');
+    cursorGetFrames = _lib.lookupFunction<_WebPPlaybackCursorGetFramesNative,
+        _WebPPlaybackCursorGetFramesDart>('webp_playback_cursor_get_frames');
+    cursorRestart = _lib.lookupFunction<_WebPPlaybackCursorRestartNative,
+        _WebPPlaybackCursorRestartDart>('webp_playback_cursor_restart');
+    cursorSetThreadLimit = _lib.lookupFunction<
+        _WebPPlaybackCursorSetThreadLimitNative,
+        _WebPPlaybackCursorSetThreadLimitDart>(
+      'webp_playback_cursor_set_thread_limit',
+    );
+    cursorDelete = _lib.lookupFunction<_WebPPlaybackCursorDeleteNative,
+        _WebPPlaybackCursorDeleteDart>('webp_playback_cursor_delete');
     freeBuffer = _lib.lookupFunction<_WebPFreeBufferNative, _WebPFreeBufferDart>(
         'webp_free_buffer');
     initNative = _lib.lookupFunction<_WebPInitNativeNative,
@@ -547,6 +792,274 @@ WebPAnimDecoder? createStreamingAnimDecoder({
   final ctx = _bind.streamNew(targetWidth, targetHeight);
   if (ctx == Pointer.fromAddress(0)) return null;
   return WebPAnimDecoder._stream(bindings: _bind, ctx: ctx);
+}
+
+NativeWebPSource createNativeWebPSource({
+  int expectedLength = 0,
+  int epoch = 1,
+}) {
+  final handle = _bind.sourceNew(expectedLength, epoch);
+  if (handle == nullptr) throw StateError('Failed to create native WebP source');
+  return NativeWebPSource._(handle, epoch);
+}
+
+class NativeWebPSource implements WebPByteSource {
+  Pointer<Void> _handle;
+  int _epoch;
+
+  NativeWebPSource._(this._handle, this._epoch);
+
+  int get address => _handle.address;
+  @override
+  int get epoch => _epoch;
+  @override
+  bool get isDisposed => _handle == nullptr;
+
+  @override
+  void append(Uint8List bytes, {required int offset}) {
+    _checkActive();
+    if (bytes.isEmpty) return;
+    final target = _bind.sourceReserve(_handle, _epoch, offset, bytes.length);
+    if (target == nullptr) throw _sourceError('reserve');
+    target.asTypedList(bytes.length).setAll(0, bytes);
+    final result = _bind.sourceCommit(_handle, _epoch, offset, bytes.length);
+    if (result != 0) throw _sourceError('commit', result);
+  }
+
+  @override
+  void seal() {
+    _checkActive();
+    final result = _bind.sourceSeal(_handle, _epoch);
+    if (result != 0) throw _sourceError('seal', result);
+  }
+
+  @override
+  void reset({int expectedLength = 0, required int epoch}) {
+    _checkActive();
+    final result = _bind.sourceReset(_handle, expectedLength, epoch);
+    if (result != 0) throw _sourceError('reset', result);
+    _epoch = epoch;
+  }
+
+  @override
+  NativeWebPSourceState get state {
+    _checkActive();
+    final out = calloc<_NativeWebPSourceState>();
+    try {
+      final result = _bind.sourceGetState(_handle, out);
+      if (result != 0) throw StateError('Native WebP source state failed: $result');
+      final value = out.ref;
+      return NativeWebPSourceState(
+        epoch: value.epoch,
+        expectedLength: value.expectedLength,
+        committedLength: value.committedLength,
+        declaredLength: value.declaredLength,
+        parsedOffset: value.parsedOffset,
+        sealed: value.sealed != 0,
+        failed: value.failed != 0,
+        lastError: value.lastError,
+        canvasWidth: value.canvasWidth,
+        canvasHeight: value.canvasHeight,
+        loopCount: value.loopCount,
+        frameCount: value.frameCount,
+        animated: value.animated != 0,
+      );
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  @override
+  NativeWebPFrameDescriptor frameAt(int index) {
+    _checkActive();
+    final out = calloc<_NativeWebPSourceFrame>();
+    try {
+      final result = _bind.sourceGetFrame(_handle, index, out);
+      if (result != 0) throw StateError('Native WebP frame $index unavailable: $result');
+      final value = out.ref;
+      return NativeWebPFrameDescriptor(
+        payloadOffset: value.payloadOffset,
+        payloadLength: value.payloadLength,
+        xOffset: value.xOffset,
+        yOffset: value.yOffset,
+        width: value.width,
+        height: value.height,
+        durationMs: value.durationMs,
+        disposeMethod: value.disposeMethod,
+        blendMethod: value.blendMethod,
+        hasAlpha: value.hasAlpha != 0,
+      );
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_handle == nullptr) return;
+    _bind.sourceDelete(_handle);
+    _handle = nullptr;
+  }
+
+  StateError _sourceError(String operation, [int? result]) {
+    final current = state;
+    return StateError(
+      'Native WebP source $operation failed: '
+      '${result ?? current.lastError} epoch=${current.epoch} '
+      'committed=${current.committedLength}',
+    );
+  }
+
+  void _checkActive() {
+    if (_handle == nullptr) throw StateError('Native WebP source is disposed');
+  }
+}
+
+class NativeWebPPlaybackCursorState {
+  final int sourceEpoch;
+  final int committedLength;
+  final int canvasWidth;
+  final int canvasHeight;
+  final int targetWidth;
+  final int targetHeight;
+  final int availableFrames;
+  final int nextFrame;
+  final int loopCount;
+  final bool ready;
+  final bool sourceSealed;
+  final bool atAvailableEnd;
+  final bool complete;
+  final bool failed;
+  final int lastError;
+
+  const NativeWebPPlaybackCursorState({
+    required this.sourceEpoch,
+    required this.committedLength,
+    required this.canvasWidth,
+    required this.canvasHeight,
+    required this.targetWidth,
+    required this.targetHeight,
+    required this.availableFrames,
+    required this.nextFrame,
+    required this.loopCount,
+    required this.ready,
+    required this.sourceSealed,
+    required this.atAvailableEnd,
+    required this.complete,
+    required this.failed,
+    required this.lastError,
+  });
+}
+
+abstract interface class WebPFrameCursor {
+  int get address;
+  bool get isDisposed;
+  NativeWebPPlaybackCursorState get state;
+  List<WebPAnimFrameAddress> decodeFrames(int count);
+  void restart();
+  void setThreadLimit(int useThreads);
+  void dispose();
+}
+
+NativeWebPPlaybackCursor createNativeWebPPlaybackCursor(
+  NativeWebPSource source, {
+  required int targetWidth,
+  required int targetHeight,
+}) {
+  source._checkActive();
+  final handle = _bind.cursorNew(source._handle, targetWidth, targetHeight);
+  if (handle == nullptr) {
+    throw StateError('Failed to create native WebP playback cursor');
+  }
+  return NativeWebPPlaybackCursor._(handle);
+}
+
+final class NativeWebPPlaybackCursor implements WebPFrameCursor {
+  Pointer<Void> _handle;
+
+  NativeWebPPlaybackCursor._(this._handle);
+
+  @override
+  int get address => _handle.address;
+  @override
+  bool get isDisposed => _handle == nullptr;
+
+  @override
+  NativeWebPPlaybackCursorState get state {
+    _checkActive();
+    final out = calloc<_NativeWebPPlaybackCursorState>();
+    try {
+      final result = _bind.cursorGetState(_handle, out);
+      final value = out.ref;
+      if (result == -20) throw StateError('Native WebP cursor state failed: $result');
+      return NativeWebPPlaybackCursorState(
+        sourceEpoch: value.sourceEpoch,
+        committedLength: value.committedLength,
+        canvasWidth: value.canvasWidth,
+        canvasHeight: value.canvasHeight,
+        targetWidth: value.targetWidth,
+        targetHeight: value.targetHeight,
+        availableFrames: value.availableFrames,
+        nextFrame: value.nextFrame,
+        loopCount: value.loopCount,
+        ready: value.ready != 0,
+        sourceSealed: value.sourceSealed != 0,
+        atAvailableEnd: value.atAvailableEnd != 0,
+        complete: value.complete != 0,
+        failed: value.failed != 0,
+        lastError: value.lastError,
+      );
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  @override
+  List<WebPAnimFrameAddress> decodeFrames(int count) {
+    _checkActive();
+    if (count <= 0) throw ArgumentError.value(count, 'count');
+    final results = calloc<Int64>(count * 2);
+    try {
+      final decoded = _bind.cursorGetFrames(_handle, count, results);
+      if (decoded < 0) {
+        throw StateError('Native WebP cursor decode failed: $decoded');
+      }
+      return List.generate(
+        decoded,
+        (index) => WebPAnimFrameAddress(
+          address: results[index * 2],
+          durationMs: results[index * 2 + 1],
+        ),
+        growable: false,
+      );
+    } finally {
+      calloc.free(results);
+    }
+  }
+
+  @override
+  void restart() {
+    _checkActive();
+    final result = _bind.cursorRestart(_handle);
+    if (result != 0) throw StateError('Native WebP cursor restart failed: $result');
+  }
+
+  @override
+  void setThreadLimit(int useThreads) {
+    _checkActive();
+    _bind.cursorSetThreadLimit(_handle, useThreads);
+  }
+
+  @override
+  void dispose() {
+    if (_handle == nullptr) return;
+    _bind.cursorDelete(_handle);
+    _handle = nullptr;
+  }
+
+  void _checkActive() {
+    if (_handle == nullptr) throw StateError('Native WebP cursor is disposed');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

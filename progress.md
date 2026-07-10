@@ -15,6 +15,14 @@
 
 ### 重构进展
 
+- 已确认 `stream chunk gap`、holder detach/replay 和 visible/pipeline 双路径属于旧流式架构缺陷，停止继续修补 coordinator。
+- 已重写 WebP ARCHITECTURE/SPEC/PLAN，目标改为 native-owned authoritative source、稳定 Download/Decode Session、logical detach 和独立调度 lane。
+- 已开始实现最终 `NativeWebPSource` ABI：一次 ingress copy、epoch/offset 连续性、reserve/commit/reset/seal 和增量 RIFF/ANMF 索引。
+- 已增加 `DownloadSessionRegistry` 与 demand lease 基础；reader/display detach 只移除逻辑 demand，不执行清理或取消。
+- 已实现 `WebPPlaybackCursor` native ABI：source/index 与目标尺寸、合成画布、播放位置分离；cursor 持有 source 引用，source append 不再依赖 holder。
+- 已实现 `WebPDecodeSessionRegistry` 与独立 decode/upload demand revision；source commit 通过状态通知唤醒稳定 session，不回放历史 chunk。
+- 已将旧 `TaskScheduler` 拆成 network/decode/upload 独立 lane；decode/precreate 饱和不再占用 transport permit 或延迟 current 下载。
+- 已将 `ResourceEntry.executionEpoch` 拆为 download/decode/upload revision；decode/upload policy 变化不再使运行中的网络任务失效。
 - 已提交：`e1eb066 Improve WebP streaming download scheduling`。
 - 已生成 WebP 重构 ARCHITECTURE/SPEC。
 - `webp_image_provider.dart` 已用 `part` 拆分，主文件约 143 行。
@@ -33,16 +41,18 @@
 ## 关键决策
 
 - WebP 阅读器不是视频播放器模型；不同 WebP 高频切换，因此不采用全局 FrameQueue 作为主抽象。
-- 保留并强化每个 `DecoderHolder` 自己的 FrameBuffer / raw frame queue / streaming state。
+- 保留每个 WebP 自己的 FrameBuffer；holder 将收窄为帧输出，不再拥有 stream/download/native input 状态。
 - `FrameQueue` 只可作为内部 raw-frame 管道，不作为播放器对外模型。
-- 完全 Native Texture 播放器是长期可选 renderer backend，不作为当前第一阶段重构目标。
-- 第一阶段重构只做 `part/part of` 文件拆分，保持行为不变，避免 private API 大量 public 化。
+- source/decode/renderer 使用稳定接口；Native Texture 作为最终高性能 renderer backend，不得要求重写前两层。
+- detach 仅表示 lease/demand 撤销；pause、retain、evict 由 session reconciler 统一决定。
+- Dart 网络 chunk 直接复制一次到最终 native-owned storage，不建设临时 Dart ByteStore。
 - UI 进度显示应暴露真实状态，不用显示层平滑掩盖 cache/resume 问题。
 - Running download 离开窗口后应继续下载；只有并发压力下才按 rank 被高优任务抢占。
 
 ## 未完成的代办
 
-1. 继续按行为边界收窄 `PipelineController`：下一步优先拆出 work submission。
-2. 继续按行为边界收窄 IO：`image_loader.dart` 仍包含 disk cache 读取，后续可评估 cache/file/network loader 的接口收敛。
-3. 在行为稳定后评估 Android-only `NativeTextureRenderer` 原型。
-4. 对快速切页、拖动 slider、退出 reader 再进入、慢速 WebP partial 播放进行回归测试。
+1. 将现有网络下载迁移到唯一 DownloadSession/NativeWebPSource，并以 committedLength 作为 Range resume 唯一偏移。
+2. 将 pipeline policy 接入 DownloadSession/DecodeSession demand lease。
+3. 收窄 holder、迁移 visible display lease，删除 owner/history replay/resume 双路径。
+4. 完成 source/cursor Android 设备级增量解码与并发 append 回归。
+5. 在稳定 renderer 接口后实现 Android NativeTextureRenderer。

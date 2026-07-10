@@ -136,6 +136,7 @@ set(WEBP_DEMUX_SOURCES
 add_library(venera_webp SHARED
     # 我们的 C 封装层
     webp_decoder.c
+    webp_stream_source.c
 
     # libwebp 解码器
     ${WEBP_DEC_SOURCES}

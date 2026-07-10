@@ -258,10 +258,9 @@ class ResourceEntry {
   ResourcePolicy _policy = ResourcePolicy._none;
   ResourcePolicy get policy => _policy;
 
-  /// [FIX-2] Monotonic counter. Incremented ONLY when allowDownload
-  /// or allowDecode changes (not priority). Running tasks compare
-  /// their snapshot against this to detect permission revocation.
-  int executionEpoch = 0;
+  int downloadRevision = 0;
+  int decodeRevision = 0;
+  int uploadRevision = 0;
 
   Uint8List? bytes;
   dynamic holder; // DecoderHolder
@@ -302,11 +301,9 @@ class ResourceEntry {
   void updatePriority(PagePriority p) => _priority = p;
 
   void updatePolicy(ResourcePolicy newPolicy) {
-    // [FIX-2] Only increment epoch when execution permissions change
-    if (_policy.allowDownload != newPolicy.allowDownload ||
-        _policy.allowDecode != newPolicy.allowDecode) {
-      executionEpoch++;
-    }
+    if (_policy.allowDownload != newPolicy.allowDownload) downloadRevision++;
+    if (_policy.allowDecode != newPolicy.allowDecode) decodeRevision++;
+    if (_policy.allowGpuUpload != newPolicy.allowGpuUpload) uploadRevision++;
     _policy = newPolicy;
   }
 
@@ -334,18 +331,18 @@ class ResourceEntry {
 /// without touching Task code.
 class ExecutionContext {
   final ResourceEntry entry;
-  final int _capturedEpoch;
+  final int _downloadRevision;
+  final int _decodeRevision;
 
-  ExecutionContext(this.entry) : _capturedEpoch = entry.executionEpoch;
-
-  /// Whether the task is still allowed to continue.
-  bool get canContinue {
-    return entry.executionEpoch == _capturedEpoch;
-  }
+  ExecutionContext(this.entry)
+    : _downloadRevision = entry.downloadRevision,
+      _decodeRevision = entry.decodeRevision;
 
   /// Type-specific permission checks.
-  bool get downloadAllowed => canContinue && entry.policy.allowDownload;
-  bool get decodeAllowed => canContinue && entry.policy.allowDecode;
+  bool get downloadAllowed =>
+      entry.downloadRevision == _downloadRevision && entry.policy.allowDownload;
+  bool get decodeAllowed =>
+      entry.decodeRevision == _decodeRevision && entry.policy.allowDecode;
 
   /// The entry's current policy (read-only for tasks).
   ResourcePolicy get policy => entry.policy;

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "webp_stream_source.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,56 @@ uint8_t* webp_decode_scaled(const uint8_t* data, size_t size,
  */
 typedef struct WebPAnimContext WebPAnimContext;
 typedef struct WebPAnimStreamContext WebPAnimStreamContext;
+typedef struct WebPPlaybackCursor WebPPlaybackCursor;
+
+enum {
+    WEBP_CURSOR_OK = 0,
+    WEBP_CURSOR_INVALID = -20,
+    WEBP_CURSOR_STALE_SOURCE = -21,
+    WEBP_CURSOR_SOURCE_FAILED = -22,
+    WEBP_CURSOR_ALLOCATION_FAILED = -23,
+    WEBP_CURSOR_DECODE_FAILED = -24
+};
+
+typedef struct {
+    uint64_t source_epoch;
+    uint64_t committed_length;
+    int32_t canvas_width;
+    int32_t canvas_height;
+    int32_t target_width;
+    int32_t target_height;
+    int32_t available_frames;
+    int32_t next_frame;
+    int32_t loop_count;
+    int32_t ready;
+    int32_t source_sealed;
+    int32_t at_available_end;
+    int32_t complete;
+    int32_t failed;
+    int32_t last_error;
+} WebPPlaybackCursorState;
+
+WebPPlaybackCursor* webp_playback_cursor_new(
+    WebPSourceContext* source,
+    int target_width,
+    int target_height);
+
+int webp_playback_cursor_get_state(
+    WebPPlaybackCursor* cursor,
+    WebPPlaybackCursorState* out_state);
+
+int webp_playback_cursor_get_frames(
+    WebPPlaybackCursor* cursor,
+    int count,
+    int64_t* out_results);
+
+int webp_playback_cursor_restart(WebPPlaybackCursor* cursor);
+
+void webp_playback_cursor_set_thread_limit(
+    WebPPlaybackCursor* cursor,
+    int use_threads);
+
+void webp_playback_cursor_delete(WebPPlaybackCursor* cursor);
 
 /**
  * 创建动画解码器。

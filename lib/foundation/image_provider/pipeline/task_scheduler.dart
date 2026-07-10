@@ -125,29 +125,32 @@ class _MigrationManager {
 /// Execution layer. Knows only: queue, dispatch, concurrency.
 /// Policy decisions live in [PipelineController].
 /// Migration logic lives in [_MigrationManager].
-class TaskScheduler {
-  static final TaskScheduler instance = TaskScheduler._();
-  TaskScheduler._();
-
+class _TaskLaneScheduler {
   final _TaskRegistry _registry = _TaskRegistry();
   final _MigrationManager _migration = _MigrationManager();
   final List<SchedulerTask> _queue = [];
+  final int maxConcurrent;
+  final int preemptionThreshold;
+  final void Function(SchedulerTask task) onCompleted;
+  final void Function(SchedulerTask task) onFailed;
 
-  static const int _maxConcurrent = 3;
-  static const int _preemptionThreshold = 40;
-
-  // ── Public API ──────────────────────────────────────────────
+  _TaskLaneScheduler({
+    required this.maxConcurrent,
+    required this.preemptionThreshold,
+    required this.onCompleted,
+    required this.onFailed,
+  });
 
   void submit(SchedulerTask task) {
     task.setCompletionHandlers(
-      onCompleted: onTaskCompleted,
-      onFailed: onTaskFailed,
+      onCompleted: onCompleted,
+      onFailed: onFailed,
     );
     final existing = _registry.find(task.key);
     if (existing != null) {
       final int oldPriority = existing.priority;
       if (_shouldPreempt(existing, task, oldPriority)) {
-        _maybePreempt(existing, task, oldPriority);
+        _maybePreempt(existing, task);
         return;
       }
       _mergeWaiters(existing, task);
@@ -193,25 +196,17 @@ class TaskScheduler {
 
   int get pendingCount => _queue.length + _registry.runningCount;
   bool hasTask(String key) => _registry.contains(key);
-  int get maxConcurrent => _maxConcurrent;
   int get runningCount => _registry.runningCount;
-  int get runningDownloadCount =>
-      _registry.runningTasks.whereType<DownloadTask>().length;
-  int get queuedDownloadCount => _queue.whereType<DownloadTask>().length;
 
-  // ── Callbacks ───────────────────────────────────────────────
-
-  void onTaskCompleted(SchedulerTask task) {
+  void taskCompleted(SchedulerTask task) {
     _registry.remove(task.key);
     _dispatchNext();
   }
 
-  void onTaskFailed(SchedulerTask task) {
+  void taskFailed(SchedulerTask task) {
     _registry.remove(task.key);
     _dispatchNext();
   }
-
-  // ── Internal ────────────────────────────────────────────────
 
   void _sortQueue() => _queue.sort((a, b) => b.priority.compareTo(a.priority));
 
@@ -230,14 +225,14 @@ class TaskScheduler {
   ) {
     if (existing is DownloadTask && incoming is DownloadTask) return false;
     return existing.cancelable &&
-        incoming.priority - oldPriority >= _preemptionThreshold;
+        incoming.priority - oldPriority >= preemptionThreshold;
   }
 
   void _dispatchNext() {
     while (_queue.isNotEmpty) {
-      if (_registry.runningCount >= _maxConcurrent) {
+      if (_registry.runningCount >= maxConcurrent) {
         _preemptLowestRunningFor(_queue.first);
-        if (_registry.runningCount >= _maxConcurrent) return;
+        if (_registry.runningCount >= maxConcurrent) return;
       }
       final task = _queue.removeAt(0);
       _registry.promoteToRunning(task);
@@ -246,7 +241,7 @@ class TaskScheduler {
           task.execute();
         } catch (e, st) {
           Log.error('ImagePipeline.TaskScheduler', e, st);
-          onTaskFailed(task);
+          onFailed(task);
         }
       });
     }
@@ -255,7 +250,6 @@ class TaskScheduler {
   void _maybePreempt(
     SchedulerTask existing,
     SchedulerTask incoming,
-    int oldPriority,
   ) {
     existing.cancel();
     _queue.remove(existing);
@@ -275,9 +269,69 @@ class TaskScheduler {
       }
     }
     if (lowest == null) return;
-    if (incoming.priority - lowest.priority < _preemptionThreshold) return;
+    if (incoming.priority - lowest.priority < preemptionThreshold) return;
 
     lowest.cancel();
     _registry.remove(lowest.key);
   }
+}
+
+/// Independent network/decode/upload dispatch lanes. A decode/precreate task
+/// can no longer occupy a transport permit or delay a current-page download.
+class TaskScheduler {
+  static final TaskScheduler instance = TaskScheduler._();
+
+  late final Map<SchedulerLane, _TaskLaneScheduler> _lanes;
+
+  TaskScheduler._() {
+    _lanes = {
+      SchedulerLane.network: _createLane(3),
+      SchedulerLane.decode: _createLane(2),
+      SchedulerLane.upload: _createLane(2),
+    };
+  }
+
+  _TaskLaneScheduler _createLane(int maxConcurrent) => _TaskLaneScheduler(
+    maxConcurrent: maxConcurrent,
+    preemptionThreshold: 40,
+    onCompleted: onTaskCompleted,
+    onFailed: onTaskFailed,
+  );
+
+  void submit(SchedulerTask task) => _lanes[task.lane]!.submit(task);
+
+  void cancel(String key) {
+    for (final lane in _lanes.values) {
+      lane.cancel(key);
+    }
+  }
+
+  void migrateTasks(Set<String> activeKeys, Map<String, int> newPriorities) {
+    for (final lane in _lanes.values) {
+      lane.migrateTasks(activeKeys, newPriorities);
+    }
+  }
+
+  void clear() {
+    for (final lane in _lanes.values) {
+      lane.clear();
+    }
+  }
+
+  int get pendingCount =>
+      _lanes.values.fold(0, (sum, lane) => sum + lane.pendingCount);
+  bool hasTask(String key) => _lanes.values.any((lane) => lane.hasTask(key));
+  int get maxConcurrent => _lanes[SchedulerLane.network]!.maxConcurrent;
+  int get runningCount =>
+      _lanes.values.fold(0, (sum, lane) => sum + lane.runningCount);
+  int get runningDownloadCount =>
+      _lanes[SchedulerLane.network]!._registry.runningCount;
+  int get queuedDownloadCount =>
+      _lanes[SchedulerLane.network]!._queue.length;
+
+  void onTaskCompleted(SchedulerTask task) =>
+      _lanes[task.lane]!.taskCompleted(task);
+
+  void onTaskFailed(SchedulerTask task) =>
+      _lanes[task.lane]!.taskFailed(task);
 }

@@ -1,173 +1,175 @@
-# WebP Refactor Architecture
+# WebP Streaming Architecture
 
 ## Goal
 
-Split the current WebP playback implementation into small, testable modules without changing behavior first. The reader workload is not video-like: users frequently switch between different WebP files, jump pages, drag the slider, return to slow pages, and resume partially downloaded files. Therefore the core runtime model remains **per-WebP session + holder-level FrameBuffer**, not a single global video-style FrameQueue.
+Build a high-performance streaming WebP pipeline with one authoritative byte source, stable sessions, independent scheduling stages, and no visible/pipeline ownership races. The architecture must support slow downloads, partial looping, range resume, source switching, reader detach/re-entry, rapid page changes, and future native texture rendering without replacing its public session interfaces.
 
-## Non-goals for the first refactor
+## Core decisions
 
-- Do not replace the existing pipeline with a fully native Texture renderer in the first phase.
-- Do not introduce a global FrameQueue as the playback abstraction.
-- Do not make GIF/APNG/AVIF generic abstractions before WebP behavior is stable.
-- Do not run a large public/private API cleanup in the same step as file splitting.
+### Detach is logical
 
-## Current responsibilities that must be separated
-
-`webp_image_provider.dart` currently mixes:
-
-- Flutter `ImageProvider` entry point.
-- `ImageStreamCompleter` animation loop.
-- WebP decoder holder lifecycle.
-- Streaming download attach/resume logic.
-- Frame buffering and upload.
-- Decode worker dispatch.
-- Decoder manager and eviction.
-- Static/animated WebP branching.
-- Pipeline integration.
-
-## Key architecture decision: FrameBuffer over FrameQueue
-
-A video `FrameQueue` is optimized for one continuous stream. WebP reader playback is different:
-
-- Multiple WebP files are active in a dynamic current/next/prev/far window.
-- A page may become distant, keep downloading, then return to current.
-- Animated WebP loops; frames may need replay instead of one-shot consumption.
-- Partial data can produce several frames before the final bytes arrive.
-- Current/near/far policies require different watermarks.
-
-Target runtime:
+`detach` only removes a lease or demand from a session. It must not directly cancel a request, delete partial data, drop a decoder/holder, clear a cache, or reset native input.
 
 ```text
-PipelineController
-    ↓
-ResourceEntry
-    ↓
-WebPDecodeSession / WebPStreamSession
-    ↓
-DecoderHolder per fullKey
-    ↓
-WebPFrameBuffer per holder
-    ↓
-WebPImageStreamCompleter consumes current holder
+detachDisplay(lease)       -> remove display demand
+detachReader(sessionId)    -> remove reader policy demand
+detachDecode(lease)        -> remove decode demand
 ```
 
-`FrameQueue` may still exist internally as a raw-frame queue between native decode and UI upload, but it is not the public playback model.
+After demand changes, the session reconciler chooses `run`, `pause`, `retain`, or `evict` from the complete session state. Physical cleanup is an eviction result, never detach behavior.
 
-## Target module boundaries
+### One authoritative byte source
 
-Current split keeps WebP runtime in one Dart library via `part/part of`, but
-moves files by behavior/dependency directory:
+Each download identity `(imageKey, sourceKey, cid, eid)` has one `NativeWebPSource`. All progress, resume, decode and finalization derive from it. Broadcast event history is not a byte source.
+
+Every append is explicit and contiguous:
 
 ```text
-lib/foundation/image_provider/
-  webp_image_provider.dart              # WebPImageProvider entry / part directives
-  decoder/
-    webp_decoder_holder.dart            # WebP decoder holder lifecycle/state
-    webp_decode_service.dart            # WebP holder decode dispatch
-    webp_decoder_manager.dart           # WebP holder manager/eviction
-  runtime/
-    webp_common.dart                    # shared helpers and BufferedFrame
-    webp_frame_buffer.dart              # holder-owned frame/raw queues
-    webp_stream_session.dart            # visible streaming/resume
-    webp_playback_controller.dart       # animation loop/reload/resume control
-    webp_stream_completer.dart          # Flutter ImageStreamCompleter bridge
-  io/
-    image_loader.dart                   # generic local/cache/network byte loader
-    local_file_loader.dart              # generic local file / SAF-safe read path
-    network_loader.dart                 # generic ImageDownloader stream adapter
-    webp_provider_loader.dart           # WebP bytes/static/animated branching
-    webp_load_result.dart               # private WebP load result DTOs
-  pipeline/
-    webp_provider_static.dart           # WebP target/page/pipeline helpers
-  cache/
-    decoded_image_cache.dart            # facade for reader WebP caches
-    gpu_cache.dart                      # generic ui.Image L1 cache
-    byte_cache.dart                     # generic raw byte L2 cache
-    frame_cache.dart                    # generic RGBA frame L3 cache
+append(epoch, offset, bytes)
+offset == committedLength
 ```
 
-Pipeline/task scheduler is split by behavior and dependency boundary:
+Source changes increment `epoch`. Old-epoch writes are rejected. `seal` finalizes exactly the committed length.
+
+### Holder is output-only
+
+The holder exposes buffered frames and demand. It does not own the network stream, partial state, native input, playback owner, or resume behavior. Background task implementation is transparent to it.
+
+### Per-WebP FrameBuffer remains
+
+The reader is not a single video stream. Each `fullKey` keeps its own frame buffer and playback cursor. There is no global playback FrameQueue. Internal raw-frame and upload queues remain bounded.
+
+## Target data flow
 
 ```text
-lib/foundation/image_provider/pipeline/
-  resource_entry.dart           # Interaction/Page priority, ResourcePolicy, ResourceEntry, progress DTOs
-  resource_manager.dart         # ResourceManager and resource events
-  tasks.dart                    # SchedulerTask, DownloadTask, PrecreateTask, task I/O execution
-  task_scheduler.dart           # registry, migration, queue dispatch only
-  preload_policy.dart           # water-level and relative-page tables
-  pipeline_window.dart          # dynamic page window/offset calculation
-  pipeline_policy_applier.dart  # priority/policy application to ResourceEntry
-  download_progress_publisher.dart # current-page progress state and speed sampling
-  download_ranker.dart          # download priority score formula
-  prefetch_budget.dart          # platform-aware far-page byte budget
-  webp_stream_decode_coordinator.dart # WebP streaming decode attach/append/detach
-  pipeline_controller.dart      # window policy, rank, work submission orchestration
+Dart NetworkTransport
+        │ one ingress copy
+        ▼
+NativeWebPSource                         keyed by download identity
+  ├─ native-owned input storage
+  ├─ epoch / committed / expected / final
+  ├─ incremental RIFF/ANMF index
+  └─ partial/final persistence boundary
+        │ shared immutable source/index
+        ▼
+WebPDecodeSession                        keyed by fullKey/target size
+  ├─ NativePlaybackCursor
+  ├─ decode demand and scheduling
+  ├─ compositing state
+  └─ FrameHolder / FrameBuffer
+        │
+        ▼
+FrameRenderer
+  ├─ FlutterImageRenderer
+  └─ NativeTextureRenderer
+        │
+        ▼
+WebPImageProvider adapter / reader
 ```
 
-`TaskScheduler` must not depend on `WebPImageProvider`; WebP holder creation is injected into `PrecreateTask` through a holder factory. Generic files do not use a `webp_` prefix; WebP-specific files keep it.
+## Native source
 
-## Renderer backend model
+The first implementation uses the final native-owned storage model. A temporary Dart segmented byte cache is not introduced.
 
-Native Texture rendering is a future backend, not the first refactor target:
+```c
+WebPSource* webp_source_new(size_t expected_size, uint64_t epoch);
+uint8_t* webp_source_reserve(WebPSource*, uint64_t epoch,
+                             size_t offset, size_t length);
+int webp_source_commit(WebPSource*, uint64_t epoch,
+                       size_t offset, size_t length);
+int webp_source_seal(WebPSource*, uint64_t epoch);
+int webp_source_get_state(WebPSource*, WebPSourceState* out);
+void webp_source_reset(WebPSource*, size_t expected_size, uint64_t new_epoch);
+void webp_source_delete(WebPSource*);
+```
+
+Dio-owned Dart memory cannot safely be retained by native code. The transport copies each chunk once into the final reserved native region and immediately commits it. No temporary native input buffer or second decoder copy is allowed.
+
+The source stores offsets rather than long-lived pointers so storage growth cannot invalidate decode metadata. Expected length from HTTP or the RIFF header should allocate final capacity once. Unknown lengths use controlled growth under the source lock.
+
+## Incremental container index
+
+Repeated `WebPDemuxPartial` scans over a growing complete buffer are not the target implementation. `NativeWebPSource` incrementally parses RIFF chunks and records complete animation frames:
 
 ```text
-AnimatedFrameRenderer
-    ├── FlutterImageRenderer        # current ui.Image / ImageStreamCompleter path
-    └── NativeTextureRenderer       # future Android/iOS native texture path
+RIFF/WEBP -> VP8X -> ANIM -> ANMF descriptors
 ```
 
-The fully native renderer can bypass `decodeImageFromPixels`, `ImageInfo`, and `ImageStreamCompleter`, but it does not truly eliminate decoded pixel buffers: libwebp still produces pixels or a composited frame before GPU upload. It should be introduced after module boundaries are clean.
+Each descriptor contains frame payload offset/length, dimensions, offsets, duration, blend/dispose and alpha flags. Parsing advances monotonically from `parsedOffset`; incomplete trailing chunks remain pending until more bytes arrive.
 
-## Scheduler / pipeline decisions already made
+## Decode and playback cursor
 
-- Running downloads are not cancelled merely because they leave the active window.
-- Running out-of-window downloads receive a lower retained rank and can be preempted only under pressure.
-- Rank includes page priority, direction, active download count, in-progress bonus, and nonlinear progress boost.
-- Display progress should expose raw/cache/network state; it should not be cosmetically forced monotonic.
-
-## Refactor phases
-
-### Phase 1: no-behavior-change file split
-
-- Add `part` files for common types, holder, decode service, manager, stream completer.
-- Keep imports in `webp_image_provider.dart`.
-- Keep all private names private within the same library.
-- Validate with `dart analyze`.
-
-### Phase 2: extract WebPFrameBuffer
-
-Move buffer ownership out of `DecoderHolder`:
+Input/index state and playback state are separate native objects:
 
 ```text
-BufferedFrame queue          # uploaded ui.Image frames
-RawFrame queue               # native decoded frame addresses waiting upload
-Watermark helpers
-Dispose / clear / consume
-Restart/replay helpers
+WebPSource
+  bytes, metadata, frame descriptors, final state
+
+WebPPlaybackCursor
+  target size, frame index, loop index, composite canvas, scratch buffer
 ```
 
-### Phase 3: extract streaming session
+Appending only changes `WebPSource`. Partial looping only resets `WebPPlaybackCursor`. A source can serve multiple target-size cursors without duplicating compressed input.
 
-Move progressive download and resume logic into `WebPStreamSession` / `WebPStreamLoader`:
+## Session ownership
 
-- append chunk
-- skip already appended bytes
-- resume from partial cache
-- publish raw progress
-- mark stream active/closed/failed
+### DownloadSession
 
-### Phase 4: extract playback controller
+- One per download identity, provided by `DownloadSessionRegistry.getOrCreate`.
+- Owns transport state and `NativeWebPSource`.
+- Network preemption changes `receiving -> paused`; it does not destroy the source.
+- Same-source range resume appends at `committedLength` in the same epoch.
+- Source switching resets the source with a new epoch.
+- Completion validates and seals the source, then promotes partial storage atomically.
 
-Move timing and frame consumption out of `_WebPImageStreamCompleter`:
+### WebPDecodeSession
+
+- One per `fullKey`, provided by `DecodeSessionRegistry.getOrCreate`.
+- References one `NativeWebPSource` and owns one playback cursor.
+- Translates page policy into decode/upload demand.
+- Survives visible detach and temporary page-priority changes.
+- Publishes an immediate state snapshot followed by ordered frame/status events.
+
+### Display lease
+
+Visible UI obtains a display lease from the decode session. It does not start or join a download, append bytes, create a second decoder, or resume a stream. Releasing the lease is a logical detach.
+
+## Scheduling
+
+Scheduling stages are independent:
 
 ```text
-WebPPlaybackController
-    ↓
-PlaybackClock
-    ↓
-FrameScheduler
+NetworkScheduler  -> transport permits and download ranking
+DecodeScheduler   -> native worker pool and frame demand
+UploadScheduler   -> bounded Flutter/native renderer uploads
 ```
 
-### Phase 5: optional renderer backend
+Current download cannot be delayed by decode/precreate tasks occupying a shared concurrency pool. Download, decode and upload permissions have independent revisions; changing decode policy cannot invalidate a network task.
 
-Introduce `FlutterImageRenderer` first, then experiment with Android-only `NativeTextureRenderer`.
+Existing current/near/far window and frame watermarks remain. Current and near may stream-decode; far may download-only. Running downloads can continue outside the active window and may be paused under pressure without losing source state.
+
+## Stable renderer boundary
+
+Decode output is a native frame handle, not a hard-coded `ui.Image`:
+
+```dart
+abstract interface class FrameRenderer {
+  Future<RenderedFrame> submit(NativeFrameHandle frame);
+}
+```
+
+`FlutterImageRenderer` is the compatibility backend. `NativeTextureRenderer` can later replace it without changing download/source/decode session interfaces.
+
+## Removed architecture
+
+The completed refactor removes:
+
+- holder stream owner and visible/pipeline ownership arbitration;
+- visible download/bootstrap/resume streams;
+- `_SharedStream` history as decoder input;
+- inferred `currentBytes - chunk.length` offsets;
+- coordinator attach/detach/replay;
+- global holder waiters for stream results;
+- download/decode shared execution epochs and concurrency slots;
+- holder-managed download completion, resync and native input reset;
+- detach-triggered cancellation, holder dropping and cache clearing.

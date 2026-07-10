@@ -389,6 +389,34 @@ struct WebPAnimStreamContext {
     int use_threads;
 };
 
+struct WebPPlaybackCursor {
+    pthread_mutex_t mutex;
+    WebPSourceContext* source;
+    uint64_t source_epoch;
+    int request_w;
+    int request_h;
+    int orig_canvas_w;
+    int orig_canvas_h;
+    int target_w;
+    int target_h;
+    double scale_x;
+    double scale_y;
+    int next_frame;
+    int prev_dispose;
+    int prev_x;
+    int prev_y;
+    int prev_w;
+    int prev_h;
+    uint8_t* composite_canvas;
+    int canvas_stride;
+    uint8_t* frame_buf;
+    size_t frame_buf_size;
+    int use_threads;
+    int initialized;
+    int failed;
+    int last_error;
+};
+
 /* ================================================================
  * 辅助函数
  * ================================================================ */
@@ -656,6 +684,279 @@ void webp_anim_decoder_set_thread_limit(WebPAnimContext* ctx, int use_threads) {
 
 int webp_anim_decoder_alive_count(void) {
     return g_alive_contexts;
+}
+
+static int playback_cursor_fail(WebPPlaybackCursor* cursor, int error) {
+    cursor->failed = 1;
+    cursor->last_error = error;
+    return error;
+}
+
+static int playback_cursor_initialize_locked(WebPPlaybackCursor* cursor,
+                                             const WebPSourceState* source_state) {
+    if (cursor->initialized) return WEBP_CURSOR_OK;
+    if (source_state->epoch != cursor->source_epoch) {
+        return playback_cursor_fail(cursor, WEBP_CURSOR_STALE_SOURCE);
+    }
+    if (source_state->failed) {
+        return playback_cursor_fail(cursor, WEBP_CURSOR_SOURCE_FAILED);
+    }
+    if (source_state->canvas_width <= 0 || source_state->canvas_height <= 0) {
+        return WEBP_CURSOR_OK;
+    }
+    int target_w, target_h;
+    compute_scaled_dimensions(source_state->canvas_width,
+                              source_state->canvas_height,
+                              cursor->request_w,
+                              cursor->request_h,
+                              &target_w,
+                              &target_h);
+    size_t canvas_bytes = (size_t)target_w * target_h * 4;
+    cursor->composite_canvas = (uint8_t*)calloc(1, canvas_bytes);
+    if (!cursor->composite_canvas) {
+        return playback_cursor_fail(cursor, WEBP_CURSOR_ALLOCATION_FAILED);
+    }
+    cursor->orig_canvas_w = source_state->canvas_width;
+    cursor->orig_canvas_h = source_state->canvas_height;
+    cursor->target_w = target_w;
+    cursor->target_h = target_h;
+    cursor->scale_x = (double)target_w / source_state->canvas_width;
+    cursor->scale_y = (double)target_h / source_state->canvas_height;
+    cursor->canvas_stride = target_w * 4;
+    cursor->prev_dispose = -1;
+    cursor->initialized = 1;
+    g_alive_contexts++;
+    return WEBP_CURSOR_OK;
+}
+
+WebPPlaybackCursor* webp_playback_cursor_new(WebPSourceContext* source,
+                                             int target_width,
+                                             int target_height) {
+    if (!source || target_width <= 0 || target_height <= 0) return NULL;
+    WebPSourceState source_state;
+    if (webp_source_get_state(source, &source_state) != WEBP_SOURCE_OK ||
+        webp_source_retain(source) != WEBP_SOURCE_OK) {
+        return NULL;
+    }
+    WebPPlaybackCursor* cursor =
+        (WebPPlaybackCursor*)calloc(1, sizeof(WebPPlaybackCursor));
+    if (!cursor) {
+        webp_source_release(source);
+        return NULL;
+    }
+    pthread_mutex_init(&cursor->mutex, NULL);
+    cursor->source = source;
+    cursor->source_epoch = source_state.epoch;
+    cursor->request_w = target_width;
+    cursor->request_h = target_height;
+    cursor->prev_dispose = -1;
+    return cursor;
+}
+
+int webp_playback_cursor_get_state(WebPPlaybackCursor* cursor,
+                                   WebPPlaybackCursorState* out_state) {
+    if (!cursor || !out_state) return WEBP_CURSOR_INVALID;
+    pthread_mutex_lock(&cursor->mutex);
+    WebPSourceState source_state;
+    int source_result = webp_source_get_state(cursor->source, &source_state);
+    if (source_result != WEBP_SOURCE_OK) {
+        pthread_mutex_unlock(&cursor->mutex);
+        return WEBP_CURSOR_SOURCE_FAILED;
+    }
+    if (!cursor->failed) playback_cursor_initialize_locked(cursor, &source_state);
+    out_state->source_epoch = source_state.epoch;
+    out_state->committed_length = source_state.committed_length;
+    out_state->canvas_width = source_state.canvas_width;
+    out_state->canvas_height = source_state.canvas_height;
+    out_state->target_width = cursor->target_w;
+    out_state->target_height = cursor->target_h;
+    out_state->available_frames = source_state.frame_count;
+    out_state->next_frame = cursor->next_frame;
+    out_state->loop_count = source_state.loop_count;
+    out_state->ready = cursor->initialized;
+    out_state->source_sealed = source_state.sealed;
+    out_state->at_available_end =
+        cursor->next_frame >= source_state.frame_count;
+    out_state->complete = source_state.sealed &&
+        cursor->next_frame >= source_state.frame_count;
+    out_state->failed = cursor->failed || source_state.failed;
+    out_state->last_error = cursor->failed
+        ? cursor->last_error
+        : source_state.last_error;
+    pthread_mutex_unlock(&cursor->mutex);
+    return out_state->failed ? out_state->last_error : WEBP_CURSOR_OK;
+}
+
+static uint8_t* playback_cursor_decode_frame_locked(WebPPlaybackCursor* cursor,
+                                                    int* duration_ms) {
+    WebPSourceState source_state;
+    if (webp_source_get_state(cursor->source, &source_state) != WEBP_SOURCE_OK) {
+        playback_cursor_fail(cursor, WEBP_CURSOR_SOURCE_FAILED);
+        return NULL;
+    }
+    if (playback_cursor_initialize_locked(cursor, &source_state) != WEBP_CURSOR_OK ||
+        !cursor->initialized || cursor->next_frame >= source_state.frame_count) {
+        return NULL;
+    }
+
+    WebPSourceFrame frame;
+    const uint8_t* payload;
+    int acquire_result = webp_source_acquire_frame_data(
+        cursor->source, cursor->source_epoch, cursor->next_frame, &frame, &payload);
+    if (acquire_result != WEBP_SOURCE_OK) {
+        playback_cursor_fail(
+            cursor,
+            acquire_result == WEBP_SOURCE_STALE_EPOCH
+                ? WEBP_CURSOR_STALE_SOURCE
+                : WEBP_CURSOR_SOURCE_FAILED);
+        return NULL;
+    }
+
+    int f_x = (int)floor(frame.x_offset * cursor->scale_x);
+    int f_y = (int)floor(frame.y_offset * cursor->scale_y);
+    int f_w = (int)floor((frame.x_offset + frame.width) * cursor->scale_x) - f_x;
+    int f_h = (int)floor((frame.y_offset + frame.height) * cursor->scale_y) - f_y;
+    if (f_w <= 0) f_w = 1;
+    if (f_h <= 0) f_h = 1;
+    size_t needed = (size_t)f_w * f_h * 4 + 4096;
+    if (needed > cursor->frame_buf_size) {
+        uint8_t* frame_buf = (uint8_t*)realloc(cursor->frame_buf, needed);
+        if (!frame_buf) {
+            webp_source_release_frame_data(cursor->source);
+            playback_cursor_fail(cursor, WEBP_CURSOR_ALLOCATION_FAILED);
+            return NULL;
+        }
+        cursor->frame_buf = frame_buf;
+        cursor->frame_buf_size = needed;
+    }
+
+    WebPDecoderConfig cfg;
+    WebPInitDecoderConfig(&cfg);
+    cfg.options.use_scaling = 1;
+    cfg.options.scaled_width = f_w;
+    cfg.options.scaled_height = f_h;
+    cfg.options.use_threads =
+        (g_use_persistent_pool && cursor->use_threads > 1) ? 1 : 0;
+    cfg.output.colorspace = MODE_rgbA;
+    cfg.output.u.RGBA.rgba = cursor->frame_buf;
+    cfg.output.u.RGBA.stride = f_w * 4;
+    cfg.output.u.RGBA.size = cursor->frame_buf_size;
+    cfg.output.is_external_memory = 1;
+    VP8StatusCode decode_result = WebPDecode(payload, frame.payload_length, &cfg);
+    webp_source_release_frame_data(cursor->source);
+    if (decode_result != VP8_STATUS_OK || cfg.output.width <= 0 ||
+        cfg.output.height <= 0 || cfg.output.width > f_w || cfg.output.height > f_h) {
+        playback_cursor_fail(cursor, WEBP_CURSOR_DECODE_FAILED);
+        return NULL;
+    }
+
+    if (cursor->prev_dispose == WEBP_MUX_DISPOSE_BACKGROUND) {
+        clear_region(cursor->composite_canvas,
+                     cursor->canvas_stride,
+                     cursor->target_w,
+                     cursor->target_h,
+                     cursor->prev_x,
+                     cursor->prev_y,
+                     cursor->prev_w,
+                     cursor->prev_h);
+    }
+    composite_region(cursor->composite_canvas,
+                     cursor->canvas_stride,
+                     cursor->target_w,
+                     cursor->target_h,
+                     cursor->frame_buf,
+                     cfg.output.u.RGBA.stride,
+                     cfg.output.width,
+                     cfg.output.height,
+                     f_x,
+                     f_y,
+                     frame.blend_method,
+                     frame.has_alpha);
+    cursor->prev_x = f_x;
+    cursor->prev_y = f_y;
+    cursor->prev_w = cfg.output.width;
+    cursor->prev_h = cfg.output.height;
+    cursor->prev_dispose = frame.dispose_method;
+    cursor->next_frame++;
+
+    size_t canvas_bytes = (size_t)cursor->target_w * cursor->target_h * 4;
+    uint8_t* output = webp_native_pool_acquire(canvas_bytes);
+    if (!output) {
+        playback_cursor_fail(cursor, WEBP_CURSOR_ALLOCATION_FAILED);
+        return NULL;
+    }
+    memcpy(output, cursor->composite_canvas, canvas_bytes);
+    int duration = frame.duration_ms;
+    if (duration <= 10) duration = 100;
+    if (duration_ms) *duration_ms = duration;
+    return output;
+}
+
+int webp_playback_cursor_get_frames(WebPPlaybackCursor* cursor,
+                                    int count,
+                                    int64_t* out_results) {
+    if (!cursor || !out_results || count <= 0) return WEBP_CURSOR_INVALID;
+    pthread_mutex_lock(&cursor->mutex);
+    if (cursor->failed) {
+        int error = cursor->last_error;
+        pthread_mutex_unlock(&cursor->mutex);
+        return error;
+    }
+    int decoded = 0;
+    for (; decoded < count; decoded++) {
+        int duration = 0;
+        uint8_t* frame = playback_cursor_decode_frame_locked(cursor, &duration);
+        if (!frame) break;
+        out_results[decoded * 2] = (int64_t)(uintptr_t)frame;
+        out_results[decoded * 2 + 1] = duration;
+    }
+    int result = decoded > 0
+        ? decoded
+        : cursor->failed
+            ? cursor->last_error
+            : 0;
+    pthread_mutex_unlock(&cursor->mutex);
+    return result;
+}
+
+int webp_playback_cursor_restart(WebPPlaybackCursor* cursor) {
+    if (!cursor) return WEBP_CURSOR_INVALID;
+    pthread_mutex_lock(&cursor->mutex);
+    if (cursor->failed) {
+        int error = cursor->last_error;
+        pthread_mutex_unlock(&cursor->mutex);
+        return error;
+    }
+    cursor->next_frame = 0;
+    cursor->prev_dispose = -1;
+    if (cursor->composite_canvas) {
+        memset(cursor->composite_canvas,
+               0,
+               (size_t)cursor->target_w * cursor->target_h * 4);
+    }
+    pthread_mutex_unlock(&cursor->mutex);
+    return WEBP_CURSOR_OK;
+}
+
+void webp_playback_cursor_set_thread_limit(WebPPlaybackCursor* cursor,
+                                           int use_threads) {
+    if (!cursor) return;
+    pthread_mutex_lock(&cursor->mutex);
+    cursor->use_threads = use_threads;
+    pthread_mutex_unlock(&cursor->mutex);
+}
+
+void webp_playback_cursor_delete(WebPPlaybackCursor* cursor) {
+    if (!cursor) return;
+    pthread_mutex_lock(&cursor->mutex);
+    free(cursor->composite_canvas);
+    free(cursor->frame_buf);
+    if (cursor->initialized) g_alive_contexts--;
+    WebPSourceContext* source = cursor->source;
+    pthread_mutex_unlock(&cursor->mutex);
+    pthread_mutex_destroy(&cursor->mutex);
+    webp_source_release(source);
+    free(cursor);
 }
 
 static int stream_refresh_demux_locked(WebPAnimStreamContext* ctx) {
