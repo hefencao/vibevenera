@@ -30,7 +30,13 @@ void main() {
       targetHeight: 100,
     );
     final session = registry.getOrCreate(identity, createDownload(source));
-    session.attach(scopeId: 'reader', priority: 10, decode: true, upload: true);
+    session.attach(
+      scopeId: 'reader',
+      priority: 10,
+      current: true,
+      decode: true,
+      upload: true,
+    );
 
     registry.detachScope('reader');
 
@@ -55,6 +61,7 @@ void main() {
     final decode = session.attach(
       scopeId: 'decode',
       priority: 5,
+      current: false,
       decode: true,
       upload: false,
     );
@@ -63,14 +70,15 @@ void main() {
     final upload = session.attach(
       scopeId: 'upload',
       priority: 4,
+      current: false,
       decode: false,
       upload: true,
     );
     expect((session.decodeRevision, session.uploadRevision), (2, 2));
 
-    upload.update(priority: 7, decode: false, upload: true);
+    upload.update(priority: 7, current: false, decode: false, upload: true);
     expect((session.decodeRevision, session.uploadRevision), (2, 3));
-    upload.update(priority: 7, decode: true, upload: true);
+    upload.update(priority: 7, current: false, decode: true, upload: true);
     expect((session.decodeRevision, session.uploadRevision), (3, 3));
 
     decode.detach();

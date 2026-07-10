@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -6,7 +7,9 @@ import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
+import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/network/images.dart';
+import 'package:venera/network/webp_download_transport.dart';
 
 import 'resource_entry.dart';
 
@@ -22,6 +25,7 @@ abstract class SchedulerTask {
   int priority;
   bool cancelable;
   SchedulerLane get lane;
+  bool get retainWhenInactive => false;
 
   /// [FIX-7] Explicit lifecycle state.
   TaskState _state = TaskState.queued;
@@ -226,6 +230,8 @@ class DownloadTask extends PolicyAwareTask {
 
   @override
   SchedulerLane get lane => SchedulerLane.network;
+  @override
+  bool get retainWhenInactive => true;
 
   DownloadTask({
     required super.key,
@@ -370,6 +376,89 @@ class DownloadTask extends PolicyAwareTask {
       if (!c.isCompleted) c.completeError(error);
     }
     _completers.clear();
+  }
+}
+
+final class WebPDownloadTask extends SchedulerTask {
+  final DownloadSession session;
+  final WebPTransport transport;
+  final void Function(WebPTransportProgress progress)? onProgress;
+  final List<Completer<File>> _waiters = [];
+  CancelToken? _cancelToken;
+  bool _finished = false;
+
+  WebPDownloadTask({
+    required super.key,
+    required super.generation,
+    required super.priority,
+    required super.cancelable,
+    required this.session,
+    required this.transport,
+    this.onProgress,
+  });
+
+  @override
+  SchedulerLane get lane => SchedulerLane.network;
+  @override
+  bool get retainWhenInactive => true;
+
+  Future<File> register() {
+    final waiter = Completer<File>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  void mergeWaitersFrom(WebPDownloadTask incoming) =>
+      _waiters.addAll(incoming._waiters);
+
+  @override
+  void onDispatch() {
+    super.onDispatch();
+    session.markQueued();
+  }
+
+  @override
+  void execute() async {
+    if (isCancelled) return;
+    _cancelToken = CancelToken();
+    try {
+      final file = await transport.execute(
+        session,
+        cancelToken: _cancelToken,
+        onProgress: onProgress,
+      );
+      if (isCancelled) return;
+      _state = TaskState.completed;
+      _finished = true;
+      for (final waiter in _waiters) {
+        if (!waiter.isCompleted) waiter.complete(file);
+      }
+      _waiters.clear();
+      notifyCompleted();
+    } catch (error, stack) {
+      if (isCancelled) return;
+      _state = TaskState.failed;
+      _finished = true;
+      for (final waiter in _waiters) {
+        if (!waiter.isCompleted) waiter.completeError(error, stack);
+      }
+      _waiters.clear();
+      notifyFailed();
+    } finally {
+      _cancelToken = null;
+    }
+  }
+
+  @override
+  void cancel() {
+    if (_finished || isCancelled) return;
+    _cancelToken?.cancel('WebP transport paused');
+    super.cancel();
+    session.markPaused();
+    for (final waiter in _waiters) {
+      if (!waiter.isCompleted) waiter.completeError('WebP transport paused');
+    }
+    _waiters.clear();
   }
 }
 

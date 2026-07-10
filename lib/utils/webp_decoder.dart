@@ -1077,6 +1077,7 @@ class DecodeJob {
   final int decoderAddress;
   final int decoderEpoch;
   final bool isStreaming;
+  final bool usePlaybackCursor;
   final int framesToDecode;
   final int targetW;
   final int targetH;
@@ -1088,6 +1089,7 @@ class DecodeJob {
     required this.decoderAddress,
     this.decoderEpoch = 0,
     this.isStreaming = false,
+    this.usePlaybackCursor = false,
     required this.framesToDecode,
     required this.targetW,
     required this.targetH,
@@ -1151,7 +1153,6 @@ class WorkerPoolScheduler {
   }
 
   bool _isStale(DecodeJob job) =>
-      job.generation != _currentGeneration ||
       job.decoderEpoch != decoderEpoch(job.decoderAddress);
 
   /// 在 Worker Isolate 中异步创建解码器，主线程零 C 堆开销。
@@ -1273,6 +1274,7 @@ class WorkerPoolScheduler {
       final decoderAddress = data[1] as int;
       final count = data[2] as int;
       final isStreaming = data.length > 6 && data[6] == true;
+      final usePlaybackCursor = data.length > 7 && data[7] == true;
 
       try {
         if (decoderAddress == 0) {
@@ -1283,10 +1285,12 @@ class WorkerPoolScheduler {
         final ctx = Pointer<Void>.fromAddress(decoderAddress);
         // 单次 FFI 调用批量解码 N 帧，消除 per-frame FFI 往返开销
         final cResults = calloc<Int64>(count * 2);
-        var n = isStreaming
-            ? bindings.streamGetFrames(ctx, count, cResults)
-            : bindings.animGetFrames(ctx, count, cResults);
-        if (n <= 0 && !isStreaming) {
+        var n = usePlaybackCursor
+            ? bindings.cursorGetFrames(ctx, count, cResults)
+            : isStreaming
+                ? bindings.streamGetFrames(ctx, count, cResults)
+                : bindings.animGetFrames(ctx, count, cResults);
+        if (n <= 0 && !isStreaming && !usePlaybackCursor) {
           bindings.animReset(ctx);
           n = bindings.animGetFrames(ctx, count, cResults);
         }
@@ -1433,7 +1437,8 @@ class WorkerPoolScheduler {
     try {
       final replyPort = ReceivePort();
       port.send([replyPort.sendPort, job.decoderAddress, job.framesToDecode,
-                 job.targetW, job.targetH, job.generation, job.isStreaming]);
+                 job.targetW, job.targetH, job.generation, job.isStreaming,
+                 job.usePlaybackCursor]);
 
       final result = await replyPort.first;
       replyPort.close();

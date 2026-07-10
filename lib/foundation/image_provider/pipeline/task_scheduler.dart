@@ -111,7 +111,7 @@ class _MigrationManager {
     // when a high-priority current/near task needs the slot.
     for (final t in registry.runningNotIn(activeKeys)) {
       if (!t.cancelable) continue;
-      if (t is DownloadTask) continue;
+      if (t.retainWhenInactive) continue;
       t.cancel();
       registry.remove(t.key);
     }
@@ -212,6 +212,8 @@ class _TaskLaneScheduler {
 
   void _mergeWaiters(SchedulerTask existing, SchedulerTask incoming) {
     if (existing is DownloadTask && incoming is DownloadTask) {
+      existing.mergeWaitersFrom(incoming);
+    } else if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
       existing.mergeWaitersFrom(incoming);
     } else if (existing is PrecreateTask && incoming is PrecreateTask) {
       existing.mergeWaitersFrom(incoming);

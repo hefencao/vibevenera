@@ -115,6 +115,24 @@ class CacheManager {
     checkCacheIfRequired();
   }
 
+  Future<File> promoteFile(String key, File source,
+      [int duration = 7 * 24 * 60 * 60 * 1000]) async {
+    await delete(key);
+    dir = (dir + 1) % 100;
+    final name = md5.convert(key.codeUnits).toString();
+    final target = File('$cachePath/$dir/$name');
+    await target.parent.create(recursive: true);
+    final size = await source.length();
+    final promoted = await source.rename(target.path);
+    final expires = DateTime.now().millisecondsSinceEpoch + duration;
+    _db.execute('''
+      INSERT OR REPLACE INTO cache (key, dir, name, expires) VALUES (?, ?, ?, ?)
+    ''', [key, dir.toString(), name, expires]);
+    if (_currentSize != null) _currentSize = _currentSize! + size;
+    checkCacheIfRequired();
+    return promoted;
+  }
+
   /// Find cache by key.
   /// If cache is expired, it will be deleted and return null.
   /// If cache is not found, it will return null.

@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:venera/foundation/image_provider/session/download_session.dart';
+import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
+
+import 'webp_frame_holder.dart';
 
 final class WebPDecodeIdentity {
   final String fullKey;
@@ -34,6 +37,7 @@ final class WebPDecodeSessionSnapshot {
   final int uploadDemandCount;
   final int decodeRevision;
   final int uploadRevision;
+  final WebPFrameHolderSnapshot frames;
 
   const WebPDecodeSessionSnapshot({
     required this.download,
@@ -44,6 +48,7 @@ final class WebPDecodeSessionSnapshot {
     required this.uploadDemandCount,
     required this.decodeRevision,
     required this.uploadRevision,
+    required this.frames,
   });
 }
 
@@ -56,8 +61,12 @@ final class WebPDecodeDemandLease {
 
   bool get attached => _session?._hasDemand(_id) == true;
 
-  void update({required int priority, required bool decode, required bool upload}) =>
-      _session?._updateDemand(_id, priority, decode, upload);
+  void update({
+    required int priority,
+    required bool current,
+    required bool decode,
+    required bool upload,
+  }) => _session?._updateDemand(_id, priority, current, decode, upload);
 
   void detach() {
     final session = _session;
@@ -70,16 +79,24 @@ final class WebPDecodeDemandLease {
 final class _WebPDecodeDemand {
   final String scopeId;
   int priority;
+  bool current;
   bool decode;
   bool upload;
 
-  _WebPDecodeDemand(this.scopeId, this.priority, this.decode, this.upload);
+  _WebPDecodeDemand(
+    this.scopeId,
+    this.priority,
+    this.current,
+    this.decode,
+    this.upload,
+  );
 }
 
 final class WebPDecodeSession {
   final WebPDecodeIdentity identity;
   final DownloadSession download;
   final webp.WebPFrameCursor cursor;
+  late final WebPFrameHolder holder;
   final void Function(WebPDecodeSession session) _reconcile;
   final Map<int, _WebPDecodeDemand> _demands = {};
   final StreamController<WebPDecodeSessionSnapshot> _states =
@@ -96,6 +113,7 @@ final class WebPDecodeSession {
     required this.cursor,
     required void Function(WebPDecodeSession session) reconcile,
   }) : _reconcile = reconcile {
+    holder = WebPFrameHolder(onDemand: () => _reconcile(this));
     _downloadSubscription = download.states.listen((_) {
       _publish();
       _reconcile(this);
@@ -111,6 +129,7 @@ final class WebPDecodeSession {
       _demands.values.where((demand) => demand.upload).length;
   bool get shouldDecode => decodeDemandCount > 0;
   bool get shouldUpload => uploadDemandCount > 0;
+  bool get isCurrent => _demands.values.any((demand) => demand.current);
   int get desiredPriority =>
       _demands.values.fold(0, (a, b) => a > b.priority ? a : b.priority);
   int get decodePriority => _demands.values
@@ -131,11 +150,13 @@ final class WebPDecodeSession {
     uploadDemandCount: uploadDemandCount,
     decodeRevision: _decodeRevision,
     uploadRevision: _uploadRevision,
+    frames: holder.snapshot,
   );
 
   WebPDecodeDemandLease attach({
     required String scopeId,
     required int priority,
+    required bool current,
     required bool decode,
     required bool upload,
   }) {
@@ -143,7 +164,13 @@ final class WebPDecodeSession {
     final beforeDecode = _decodePolicy;
     final beforeUpload = _uploadPolicy;
     final id = ++_nextDemandId;
-    _demands[id] = _WebPDecodeDemand(scopeId, priority, decode, upload);
+    _demands[id] = _WebPDecodeDemand(
+      scopeId,
+      priority,
+      current,
+      decode,
+      upload,
+    );
     _demandChanged(beforeDecode, beforeUpload);
     return WebPDecodeDemandLease._(this, id, scopeId);
   }
@@ -152,6 +179,7 @@ final class WebPDecodeSession {
     _checkActive();
     if (!shouldDecode) throw StateError('Decode session has no decode demand');
     final frames = cursor.decodeFrames(count);
+    _acceptFrames(frames);
     _publish();
     return frames;
   }
@@ -159,6 +187,8 @@ final class WebPDecodeSession {
   void restartCursor() {
     _checkActive();
     cursor.restart();
+    holder.clearRawFrames();
+    holder.clearRenderedFrames();
     _publish();
     _reconcile(this);
   }
@@ -168,21 +198,30 @@ final class WebPDecodeSession {
     if (_demands.isNotEmpty) throw StateError('Cannot evict a demanded decode session');
     _disposed = true;
     _downloadSubscription.cancel();
+    holder.dispose();
     cursor.dispose();
     _states.close();
   }
 
-  void _updateDemand(int id, int priority, bool decode, bool upload) {
+  void _updateDemand(
+    int id,
+    int priority,
+    bool current,
+    bool decode,
+    bool upload,
+  ) {
     _checkActive();
     final demand = _demands[id];
     if (demand == null) return;
-    if (demand.priority == priority && demand.decode == decode &&
+    if (demand.priority == priority && demand.current == current &&
+        demand.decode == decode &&
         demand.upload == upload) {
       return;
     }
     final beforeDecode = _decodePolicy;
     final beforeUpload = _uploadPolicy;
     demand.priority = priority;
+    demand.current = current;
     demand.decode = decode;
     demand.upload = upload;
     _demandChanged(beforeDecode, beforeUpload);
@@ -217,6 +256,11 @@ final class WebPDecodeSession {
   ) {
     if (beforeDecode != _decodePolicy) _decodeRevision++;
     if (beforeUpload != _uploadPolicy) _uploadRevision++;
+    holder.updateDemand(WebPFrameDemand(
+      current: isCurrent,
+      decode: shouldDecode,
+      upload: shouldUpload,
+    ));
     _publish();
     _reconcile(this);
   }
@@ -227,6 +271,23 @@ final class WebPDecodeSession {
 
   void _checkActive() {
     if (_disposed) throw StateError('Decode session is evicted');
+  }
+
+  void _acceptFrames(List<webp.WebPAnimFrameAddress> frames) {
+    if (frames.isEmpty) return;
+    final state = cursor.state;
+    if (!state.ready || state.targetWidth <= 0 || state.targetHeight <= 0) {
+      for (final frame in frames) {
+        webp.nativePoolRelease(frame.address);
+      }
+      throw StateError('Playback cursor produced frames before target size');
+    }
+    holder.addRawFrames(frames.map((frame) => NativeFrameHandle(
+      address: frame.address,
+      width: state.targetWidth,
+      height: state.targetHeight,
+      durationMs: frame.durationMs,
+    )));
   }
 }
 
