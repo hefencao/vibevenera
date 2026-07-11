@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -28,19 +27,23 @@ class WebPTextureChannel {
     return _channel.invokeMethod<int>('create');
   }
 
-  /// 用一帧 Premultiplied RGBA8888 像素更新纹理内容。
+  /// 用一帧 Premultiplied RGBA8888 更新纹理内容。
+  ///
+  /// [address] 是 native 帧像素的地址（int64）。像素字节不进 Dart、不经 MethodChannel
+  /// 序列化——native 侧（webp_texture_blit.c）直接从该地址 memcpy 进 Surface。
+  /// 调用方必须保证该地址指向的 native 帧在本 Future 完成前存活。
   Future<void> update(
     int textureId,
     int width,
     int height,
-    Uint8List pixels,
+    int address,
   ) {
     if (!isSupported) return Future<void>.value();
     return _channel.invokeMethod<void>('update', <String, dynamic>{
       'textureId': textureId,
       'width': width,
       'height': height,
-      'pixels': pixels,
+      'address': address,
     });
   }
 

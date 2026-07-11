@@ -137,6 +137,7 @@ add_library(venera_webp SHARED
     # 我们的 C 封装层
     webp_decoder.c
     webp_stream_source.c
+    webp_texture_blit.c    # 动图 native texture 零拷贝 blit（JNI + ANativeWindow）
 
     # libwebp 解码器
     ${WEBP_DEC_SOURCES}
@@ -145,8 +146,8 @@ add_library(venera_webp SHARED
     ${WEBP_DEMUX_SOURCES}
 )
 
-# 链接 Android log 库
-target_link_libraries(venera_webp log)
+# 链接 Android log 库 + android（ANativeWindow）供 native texture blit 使用
+target_link_libraries(venera_webp log android)
 
 # 输出库名为 libvenera_webp.so
 set_target_properties(venera_webp PROPERTIES

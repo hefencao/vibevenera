@@ -1192,6 +1192,23 @@ ImageProvider _createImageProviderFromKey(
   BuildContext context,
 ) {
   var reader = context.reader;
+
+  // 非 webp（绝大多数漫画页是 jpg/png）走轻量 ReaderImageProvider 快路径：
+  // Flutter 标准 fetch→codec，无流式管线、无 50ms 回退硬等。仅疑似 webp（可能是
+  // 动图）才进 WebPImageProvider 的流式/native texture 管线。判据按文件名，与
+  // WebPImageProvider.isLikelyWebP 一致；极少数 .jpg 后缀的动图 webp 会退化为
+  // 静态首帧，可接受。
+  if (!WebPImageProvider.isLikelyWebP(imageKey)) {
+    final page = reader.images?.indexOf(imageKey) ?? 0;
+    return ReaderImageProvider(
+      imageKey,
+      reader.type.comicSource?.key,
+      reader.cid,
+      reader.eid,
+      page < 0 ? 0 : page,
+    );
+  }
+
   final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
     context,
   );

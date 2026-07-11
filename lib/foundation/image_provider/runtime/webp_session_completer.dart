@@ -24,6 +24,18 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   bool _fallbackStarted = false;
   bool _fallbackPumping = false;
   int _fallbackFramesEmitted = 0;
+  // 诊断：本 provider 挂载时刻与各里程碑是否已上报，用于拆解「翻页→首帧」延迟
+  // 分别落在下载封口 / 首帧解码就绪 / 首帧显示 哪一段。
+  int _attachMs = 0;
+  bool _firstFrameReported = false;
+  bool _sealedReported = false;
+  bool _firstRenderedReported = false;
+
+  void _milestone(String name, bool Function() alreadyReported, void Function() mark) {
+    if (_attachMs == 0 || alreadyReported()) return;
+    mark();
+    WebPPerf.event(name, micros: (DateTime.now().millisecondsSinceEpoch - _attachMs) * 1000);
+  }
   ui.Codec? _fallbackCodec;
   bool _reportedTerminalError = false;
   int _lastChunkReportMs = 0;
@@ -33,7 +45,6 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   // native texture 播放状态（仅 Android 动图路径）。
   int? _textureId;
   bool _textureCreating = false;
-  bool _textureUploading = false;
 
   _WebPSessionImageStreamCompleter(this._provider)
     : _scopeId =
@@ -84,8 +95,19 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     if (state == ui.AppLifecycleState.resumed) _schedulePump();
   }
 
+  /// 首帧到达时上报「挂载→首帧」延迟一次。这是用户感知「翻页卡」的真正指标：
+  /// 帧率没掉，但下一页迟迟不出图。
+  void _reportFirstFrameLatency() {
+    if (_firstFrameReported || _attachMs == 0) return;
+    _firstFrameReported = true;
+    final latency = DateTime.now().millisecondsSinceEpoch - _attachMs;
+    WebPPerf.event('firstFrameLatency', micros: latency * 1000);
+  }
+
   void _attach() {
     if (_disposed || !hasListeners || _lease != null) return;
+    _attachMs = DateTime.now().millisecondsSinceEpoch;
+    _firstFrameReported = false;
     try {
       final lease = PipelineController.instance.acquireVisibleWebP(
         imageKey: _provider.imageKey,
@@ -154,7 +176,11 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         PipelineController.instance.updateCurrentBufferedFrames(buffered);
       }
     }
-    if (snapshot.renderedFrames > 0) _schedulePump();
+    if (snapshot.renderedFrames > 0) {
+      _milestone('lat.firstRendered',
+          () => _firstRenderedReported, () => _firstRenderedReported = true);
+      _schedulePump();
+    }
   }
 
   void _onDownloadState(DownloadSessionSnapshot snapshot) {
@@ -186,6 +212,8 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       return;
     }
     if (snapshot.transport == DownloadTransportState.sealed) {
+      _milestone('lat.sealed',
+          () => _sealedReported, () => _sealedReported = true);
       _schedulePump();
       if (snapshot.fallbackContent) {
         unawaited(_maybeDecodeFallback(snapshot));
@@ -261,6 +289,7 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
           final image = frame.detachImage();
           frame.dispose();
           WebPPerf.count('framePresented');
+          _reportFirstFrameLatency();
           setImage(ImageInfo(image: image, scale: _provider.scale));
         } else {
           frame.dispose();
@@ -306,16 +335,17 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       }
       final id = _textureId!;
       final w = frame.width, h = frame.height;
-      // Stage 2 已验证的 Uint8List 通路（每帧一次拷贝 + MethodChannel）。后续可换
-      // JNI 直读 native 地址消除这层拷贝。
-      final pixels = Uint8List.fromList(
-        Pointer<Uint8>.fromAddress(frame.address).asTypedList(w * h * 4),
-      );
-      frame.dispose();
+      // JNI 直读：只把 native 帧地址交给平台侧，native（webp_texture_blit.c）用
+      // ANativeWindow 直接 memcpy 进 Surface。像素字节不进 Dart、不经 MethodChannel
+      // 序列化，UI isolate 不再做 ~10MB/帧的整块拷贝。帧必须存活到 blit 完成，故
+      // dispose 放在 await 之后。
       WebPPerf.count('framePresented');
-      _textureUploading = true;
-      await WebPTextureChannel.instance.update(id, w, h, pixels);
-      _textureUploading = false;
+      _reportFirstFrameLatency();
+      try {
+        await WebPTextureChannel.instance.update(id, w, h, frame.address);
+      } finally {
+        frame.dispose();
+      }
       if (_disposed) {
         _disposeTexture();
         return;
@@ -326,7 +356,6 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       );
     } catch (error, stack) {
       _textureCreating = false;
-      _textureUploading = false;
       frame.dispose(); // idempotent
       _reportError(error, stack);
     }
@@ -428,6 +457,8 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
           frame.image.dispose();
           return;
         }
+        WebPPerf.count('framePresentedFallback');
+        _reportFirstFrameLatency();
         setImage(ImageInfo(image: frame.image, scale: _provider.scale));
         _fallbackFramesEmitted++;
 

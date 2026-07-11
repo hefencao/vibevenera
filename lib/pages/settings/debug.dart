@@ -31,14 +31,6 @@ class DebugPageState extends State<DebugPage> {
           },
           actionTitle: 'Open'.tl,
         ).toSliver(),
-        // 【临时】Stage 1 native texture 验证入口，收口阶段删除。
-        _CallbackSetting(
-          title: "WebP Texture Test",
-          callback: () {
-            context.to(() => const WebPTextureTestPage());
-          },
-          actionTitle: 'Open',
-        ).toSliver(),
         _SwitchSetting(
           title: "Ignore Certificate Errors".tl,
           settingKey: "ignoreBadCertificate",
