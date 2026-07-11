@@ -44,7 +44,9 @@ class PipelineWindowPlanner {
             preloadCount: preloadCount,
           )
         : existingRuleIndex;
-    final window = DynamicPreloadPolicy.windowAt(ruleIndex);
+    // 页集合用固定窗口，不随 ruleIndex 伸缩（避免近邻页反复进出 decode 集被清帧
+    // 重解）。ruleIndex 仍传出，仅供 FrameDepthTable 调每页目标帧深。
+    const window = DynamicPreloadPolicy.stableWindow;
     final currentKey = fk(currentIdx);
     final nearKeys = <String>{};
     final prevKeys = <String>{};

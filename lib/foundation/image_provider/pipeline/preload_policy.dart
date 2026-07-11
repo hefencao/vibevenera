@@ -134,8 +134,64 @@ final relativePageRules = <RelativePageRule>[
   RelativePageRule(pageClass: PreloadPageClass.keep, matches: _lastKeep),
 ];
 
+/// 每页目标缓冲帧深表（rank 水位）。用户验证过体验良好的原方案。
+///
+/// 行 = waterLevelRules 的 ruleIndex（0..4）。ruleIndexFor 按 buffered>=min 扫描
+/// [7,7,5,3,0]，故：index4=当前页缓冲<3，index3=≥3，index2=≥5，index1=≥7，
+/// index0=≥7且preloadCount≥7。恰好对应用户表由浅到深 5 档。
+///
+/// 列 = 阅读方向相对距离（readDist = offset * readDirection）：
+///   0=current，+1=next(n)，+2=next+1(m)，-1=prev(p)。其余距离目标 0（不预解，
+///   仅按 policy 下载/keep）——这正是用户表只列 c/n/m/p 的含义：更远的页只下载。
+///
+/// 「谁先解」不由此表决定（那是 rank/优先级的事）；此表只定「每页想要几帧」。
+/// 关键效果：index4（刚切页 current 缓冲<3）时 n/m/p 全 0 → 当前页首帧独占解码
+/// 资源、不排队，直击切页首帧延迟。
+class FrameDepthTable {
+  const FrameDepthTable._();
+
+  // index: 0(最深)..4(最浅)。列 = 阅读方向相对距离 readDist(0/+1/+2/-1)。
+  // 值随当前页缓冲档位(ruleIndex)由浅到深递增；ruleIndex4(当前页缓冲<3，刚切页/
+  // 播放告急)近邻全 0，当前页首帧/续帧独占解码。
+  static const List<int> _current = [7, 7, 5, 3, 3];
+  static const List<int> _next = [5, 3, 2, 1, 0]; // readDist +1
+  static const List<int> _nextNext = [3, 2, 1, 1, 0]; // readDist +2
+  static const List<int> _prev = [2, 2, 1, 1, 0]; // readDist -1
+
+  /// 返回某页在给定档位、给定阅读方向距离下的目标缓冲帧深。
+  static int targetFor({required int ruleIndex, required int readDist}) {
+    final i = ruleIndex.clamp(0, 4);
+    switch (readDist) {
+      case 0:
+        return _current[i];
+      case 1:
+        return _next[i];
+      case 2:
+        return _nextNext[i];
+      case -1:
+        return _prev[i];
+      default:
+        return 0;
+    }
+  }
+}
+
 class DynamicPreloadPolicy {
   const DynamicPreloadPolicy._();
+
+  /// 固定的「页分类窗口」：决定哪些页进 decode/download/keep 集合。**不随当前页
+  /// 缓冲档位(ruleIndex)伸缩**——伸缩会让近邻页反复进出 decode 集、被清帧重解
+  /// (水位档位抖动 churn 的根因)。每页「想解几帧」的深浅调节交给 FrameDepthTable
+  /// 按 ruleIndex 处理即可，页集合本身保持稳定。
+  ///
+  /// decodeNext=2/decodePrev=1 恰好覆盖 FrameDepthTable 有非零目标的 readDist
+  /// (+1/+2/-1)；更远的页只下载(downloadNext=7/downloadPrev=3 供预取)。
+  static const DynamicPreloadWindow stableWindow = DynamicPreloadWindow(
+    decodeNext: 2,
+    decodePrev: 1,
+    downloadNext: 7,
+    downloadPrev: 3,
+  );
 
   static DynamicPreloadWindow windowFor({
     required int currentBufferedFrames,

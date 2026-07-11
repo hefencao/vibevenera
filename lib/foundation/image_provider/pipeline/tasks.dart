@@ -595,6 +595,10 @@ final class WebPDecodeTask extends SchedulerTask {
     // native 侧解码线程绑大核（webp_decoder.c bind_current_thread_to_big_cores）。
     cursor.setThreadLimit(session.isCurrent ? 1 : 1);
     WebPPerf.count(session.isCurrent ? 'decodeDispatch.current' : 'decodeDispatch.near');
+    // 诊断：dispatch 时的需求构成，定位「播放页为何 isCurrent=false」。
+    WebPPerf.count(
+      'dispatchDemand.dc${session.demandCount}.cur${session.isCurrent ? 1 : 0}',
+    );
     _pool.dispatch(
       webp.DecodeJob(
         generation: generation,

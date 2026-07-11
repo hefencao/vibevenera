@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:venera/utils/trace_log.dart';
+import 'package:venera/utils/webp_perf.dart';
 
 /// WebP 图片格式信息
 class WebPImageInfo {
@@ -1155,6 +1156,12 @@ class WorkerPoolScheduler {
   final Set<int> _activeDecoders = {};
   final Map<int, int> _decoderEpochs = {};
 
+  // 为 current 页保留一个 worker：非 current（next/bg）解码最多占用 worker 数-1 个
+  // isolate，播放中的当前页续帧始终有一个 worker 可用，不被邻页预取批占满而饿死。
+  int _nonCurrentBusy = 0;
+  int get _workerCount => _workerPorts.length;
+
+
   // Round-robin counter for decoder creation (avoids worker 0 bottleneck)
   int _nextDecoderWorker = 0; // ignore: unused_field
 
@@ -1390,6 +1397,12 @@ class WorkerPoolScheduler {
       DecodeJob? job;
       Queue<DecodeJob>? sourceQueue;
 
+      var pickedIsCurrent = false;
+
+      // 为 current 保留一个 worker：非 current 解码已占满 (worker数-1) 时，本轮不
+      // 再取 next/bg，让空出的 worker 只服务 current 续帧。current 队列不受此限。
+      final allowNonCurrent = _nonCurrentBusy < _workerCount - 1;
+
       for (final w in [0, 1]) {
         if (_workerBusy[w]) continue;
 
@@ -1397,13 +1410,14 @@ class WorkerPoolScheduler {
         // A WebPAnimDecoder is stateful; never run two jobs for the same
         // native decoder concurrently, even if another worker is idle.
         final queues = [
-          (_currentQueue, DecodePriority.current),
-          (_nextQueue, DecodePriority.next),
-          (_bgQueue, DecodePriority.background),
+          (_currentQueue, true),
+          (_nextQueue, false),
+          (_bgQueue, false),
         ];
 
-        for (final (queue, _) in queues) {
+        for (final (queue, isCur) in queues) {
           if (queue.isEmpty) continue;
+          if (!isCur && !allowNonCurrent) continue;
           // Find first job in this queue whose decoder hashes to worker w
           for (final j in queue) {
             if (_activeDecoders.contains(j.decoderAddress)) continue;
@@ -1411,6 +1425,7 @@ class WorkerPoolScheduler {
               job = j;
               assignedWorker = w;
               sourceQueue = queue;
+              pickedIsCurrent = isCur;
               break;
             }
           }
@@ -1419,12 +1434,14 @@ class WorkerPoolScheduler {
 
         // Fallback: if no job hashes to worker w, take any job
         if (job == null) {
-          for (final (queue, _) in queues) {
+          for (final (queue, isCur) in queues) {
+            if (!isCur && !allowNonCurrent) continue;
             for (final j in queue) {
               if (_activeDecoders.contains(j.decoderAddress)) continue;
               job = j;
               assignedWorker = w;
               sourceQueue = queue;
+              pickedIsCurrent = isCur;
               break;
             }
             if (job != null) break;
@@ -1445,20 +1462,23 @@ class WorkerPoolScheduler {
         continue;
       }
 
-      _runJob(job, assignedWorker!);
+      if (!pickedIsCurrent) _nonCurrentBusy++;
+      _runJob(job, assignedWorker!, pickedIsCurrent);
     }
   }
 
-  void _runJob(DecodeJob job, int workerIndex) async {
+  void _runJob(DecodeJob job, int workerIndex, bool isCurrent) async {
     final port = _workerPorts[workerIndex];
     if (port == null) {
       _activeDecoders.remove(job.decoderAddress);
+      if (!isCurrent && _nonCurrentBusy > 0) _nonCurrentBusy--;
       job.onError?.call(StateError('WebP worker port is unavailable'));
       _scheduleNext();
       return;
     }
 
     _workerBusy[workerIndex] = true;
+    final decodeSw = Stopwatch()..start();
     try {
       final replyPort = ReceivePort();
       port.send([replyPort.sendPort, job.decoderAddress, job.framesToDecode,
@@ -1467,6 +1487,13 @@ class WorkerPoolScheduler {
 
       final result = await replyPort.first;
       replyPort.close();
+      // 诊断：单批解码往返耗时（含 isolate 通信）。除以 framesToDecode 得每帧解码
+      // 时长，与帧显示间隔比较即可判定「解码是否追得上播放」。
+      decodeSw.stop();
+      WebPPerf.event(
+        isCurrent ? 'decodeMs.cur' : 'decodeMs.near',
+        micros: decodeSw.elapsedMicroseconds,
+      );
       if (result is Int64List) {
         if (!_isStale(job)) {
           final List<WebPAnimFrameAddress> frames = [];
@@ -1500,6 +1527,7 @@ class WorkerPoolScheduler {
     } finally {
       _activeDecoders.remove(job.decoderAddress);
       _workerBusy[workerIndex] = false;
+      if (!isCurrent && _nonCurrentBusy > 0) _nonCurrentBusy--;
       _scheduleNext();
     }
   }

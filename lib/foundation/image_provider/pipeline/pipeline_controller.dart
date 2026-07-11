@@ -84,6 +84,7 @@ class PipelineController {
   int _sessionId = 0;
   int? _provisionalIdx;
   Timer? _jumpProtectionTimer;
+  Timer? _dragCommitTimer;
   List<String> _images = const [];
   String? _sourceKey;
   String _cid = '';
@@ -221,30 +222,48 @@ class PipelineController {
       _provisionalIdx = null;
     }
     _currentIdx = currentIdx;
-    _applyWindow(protectJump: true);
+    // customSlider 快拖（jumping）时，onChanged 每一格都会触发一次；若每格都立刻
+    // _applyWindow 就会为每个划过的页 acquire session/建下载解码，浪费资源。此处
+    // 唯一合理的「时长钳制」：拖动中把 window 应用防抖，只有停留超过窗口的页才落
+    // 实工作；离开 jumping（onChangeEnd→idle 走别的入口）会立即应用。
+    if (_interaction == InteractionState.jumping) {
+      _scheduleDragCommit();
+    } else {
+      _dragCommitTimer?.cancel();
+      _dragCommitTimer = null;
+      _applyWindow(protectJump: true);
+    }
+  }
+
+  static const Duration _dragCommitDelay = Duration(milliseconds: 180);
+
+  void _scheduleDragCommit() {
+    _dragCommitTimer?.cancel();
+    _dragCommitTimer = Timer(_dragCommitDelay, () {
+      _dragCommitTimer = null;
+      if (_images.isEmpty) return;
+      _applyWindow(protectJump: true);
+    });
   }
 
   void updateCurrentBufferedFrames(int frames) {
     if (_images.isEmpty) return;
+    _currentBufferedFrames = frames;
     final nextRule = DynamicPreloadPolicy.ruleIndexFor(
       currentBufferedFrames: frames,
       preloadCount: _preloadCount,
     );
+    if (nextRule == _windowRuleIndex) return;
+    // 档位向浅(nextRule 更大 = 缓冲下降)时加滞回，避免缓冲在阈值附近呼吸导致档位
+    // 抖动。向深(缓冲回升)立即生效，尽快让近邻页恢复较深目标。
     if (_windowRuleIndex >= 0 && nextRule > _windowRuleIndex) {
       final min = waterLevelRules[_windowRuleIndex].minBufferedFrames;
-      if (frames >= (min - 2).clamp(0, min)) {
-        _currentBufferedFrames = frames;
-        return;
-      }
+      if (frames >= (min - 2).clamp(0, min)) return;
     }
-    final window = DynamicPreloadPolicy.windowAt(nextRule);
-    if (window.key == _windowKey) {
-      _currentBufferedFrames = frames;
-      return;
-    }
-    _currentBufferedFrames = frames;
     _windowRuleIndex = nextRule;
-    _applyWindow(protectJump: _provisionalIdx != null);
+    // 页集合固定不变（stableWindow），ruleIndex 只影响每页目标帧深。所以这里只需
+    // 轻量重算 lease 需求(刷新 targetFrames)，不重建窗口页集合——消除 churn。
+    _syncPolicyLeases();
   }
 
   void _setCurrentIndex(int currentIdx) {
@@ -356,6 +375,8 @@ class PipelineController {
   void dispose() {
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
+    _dragCommitTimer?.cancel();
+    _dragCommitTimer = null;
     _detachPolicyScope();
     _sessionId++;
     _progress.reset();
@@ -369,6 +390,8 @@ class PipelineController {
     _sessionId++;
     _jumpProtectionTimer?.cancel();
     _jumpProtectionTimer = null;
+    _dragCommitTimer?.cancel();
+    _dragCommitTimer = null;
     _provisionalIdx = null;
     onWindowChanged = null;
     _progress.reset();
@@ -438,6 +461,11 @@ class PipelineController {
     required int targetHeight,
     required String scopeId,
   }) {
+    // 诊断：无条件打出显示 lease 挂载事件，isCur 位表示这页此刻是否被认为是当前页。
+    WebPPerf.count(
+      'visAttach.isCur${imageKey == _currentKey ? 1 : 0}'
+      '.sz${targetWidth}x$targetHeight',
+    );
     return _sessions.acquire(
       downloadIdentity: DownloadIdentity(
         imageKey: imageKey,
@@ -455,6 +483,12 @@ class PipelineController {
       // Current/near promotion comes from _syncPolicyLeases; this baseline
       // demand is a low-priority safety net for standalone/first-build races.
       // It still uses the same DownloadSession and never opens a second stream.
+      //
+      // decodeTargetFrames 必须 > 0：这是「正在屏幕上显示」的安全网。水位表
+      // (rank) 只覆盖 readDist 0/+1/+2/-1，落在其外但仍在显示的页（翻页边界、
+      // 双页第二张、快切后停在窗口边缘）若只靠 policy lease，目标会是 0 →
+      // needsDecode 永远 false → 无限转圈。给可见页保底 3 帧，保证一定能出图并
+      // 播放；真正的 current 页由 policy lease 把目标抬到水位表的 7。
       demand: const WebPResourceDemand(
         downloadPriority: 60,
         decodePriority: 60,
@@ -462,6 +496,7 @@ class PipelineController {
         allowDecode: true,
         allowUpload: true,
         current: false,
+        decodeTargetFrames: 3,
       ),
     );
   }
@@ -491,11 +526,18 @@ class PipelineController {
       WebPPerf.sync('syncPolicyLeases', _syncPolicyLeasesImpl);
 
   void _syncPolicyLeasesImpl() {
+    // 诊断：本次 sync 时 _currentKey 是否为空、resources 里是否存在等于它的 entry。
+    var sawCurrentEntry = false;
+    var currentUndemanded = false;
     final liveFullKeys = <String>{};
     resources.forEach((entry) {
       final policy = entry.policy;
       final demanded =
           policy.allowDownload || policy.allowDecode || policy.allowGpuUpload;
+      if (entry.imageKey == _currentKey) {
+        sawCurrentEntry = true;
+        if (!demanded) currentUndemanded = true;
+      }
       final downloadIdentity = DownloadIdentity(
         imageKey: entry.imageKey,
         sourceKey: entry.sourceKey,
@@ -517,13 +559,47 @@ class PipelineController {
       }
 
       liveFullKeys.add(entry.fullKey);
+
+      // rank 水位：按阅读方向相对距离查帧深表，得本页目标缓冲帧数。offset 是相对
+      // 当前页的原始带符号偏移；乘 readDirection 归一到「阅读方向上的距离」，前翻
+      // 后翻对称。current=0 / next=+1 / next+1=+2 / prev=-1，其余距离目标 0。
+      final offset = _offsetByKey[entry.imageKey] ?? _offsetFor(entry.imageKey);
+      final readDist = offset * _readDirection;
+      final targetFrames = policy.allowDecode
+          ? FrameDepthTable.targetFor(
+              ruleIndex: _windowRuleIndex < 0 ? 4 : _windowRuleIndex,
+              readDist: readDist,
+            )
+          : 0;
+      // 解码 rank 按阅读方向距离衰减，让近页先拿 worker（n>m>反向p）。current 不衰减。
+      // 注意 clamp(low, high) 要求 low<=high：当 policy.decodePriority==0（far/keep
+      // 等允许解码但优先级为 0 的页）时，clamp(1,0) 会抛 Invalid argument。此处对
+      // 优先级 <=1 的页直接透传原值，仅对 >1 的页做「衰减但不低于 1」。
+      final int decodePriority;
+      if (entry.priority == PagePriority.current || policy.decodePriority <= 1) {
+        decodePriority = policy.decodePriority;
+      } else {
+        decodePriority = (policy.decodePriority - readDist.abs() * 4)
+            .clamp(1, policy.decodePriority);
+      }
+
       final demand = WebPResourceDemand(
         downloadPriority: policy.allowDownload ? _downloadRank(entry) : 0,
-        decodePriority: policy.decodePriority,
+        decodePriority: decodePriority,
         allowDownload: policy.allowDownload,
         allowDecode: policy.allowDecode,
         allowUpload: policy.allowGpuUpload,
         current: entry.priority == PagePriority.current,
+        decodeTargetFrames: targetFrames,
+      );
+      // 诊断：无条件打出每个被建 lease 的 entry 的 priority/current/目标帧，
+      // 以及它 imageKey 是否等于 _currentKey（isCur 位）。定位「播放页为何不是
+      // current」——标记失败还是 identity 错位还是 _currentKey 本身不对。
+      WebPPerf.count(
+        'polLease.pri${entry.priority.index}'
+        '.cur${demand.current ? 1 : 0}'
+        '.tf$targetFrames'
+        '.isCur${entry.imageKey == _currentKey ? 1 : 0}',
       );
 
       var lease = _policyLeases[entry.fullKey];
@@ -554,6 +630,14 @@ class PipelineController {
       if (liveFullKeys.contains(fullKey)) continue;
       _policyLeases.remove(fullKey)?.detach();
     }
+    // 诊断：一次 sync 的结论。ck 空 / 未见当前 entry / 当前 entry 无需求，任一
+    // 都会让当前页拿不到解码 lease → 无图 / 走 near。
+    WebPPerf.count(
+      'syncCur.ckEmpty${_currentKey.isEmpty ? 1 : 0}'
+      '.saw${sawCurrentEntry ? 1 : 0}'
+      '.undemanded${currentUndemanded ? 1 : 0}'
+      '.ri$_windowRuleIndex',
+    );
   }
 
   void _detachPolicyScope() {

@@ -276,13 +276,45 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     _pumping = true;
     try {
       while (!_disposed && hasListeners && _isLifecycleActive) {
+        // 漫画阅读器只有当前可见页该「动」。PageView 为流畅翻页会保活近邻页的
+        // completer（仍 hasListeners），若不门控它们会在屏幕外把自己的动图循环
+        // 播起来 → 持续消费帧 → 缓冲见底 → 不停重解 → 抢当前页解码核，把当前页
+        // 解码从 <35ms 顶到 ~50ms。这是重构前 WebPPlaybackController._run 里
+        // 「_pauseIfInactive → 非当前页 continue、不 consumeFrame」被验证过的行为，
+        // 流式重构时丢掉了 → 回归。isCurrent 由策略租约的 current 标志聚合而来
+        // （current 页 true / 近邻页 false），visible 与策略租约共享同一 decode
+        // session，信号可靠。
+        //
+        // 关键：循环**不 return 退出**，只 poll 等待再 continue（复刻旧 _run 死循环）。
+        // 上一版把它写成 `return` → pump 一停就得靠事件重新 _schedulePump，翻页瞬间
+        // 若 current 标志尚未同步就永久冻死。poll 续转则天然自恢复：一旦变当前，下一
+        // 轮立即播；缺帧则等解码补上，都无需外部唤醒。
+        final isCurrentNow = _lease?.decode.isCurrent == true;
+        if (!isCurrentNow && _firstFrameReported) {
+          // 非当前页：已present过静态首帧，此后静止——不消费帧、不驱动重解、不抢核。
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          continue;
+        }
+
         final frame = holder.consumeFrame();
-        if (frame == null) return;
+        if (frame == null) {
+          // 播放中途 consumeFrame 拿不到帧 = 缓冲见底（解码没跟上）。这是「播放卡
+          // 顿」的直接信号，Flutter jankFrames 抓不到（native texture 原地更新）。
+          if (_firstFrameReported && isCurrentNow) WebPPerf.count('pumpStarved');
+          // 不退出：短 poll 等解码补帧，避免依赖事件链重启导致翻页后不自恢复。
+          await Future<void>.delayed(const Duration(milliseconds: 32));
+          continue;
+        }
 
         final duration = frame.durationMs <= 0
             ? 100
             : frame.durationMs.clamp(16, 1000).toInt();
+        // 诊断：帧意图显示间隔。与 decodeMs.cur/帧比较即可判定解码是否追得上播放。
+        WebPPerf.event('frameDurationMs', micros: duration * 1000);
 
+        // 测「present（含 blit/MethodChannel 往返）」耗时：它被加在每帧 duration 之
+        // 上，若不补偿会让播放变慢且节奏不匀 → 感知卡顿。
+        final presentSw = Stopwatch()..start();
         if (frame is NativeAddressFrameHandle) {
           await _presentTextureFrame(frame);
         } else if (frame is FlutterImageFrameHandle) {
@@ -298,6 +330,8 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
           );
           return;
         }
+        presentSw.stop();
+        WebPPerf.event('presentMs', micros: presentSw.elapsedMicroseconds);
 
         await Future<void>.delayed(
           Duration(

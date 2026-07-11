@@ -73,7 +73,15 @@ final class WebPDecodeDemandLease {
     required bool current,
     required bool decode,
     required bool upload,
-  }) => _session?._updateDemand(_id, priority, current, decode, upload);
+    int targetFrames = 0,
+  }) => _session?._updateDemand(
+    _id,
+    priority,
+    current,
+    decode,
+    upload,
+    targetFrames,
+  );
 
   void detach() {
     final session = _session;
@@ -89,6 +97,7 @@ final class _WebPDecodeDemand {
   bool current;
   bool decode;
   bool upload;
+  int targetFrames;
 
   _WebPDecodeDemand(
     this.scopeId,
@@ -96,6 +105,7 @@ final class _WebPDecodeDemand {
     this.current,
     this.decode,
     this.upload,
+    this.targetFrames,
   );
 }
 
@@ -209,6 +219,11 @@ final class WebPDecodeSession {
       _decodeBlockedAtCommittedLength == download.sourceCommittedLength &&
       holder.decodeInFlight == 0;
   bool get isCurrent => _demands.values.any((demand) => demand.current);
+  // 多个 demand 附着同一 session（可见 completer + policy lease）时，缓冲目标取最
+  // 贪的：任一 decode demand 要 N 帧就缓冲 N。
+  int get _aggregateTargetFrames => _demands.values
+      .where((demand) => demand.decode)
+      .fold(0, (a, b) => a > b.targetFrames ? a : b.targetFrames);
   int get desiredPriority =>
       _demands.values.fold(0, (a, b) => a > b.priority ? a : b.priority);
   int get decodePriority => _demands.values
@@ -245,6 +260,7 @@ final class WebPDecodeSession {
     required bool current,
     required bool decode,
     required bool upload,
+    int targetFrames = 0,
   }) {
     _checkActive();
     final beforeDecode = shouldDecode;
@@ -256,6 +272,7 @@ final class WebPDecodeSession {
       current,
       decode,
       upload,
+      targetFrames,
     );
     _demandChanged(beforeDecode, beforeUpload);
     return WebPDecodeDemandLease._(this, id, scopeId);
@@ -490,6 +507,7 @@ final class WebPDecodeSession {
     bool current,
     bool decode,
     bool upload,
+    int targetFrames,
   ) {
     _checkActive();
     final demand = _demands[id];
@@ -497,7 +515,8 @@ final class WebPDecodeSession {
     if (demand.priority == priority &&
         demand.current == current &&
         demand.decode == decode &&
-        demand.upload == upload) {
+        demand.upload == upload &&
+        demand.targetFrames == targetFrames) {
       return;
     }
     final beforeDecode = shouldDecode;
@@ -506,6 +525,7 @@ final class WebPDecodeSession {
     demand.current = current;
     demand.decode = decode;
     demand.upload = upload;
+    demand.targetFrames = targetFrames;
     _demandChanged(beforeDecode, beforeUpload);
   }
 
@@ -550,6 +570,7 @@ final class WebPDecodeSession {
         // Settling may disable upload while still decoding. Keep already decoded
         // native frames so policy changes do not force a decode loop.
         retainRaw: shouldDecode || shouldUpload,
+        targetFrames: _aggregateTargetFrames,
       ),
     );
     _schedulePublish();

@@ -9,11 +9,16 @@ final class WebPFrameDemand {
   final bool upload;
   final bool retainRaw;
 
+  /// 本页目标缓冲帧深（rank 水位表按 offset+阅读方向+当前页缓冲档位算出）。
+  /// 0 表示不预解（仅下载/keep）。holder 缓冲 < 目标才继续解码。
+  final int targetFrames;
+
   const WebPFrameDemand({
     required this.current,
     required this.decode,
     required this.upload,
     required this.retainRaw,
+    this.targetFrames = 0,
   });
 }
 
@@ -38,8 +43,9 @@ final class WebPFrameHolderSnapshot {
 /// Rendering-side state only. It deliberately knows nothing about transport,
 /// source reset, resume, stream ownership, or cache persistence.
 final class WebPFrameHolder {
-  static const int currentTarget = 7;
-  static const int nearTarget = 5;
+  /// 无 demand 时的兜底目标（正常情况下 demand.targetFrames 覆盖它）。current
+  /// 页至少要 1 帧才能出图；具体水位由 PipelineController 按 rank 表下发。
+  static const int fallbackCurrentTarget = 1;
 
   final Queue<NativeFrameHandle> _raw = Queue();
   final Queue<RenderedFrameHandle> _rendered = Queue();
@@ -88,7 +94,12 @@ final class WebPFrameHolder {
   bool get hasRawFrames => _raw.isNotEmpty;
   bool get hasRenderedFrames => _rendered.isNotEmpty;
   bool get isDisposed => _disposed;
-  int get targetFrameCount => _demand.current ? currentTarget : nearTarget;
+  int get targetFrameCount {
+    // demand 带来的水位目标优先；缺省时给 current 页最低 1 帧兜底（保证能出首帧），
+    // 非 current 页缺省 0（不预解）。
+    if (_demand.targetFrames > 0) return _demand.targetFrames;
+    return _demand.current ? fallbackCurrentTarget : 0;
+  }
   bool get needsDecode =>
       !_disposed &&
       _demand.decode &&
@@ -111,14 +122,18 @@ final class WebPFrameHolder {
     if (_demand.current == demand.current &&
         _demand.decode == demand.decode &&
         _demand.upload == demand.upload &&
-        _demand.retainRaw == demand.retainRaw) {
+        _demand.retainRaw == demand.retainRaw &&
+        _demand.targetFrames == demand.targetFrames) {
       return;
     }
+    final wasDecodable = _demand.decode || _demand.upload;
     _demand = demand;
     if (!demand.retainRaw) clearRawFrames();
     // Download-only/far demand retains the cursor and source, not expensive
     // uploaded frame resources. This is buffer trimming, not holder eviction.
-    if (!demand.decode && !demand.upload) clearRenderedFrames();
+    // 仅在「真正从可解码降级为不可解码」时清帧；targetFrames 变化(仍可解码)绝不清
+    // 帧，否则近邻页目标深浅调节会反复丢弃已解帧 → 无谓重解。
+    if (wasDecodable && !demand.decode && !demand.upload) clearRenderedFrames();
     _changed();
   }
 

@@ -17,6 +17,9 @@ final class WebPResourceDemand {
   final bool allowUpload;
   final bool current;
 
+  /// 本页目标缓冲帧深（rank 水位表算出）。透传到 holder 决定解到几帧。
+  final int decodeTargetFrames;
+
   const WebPResourceDemand({
     required this.downloadPriority,
     required this.decodePriority,
@@ -24,6 +27,7 @@ final class WebPResourceDemand {
     required this.allowDecode,
     required this.allowUpload,
     required this.current,
+    this.decodeTargetFrames = 0,
   });
 }
 
@@ -74,6 +78,7 @@ final class WebPResourceLease {
           current: demand.current,
           decode: demand.allowDecode,
           upload: demand.allowUpload,
+          targetFrames: demand.decodeTargetFrames,
         );
       } else {
         lease.update(
@@ -81,6 +86,7 @@ final class WebPResourceLease {
           current: demand.current,
           decode: demand.allowDecode,
           upload: demand.allowUpload,
+          targetFrames: demand.decodeTargetFrames,
         );
       }
     } else {
