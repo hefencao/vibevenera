@@ -348,11 +348,42 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           );
     }
 
+    // native texture 路径：若底层是 WebPImageProvider 且侧通道已发布纹理，改用
+    // Texture(textureId) 显示（动图帧由 native 侧原地更新，不经 ImageStream）。
+    final webpProvider = _webpProvider();
+    if (webpProvider != null) {
+      return ValueListenableBuilder<WebPTextureInfo?>(
+        valueListenable:
+            WebPTextureRegistry.instance.listenable(webpProvider.textureFullKey),
+        builder: (context, texInfo, _) =>
+            _buildDisplay(context, textureInfo: texInfo),
+      );
+    }
+    return _buildDisplay(context, textureInfo: null);
+  }
+
+  WebPImageProvider? _webpProvider() {
+    final img = widget.image;
+    if (img is WebPImageProvider) return img;
+    if (img is ResizeImage && img.imageProvider is WebPImageProvider) {
+      return img.imageProvider as WebPImageProvider;
+    }
+    return null;
+  }
+
+  Widget _buildDisplay(BuildContext context, {WebPTextureInfo? textureInfo}) {
     return LayoutBuilder(builder: (context, constrains) {
       var width = widget.width;
       var height = widget.height;
 
-      if (_imageInfo != null) {
+      if (textureInfo != null) {
+        final key = _sizeKey?.hashCode ?? widget.image.hashCode;
+        _putCache(
+          key,
+          Size(textureInfo.width.toDouble(), textureInfo.height.toDouble()),
+        );
+        widget.onImageInfo?.call(textureInfo.width, textureInfo.height);
+      } else if (_imageInfo != null) {
         final w = _imageInfo!.image.width;
         final h = _imageInfo!.image.height;
         final key = _sizeKey?.hashCode ?? widget.image.hashCode;
@@ -378,6 +409,29 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           height = constrains.maxHeight;
           width = 300;
         }
+      }
+
+      if (textureInfo != null) {
+        // native texture 路径：纹理内容由 native 侧按播放节奏原地更新，id 不变。
+        Widget result = Texture(textureId: textureInfo.textureId);
+        if (!widget.excludeFromSemantics) {
+          result = Semantics(
+            container: widget.semanticLabel != null,
+            image: true,
+            label: widget.semanticLabel ?? '',
+            child: result,
+          );
+        }
+        return SizedBox(
+          width: width,
+          height: height,
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: textureInfo.width / textureInfo.height,
+              child: result,
+            ),
+          ),
+        );
       }
 
       if (_imageInfo != null) {

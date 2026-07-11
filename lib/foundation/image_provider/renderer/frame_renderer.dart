@@ -32,11 +32,60 @@ final class NativeFrameHandle {
     _released = true;
     webp.nativePoolRelease(address);
   }
+
+  /// 伪 release：把 native 缓冲区的所有权移交给调用方，返回其地址，并让本 handle
+  /// 的 [release] 从此变为 no-op（不调用 nativePoolRelease）。
+  ///
+  /// 用于 native texture 渲染：上传任务在 `renderer.render()` 返回后会立即
+  /// `frame.release()`，但纹理路径需要 native 帧存活到「按播放节奏上传纹理」时。
+  /// 通过本方法把地址转进 [NativeAddressFrameHandle] 持有，其 dispose 时才真正
+  /// 释放，保证所有权始终单一、无 double-free。
+  int detachAddress() {
+    if (_released) {
+      throw StateError('NativeFrameHandle already released/detached');
+    }
+    _released = true;
+    return address;
+  }
 }
 
 abstract interface class RenderedFrameHandle {
   int get durationMs;
   void dispose();
+}
+
+/// [RenderedFrameHandle] 变体：持有一块存活的 native RGBA 帧（Premul RGBA8888），
+/// 不产生 ui.Image。用于 native texture 通路——显示层按播放节奏把 [address]
+/// 上传到平台纹理后调用 [dispose] 归还缓冲池。
+final class NativeAddressFrameHandle implements RenderedFrameHandle {
+  final int width;
+  final int height;
+  @override
+  final int durationMs;
+
+  int _address;
+  bool _disposed = false;
+
+  NativeAddressFrameHandle({
+    required int address,
+    required this.width,
+    required this.height,
+    required this.durationMs,
+  }) : _address = address;
+
+  /// 存活的 native RGBA 缓冲区地址；已 dispose 后抛错。
+  int get address {
+    if (_disposed) throw StateError('NativeAddressFrameHandle disposed');
+    return _address;
+  }
+
+  @override
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    webp.nativePoolRelease(_address);
+    _address = 0;
+  }
 }
 
 abstract interface class FrameRenderer {

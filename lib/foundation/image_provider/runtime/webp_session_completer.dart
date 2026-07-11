@@ -30,6 +30,11 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
   int _lastBufferReportMs = 0;
   int _lastBufferedFrames = -1;
 
+  // native texture 播放状态（仅 Android 动图路径）。
+  int? _textureId;
+  bool _textureCreating = false;
+  bool _textureUploading = false;
+
   _WebPSessionImageStreamCompleter(this._provider)
     : _scopeId =
           'visible:${identityHashCode(_provider)}:'
@@ -59,9 +64,19 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     _detachTimer?.cancel();
     _detachTimer = null;
     _detachVisible();
+    _disposeTexture();
     _fallbackCodec?.dispose();
     _fallbackCodec = null;
     super.onDisposed();
+  }
+
+  void _disposeTexture() {
+    final id = _textureId;
+    _textureId = null;
+    if (id != null) {
+      WebPTextureRegistry.instance.clear(_provider._fullKey);
+      unawaited(WebPTextureChannel.instance.dispose(id));
+    }
   }
 
   @override
@@ -235,21 +250,26 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
       while (!_disposed && hasListeners && _isLifecycleActive) {
         final frame = holder.consumeFrame();
         if (frame == null) return;
-        if (frame is! FlutterImageFrameHandle) {
-          frame.dispose();
-          _reportError(
-            StateError('Current ImageStreamCompleter requires Flutter images'),
-          );
-          return;
-        }
 
         final duration = frame.durationMs <= 0
             ? 100
             : frame.durationMs.clamp(16, 1000).toInt();
-        final image = frame.detachImage();
-        frame.dispose();
-        WebPPerf.count('framePresented');
-        setImage(ImageInfo(image: image, scale: _provider.scale));
+
+        if (frame is NativeAddressFrameHandle) {
+          await _presentTextureFrame(frame);
+        } else if (frame is FlutterImageFrameHandle) {
+          final image = frame.detachImage();
+          frame.dispose();
+          WebPPerf.count('framePresented');
+          setImage(ImageInfo(image: image, scale: _provider.scale));
+        } else {
+          frame.dispose();
+          _reportError(
+            StateError('Unknown rendered frame type: ${frame.runtimeType}'),
+          );
+          return;
+        }
+
         await Future<void>.delayed(
           Duration(
             milliseconds: (duration / webpPlaybackSpeed)
@@ -262,6 +282,53 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     } finally {
       _pumping = false;
       if (!_disposed && holder.hasRenderedFrames) _schedulePump();
+    }
+  }
+
+  /// 把一帧 native RGBA 上传到本显示的平台纹理（首帧惰性创建纹理并发布到侧通道）。
+  /// 纹理内容原地更新、id 不变，Flutter 每帧只需重绘 Texture，无 ui.Image 分配、
+  /// 无 setState。
+  Future<void> _presentTextureFrame(NativeAddressFrameHandle frame) async {
+    try {
+      if (_textureId == null) {
+        if (_textureCreating) {
+          frame.dispose();
+          return;
+        }
+        _textureCreating = true;
+        _textureId = await WebPTextureChannel.instance.create();
+        _textureCreating = false;
+        if (_disposed || _textureId == null) {
+          frame.dispose();
+          _disposeTexture();
+          return;
+        }
+      }
+      final id = _textureId!;
+      final w = frame.width, h = frame.height;
+      // Stage 2 已验证的 Uint8List 通路（每帧一次拷贝 + MethodChannel）。后续可换
+      // JNI 直读 native 地址消除这层拷贝。
+      final pixels = Uint8List.fromList(
+        Pointer<Uint8>.fromAddress(frame.address).asTypedList(w * h * 4),
+      );
+      frame.dispose();
+      WebPPerf.count('framePresented');
+      _textureUploading = true;
+      await WebPTextureChannel.instance.update(id, w, h, pixels);
+      _textureUploading = false;
+      if (_disposed) {
+        _disposeTexture();
+        return;
+      }
+      WebPTextureRegistry.instance.publish(
+        _provider._fullKey,
+        WebPTextureInfo(textureId: id, width: w, height: h),
+      );
+    } catch (error, stack) {
+      _textureCreating = false;
+      _textureUploading = false;
+      frame.dispose(); // idempotent
+      _reportError(error, stack);
     }
   }
 

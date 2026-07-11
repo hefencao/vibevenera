@@ -20,6 +20,8 @@ import 'io/image_loader.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
 import 'renderer/frame_renderer.dart';
+import 'renderer/webp_texture_channel.dart';
+import 'renderer/webp_texture_registry.dart';
 import 'session/download_session.dart';
 import 'session/webp_decode_session.dart';
 import 'session/webp_frame_holder.dart';
@@ -65,6 +67,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     }
     return imageKey;
   }
+
+  /// native texture 侧通道的键（含目标尺寸）。ComicImage 用它监听是否有可显示的纹理。
+  String get textureFullKey => _fullKey;
 
   static (int, int) calculateTargetSize(BuildContext context) =>
       _calculateWebPTargetSize(context);

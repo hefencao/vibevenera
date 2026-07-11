@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
+import 'package:venera/foundation/image_provider/renderer/webp_texture_channel.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
@@ -44,6 +46,12 @@ class PipelineController {
       scheduler: _scheduler,
       transportFactory: (identity) => ImageDownloaderWebPTransport(identity),
       onProgress: _onSessionProgress,
+      // Android 用 native texture 渲染动图帧：解码产出的 native RGBA 帧不转
+      // ui.Image，而是交给显示层按播放节奏上传平台纹理，消除每帧 ui.Image 分配 +
+      // setState 对主 isolate 的饱和。其它平台仍用 FlutterImageRenderer。
+      renderer: WebPTextureChannel.instance.isSupported
+          ? const NativeTextureRenderer(AndroidWebPTextureBackend())
+          : const FlutterImageRenderer(),
     );
   }
 

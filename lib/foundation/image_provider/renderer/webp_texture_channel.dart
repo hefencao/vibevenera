@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+
+import 'frame_renderer.dart';
 
 /// 低层 native texture 通道（仅 Android 有实现）。
 ///
@@ -46,5 +49,26 @@ class WebPTextureChannel {
     return _channel.invokeMethod<void>('dispose', <String, dynamic>{
       'textureId': textureId,
     });
+  }
+}
+
+/// [NativeTextureFrameBackend] 的 Android 实现。
+///
+/// `submit` 用 [NativeFrameHandle.detachAddress]（伪 release）把 native RGBA 帧的
+/// 所有权移交给返回的 [NativeAddressFrameHandle]，使上传任务紧随的 `frame.release()`
+/// 变为 no-op、native 帧存活到显示层按播放节奏上传纹理。此处**不上传纹理**——纹理是
+/// 每个可见显示各自拥有的资源，上传发生在 completer 播放泵里。
+final class AndroidWebPTextureBackend implements NativeTextureFrameBackend {
+  const AndroidWebPTextureBackend();
+
+  @override
+  Future<RenderedFrameHandle> submit(NativeFrameHandle frame) {
+    final handle = NativeAddressFrameHandle(
+      address: frame.detachAddress(),
+      width: frame.width,
+      height: frame.height,
+      durationMs: frame.durationMs,
+    );
+    return Future<RenderedFrameHandle>.value(handle);
   }
 }
