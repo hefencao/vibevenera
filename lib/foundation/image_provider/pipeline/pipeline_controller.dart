@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
@@ -79,7 +78,6 @@ class PipelineController {
   bool _hasCurrentIdx = false;
   int _preloadCount = 5;
   int _currentBufferedFrames = 0;
-  int _windowKey = -1;
   int _windowRuleIndex = -1;
   int _sessionId = 0;
   int? _provisionalIdx;
@@ -116,7 +114,6 @@ class PipelineController {
     _detachPolicyScope();
     _sessionId++;
     resources.clear();
-    _windowKey = -1;
     _windowRuleIndex = -1;
   }
 
@@ -168,7 +165,6 @@ class PipelineController {
     _preloadCount = preloadCount;
     if (contextChanged || pageChanged || preloadChanged) {
       _currentBufferedFrames = 0;
-      _windowKey = -1;
       _windowRuleIndex = -1;
     }
     if (contextChanged) {
@@ -212,7 +208,6 @@ class PipelineController {
     _preloadCount = preloadCount;
     if (contextChanged || pageChanged || preloadChanged) {
       _currentBufferedFrames = 0;
-      _windowKey = -1;
       _windowRuleIndex = -1;
     }
     if (contextChanged || !_hasCurrentIdx) {
@@ -318,7 +313,6 @@ class PipelineController {
       protectJump: protectJump,
     );
     _windowRuleIndex = plan.ruleIndex;
-    _windowKey = plan.windowKey;
     _currentKey = plan.currentKey;
     _nearKeys
       ..clear()
@@ -406,50 +400,6 @@ class PipelineController {
     _keepKeys.clear();
     _offsetByKey.clear();
   }
-
-  /// Temporary compatibility projection for legacy callers. The session
-  /// pipeline does not consume these values and remains the sole authority.
-  void publishExternalHolder(String imageKey, String fullKey, dynamic holder) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      if (peer.fullKey == fullKey) {
-        peer.holder = holder;
-        peer.decode.markSuccess();
-      }
-    }
-  }
-
-  void publishExternalBytes(String imageKey, Uint8List bytes) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      peer.bytes = bytes;
-    }
-  }
-
-  void publishExternalDownloadProgress(
-    String imageKey,
-    int current,
-    int? total, {
-    bool done = false,
-  }) {
-    for (final peer in resources.getAllForImage(imageKey)) {
-      peer.download.updateProgress(current, total);
-      peer.download.inProgress = !done;
-    }
-    _progress.update(
-      imageKey,
-      current,
-      total,
-      currentKey: _currentKey,
-      done: done,
-    );
-  }
-
-  bool hasStreamDecodeAttached(String fullKey) => false;
-
-  bool isManagingFullKey(String fullKey) => resources.get(fullKey) != null;
-
-  Future<dynamic> waitForStreamResult(String fullKey) => Future.value(null);
-
-  void ensureStreamWork(String fullKey) => _syncPolicyLeases();
 
   WebPResourceLease acquireVisibleWebP({
     required String imageKey,

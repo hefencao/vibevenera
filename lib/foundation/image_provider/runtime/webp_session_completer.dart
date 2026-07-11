@@ -214,7 +214,10 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
     if (snapshot.transport == DownloadTransportState.sealed) {
       _milestone('lat.sealed',
           () => _sealedReported, () => _sealedReported = true);
-      _schedulePump();
+      // 不在封口(final 信号)处启动播放：这是长条进度条重构前的遗留触发。播放已由
+      // 帧到达驱动（_onHolderState / _onDecodeState 的 renderedFrames>0 →
+      // _schedulePump），且 pump 循环 poll-continue 常驻、每 32ms 自取新帧，流式解出
+      // 的首帧一就绪即播，无需等封口。保留封口仅用于 fallback（非 webp/静态兜底）。
       if (snapshot.fallbackContent) {
         unawaited(_maybeDecodeFallback(snapshot));
       }
@@ -435,7 +438,13 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
         return;
       }
       final validation = await ImageDataValidator.validateFile(file);
-      if (!validation.valid) {
+      // 只在「明显不是可解码图像」时提前否决（空文件、HTML/JSON/文本错误页、未知
+      // 签名）。已识别出图像格式却仅因完整性/长度校验不过（如 webp 的 RIFF 声明长
+      // 度与文件实际长度不等——尾部填充/元数据、或服务端 size 字段不精确）不应直接
+      // 判死：这类文件 Flutter codec 往往能正常解出。交给 codec 做最终裁决，解不出
+      // 才在下方 catch 抛错。这修复了合法远程 webp 偶发被误报 invalid image data。
+      if (!validation.valid &&
+          validation.format == ImageDataFormat.unknown) {
         throw InvalidImageDataException(
           'Invalid cached image artifact: ${validation.reason}',
         );

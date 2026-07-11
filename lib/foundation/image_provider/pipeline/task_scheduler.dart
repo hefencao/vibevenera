@@ -11,7 +11,7 @@ import 'tasks.dart';
 //                                                              │
 //                                              ┌───────────────┼───────────────┐
 //                                              ▼               ▼               ▼
-//                                        DownloadTask    PrecreateTask    (future)
+//                                      WebPDownloadTask  WebPDecodeTask   (future)
 //
 //   TaskScheduler — pure dispatcher (priority queue + concurrency)
 //   TaskRegistry  — key→task lookup + dedup
@@ -189,8 +189,14 @@ class _TaskLaneScheduler {
   void updatePriority(String key, int priority) {
     final task = _registry.find(key);
     if (task == null || task.priority == priority) return;
+    final increased = priority > task.priority;
     task.priority = priority;
     _sortQueue();
+    // 提权后必须重新派发。翻页时下一页此前多为近邻页，其下载/解码任务已排队；变
+    // current 后走 updatePriority 提到高优先级，但只排序不派发就不会触发高优先级抢
+    // 占，得等运行中任务自然结束才启动 → 这正是「切换页到开始下载/首帧延迟高」的
+    // 主因。仅在提权时派发（降权不改变队首派发结果，派发也只是 no-op）。
+    if (increased) _dispatchNext();
   }
 
   void migrateTasks(Set<String> activeKeys, Map<String, int> newPriorities) {
@@ -229,11 +235,7 @@ class _TaskLaneScheduler {
   void _sortQueue() => _queue.sort((a, b) => b.priority.compareTo(a.priority));
 
   void _mergeWaiters(SchedulerTask existing, SchedulerTask incoming) {
-    if (existing is DownloadTask && incoming is DownloadTask) {
-      existing.mergeWaitersFrom(incoming);
-    } else if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
-      existing.mergeWaitersFrom(incoming);
-    } else if (existing is PrecreateTask && incoming is PrecreateTask) {
+    if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
       existing.mergeWaitersFrom(incoming);
     }
   }
@@ -246,7 +248,6 @@ class _TaskLaneScheduler {
     // Same-key work represents the same session. Promotion updates the task in
     // place; it must never cancel/recreate a running transport.
     if (_registry.isRunning(existing.key)) return false;
-    if (existing is DownloadTask && incoming is DownloadTask) return false;
     if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
       return false;
     }
@@ -330,11 +331,11 @@ class TaskScheduler {
 
   TaskScheduler._() {
     _lanes = {
-      // Near/far transport work may occupy two permits. The third permit is
+      // Near/far transport work may occupy the lower permits. One permit is
       // reserved for a current-page rank (DownloadRanker current >= 950), so a
       // page switch does not wait for an unrelated range request to unwind.
       SchedulerLane.network: _createLane(
-        3,
+        5,
         reservedHighPrioritySlots: 1,
         highPriorityThreshold: 950,
       ),

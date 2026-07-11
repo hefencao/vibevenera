@@ -1,22 +1,14 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:ui' as ui;
-import 'dart:ffi';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/network/images.dart';
-import 'package:venera/utils/trace_log.dart';
-import 'package:venera/utils/webp_decoder.dart' as webp;
 import 'package:venera/utils/webp_perf.dart';
 
 import 'io/image_data_validator.dart';
-import 'io/image_loader.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
 import 'renderer/frame_renderer.dart';
@@ -28,16 +20,7 @@ import 'session/webp_frame_holder.dart';
 import 'session/webp_session_coordinator.dart';
 
 part 'runtime/webp_common.dart';
-part 'runtime/webp_frame_buffer.dart';
-part 'decoder/webp_decoder_holder.dart';
-part 'decoder/webp_decode_service.dart';
-part 'decoder/webp_decoder_manager.dart';
 part 'pipeline/webp_provider_static.dart';
-part 'runtime/webp_stream_session.dart';
-part 'io/webp_provider_loader.dart';
-part 'runtime/webp_playback_controller.dart';
-part 'io/webp_load_result.dart';
-part 'runtime/webp_stream_completer.dart';
 part 'runtime/webp_session_completer.dart';
 
 class WebPImageProvider extends ImageProvider<WebPImageProvider> {
@@ -85,36 +68,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     WebPImageProvider key,
     ImageDecoderCallback decode,
   ) => _WebPSessionImageStreamCompleter(key);
-
-  // ── Public static helpers ──────────────────────────────────
-
-  /// Ensure a DecoderHolder exists. Used by PrecreateTask.
-  /// [onlyIfCached]: if true, skip network fetch.
-  static Future<DecoderHolder?> ensureHolder({
-    required String imageKey,
-    required String fullKey,
-    DecodedImageCache? cache,
-    String? sourceKey,
-    required String cid,
-    required String eid,
-    int targetWidth = 0,
-    int targetHeight = 0,
-    double scale = 1.0,
-    Uint8List? providedBytes,
-    bool onlyIfCached = false,
-  }) => _ensureWebPHolder(
-    imageKey: imageKey,
-    fullKey: fullKey,
-    cache: cache,
-    sourceKey: sourceKey,
-    cid: cid,
-    eid: eid,
-    targetWidth: targetWidth,
-    targetHeight: targetHeight,
-    scale: scale,
-    providedBytes: providedBytes,
-    onlyIfCached: onlyIfCached,
-  );
 
   @override
   bool operator ==(Object other) {

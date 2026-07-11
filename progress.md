@@ -46,6 +46,14 @@
 - Stage 4 预加载策略：运行时目标（近邻页不抢当前页解码核）由 completer `_pump` 的 gate 达成——近邻页屏外不播放→不消费帧→不重解，`decodeDispatch.near` 播放期归零；未采用「near 页完全不解码」的字面实现，改用 `FrameDepthTable` 水位背压（近邻预解少量帧换翻页秒回，已验证体验），近邻帧目标数组由用户定档。
 - Stage 5 回归与收口已完成：单测全绿（22/22）；重写 `resource_policy_test.dart`（原断言 `frameTarget`/`renderedFrameTarget`/`allowPlayback` 等重构后已删字段，改为校验当前 `ResourcePolicy` 授权表）；`WebPPerf.enabled`/`timeline` 置 false，诊断埋点零开销、不再刷 logcat（复测置 true 即恢复，整文件可删）；临时测试页 `webp_texture_test_page.dart` 已移除、无悬空引用；`flutter analyze` 无新增问题、profile APK 端到端构建通过。
 
+### 远程 WebP 三问题修复 + 死代码清理
+
+- **切换页→开始下载延迟高**：root: `_TaskLaneScheduler.updatePriority` 提权后只 `_sortQueue()` 不 `_dispatchNext()`。向前翻页时下一页此前多为近邻页，其下载/解码任务已排队、lane 已满；变 current 后 reconcile 发现任务已存在 → 走 `updatePriority` 提到高优先级，但不派发就不触发高优先级抢占，只能等运行中任务自然结束。修复：仅在提权（`priority > 原值`）时调 `_dispatchNext()`；network/decode 两 lane 同时受益（既加快下载启动也加快首帧解码）。
+- **偶发 `invalid image data`**：root: native 解码兜底走 Flutter codec 前，`ImageDataValidator.validateFile` 不过即抛 `InvalidImageDataException`；而 validator 对 webp 用 `declaredLength != totalLength` 判完整性，带尾部填充/元数据或服务端 RIFF size 不精确的 webp 会被误判 incomplete，但 codec 实际能解。修复（`_maybeDecodeFallback`）：只在明显不可解码（空/HTML/JSON/文本/未知签名 → `format==unknown`）时提前否决；已识别格式仅完整性/长度不符交给 codec 裁决，真解不出才在 catch 抛错。
+- **流式播放需等下载完成 / 冗余 final 信号**：现象为转圈进度（`ImageChunkEvent` 喂，首帧显示才消失）走完才播，而分隔线长条进度（`DownloadProgressPublisher`，更权威）提前走完。root: 封口(sealed)分支的 `_schedulePump()` 是长条进度条重构前的遗留触发——把「首帧显示」耦合到了「下载封口」。修复：移除封口处 `_schedulePump()`，播放改由帧到达驱动（`_onHolderState`/`_onDecodeState` 的 `renderedFrames>0`）+ pump poll-continue 循环（常驻、每 32ms 自取新帧），流式解出的首帧一就绪即播；封口分支仅保留 fallback 触发。注：本地伪断点续传对播放器透明、与源是否支持 Range 无关，流式能力不受源影响。
+- **死代码清理**：删除 11 个重构残留文件——`webp_playback_controller.dart`、`webp_stream_completer.dart`、`webp_stream_session.dart`、`webp_frame_buffer.dart`、`webp_provider_loader.dart`、`webp_load_result.dart`、`webp_decoder_holder.dart`、`webp_decoder_manager.dart`、`webp_decode_service.dart`、`webp_stream_decode_coordinator.dart`、`pipeline_work_submitter.dart`（活路径唯一为 `loadImage`→`_WebPSessionImageStreamCompleter` 的 session pipeline；上述均为 `_loadImageAsync`/`_WebPStreamSession`/`WebPStreamDecodeCoordinator` 等旧路径残留）。混合文件删死成员：`webp_common.dart` 只留 `webpPlaybackSpeed`/`webpSpeedPresets`；`webp_provider_static.dart` 删 `_resolveWebPDecodeTarget`/`_ensureWebPHolder`；`webp_image.dart` 删 `ensureHolder` static 及失效 import；`pipeline_controller.dart` 删 `publishExternal*`/`hasStreamDecodeAttached`/`isManagingFullKey`/`waitForStreamResult`/`ensureStreamWork` 桩方法及 write-only 的 `_windowKey` 字段；`tasks.dart` 删 `DownloadTask`/`PrecreateTask`/`DownloadExecution`/`PolicyAwareTask`/`ExecutionContext` 及失效 import；`task_scheduler.dart` 清理相关 `_mergeWaiters`/`_shouldPreempt` 分支。`flutter analyze` 0 error、无悬空引用、单测 22/22。
+- **调度 lane 容量**：network lane maxConcurrent 5（保留），decode lane 3；`task_scheduler_lane_test` 按 5 更新（塞 6 个饱和、验第 6 个排队 + decode lane 不受网络饱和影响）。
+
 ## 关键决策
 
 - WebP 阅读器不是视频播放器模型；不同 WebP 高频切换，因此不采用全局 FrameQueue 作为主抽象。
@@ -66,4 +74,3 @@
 3. 收窄 holder、迁移 visible display lease，删除 owner/history replay/resume 双路径。
 4. 完成 source/cursor Android 设备级增量解码与并发 append 回归。
 5. ~~在稳定 renderer 接口后实现 Android NativeTextureRenderer。~~ 已完成（见「Native Texture 渲染管道」Stage 1-5）。
-6. 本轮改动（`resource_policy_test.dart` 重写 + `WebPPerf` 埋点关闭 + progress.md）尚未提交。
