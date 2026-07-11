@@ -19,12 +19,15 @@ class WebPPerf {
   WebPPerf._();
 
   /// Master switch. Flip to false to make every probe a no-op.
-  static bool enabled = true;
+  ///
+  /// 收口默认关闭：native texture 管道诊断已结束，全部埋点零开销、不再每 700ms
+  /// 刷 logcat。需要重新测量时置 true 即可恢复所有探针（整文件亦可删除）。
+  static bool enabled = false;
 
   /// When true, also emits Dart Timeline slices (visible in DevTools timeline
   /// / `flutter run --profile` timeline). Cheap but not free; keep on while
   /// diagnosing.
-  static bool timeline = true;
+  static bool timeline = false;
 
   static int _epoch = 0;
   static int get epoch => _epoch;
