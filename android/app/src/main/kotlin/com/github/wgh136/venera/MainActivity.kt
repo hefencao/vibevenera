@@ -36,6 +36,8 @@ class MainActivity : FlutterFragmentActivity() {
     var volumeListen = VolumeListen()
     var listening = false
 
+    private var webpTexturePlugin: WebPTexturePlugin? = null
+
     private val storageRequestCode = 0x10
     private var storagePermissionRequest: ((Boolean) -> Unit)? = null
 
@@ -102,8 +104,15 @@ class MainActivity : FlutterFragmentActivity() {
         launcher.launch(input)
     }
 
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        webpTexturePlugin?.disposeAll()
+        webpTexturePlugin = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         GeneratedPluginRegistrant.registerWith(flutterEngine)
+        webpTexturePlugin = WebPTexturePlugin(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "venera/method_channel"

@@ -13,6 +13,7 @@ import 'package:venera/foundation/log.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/trace_log.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
+import 'package:venera/utils/webp_perf.dart';
 
 import 'io/image_data_validator.dart';
 import 'io/image_loader.dart';

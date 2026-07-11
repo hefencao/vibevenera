@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/webp_perf.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
@@ -149,6 +150,9 @@ class PipelineController {
       // session or all policy leases will be torn down on every swipe.
       _images = List<String>.unmodifiable(images);
     }
+    if (pageChanged || contextChanged) {
+      WebPPerf.markPageChange('idx $currentIdx (range)');
+    }
     _cid = cid;
     _eid = eid;
     _sourceKey = sourceKey;
@@ -189,6 +193,9 @@ class PipelineController {
     }
     if (contextChanged) {
       _images = List<String>.unmodifiable(images);
+    }
+    if (pageChanged || contextChanged) {
+      WebPPerf.markPageChange('idx $currentIdx (currentOnly)');
     }
     _cid = cid;
     _eid = eid;
@@ -267,7 +274,10 @@ class PipelineController {
     _applyWindow();
   }
 
-  void _applyWindow({bool protectJump = false}) {
+  void _applyWindow({bool protectJump = false}) =>
+      WebPPerf.sync('applyWindow', () => _applyWindowImpl(protectJump: protectJump));
+
+  void _applyWindowImpl({bool protectJump = false}) {
     final previousCurrent = _currentKey;
     final plan = _windowPlanner.build(
       currentIdx: _currentIdx,
@@ -469,7 +479,10 @@ class PipelineController {
 
   String get _policyScopeId => 'reader:$_sessionId';
 
-  void _syncPolicyLeases() {
+  void _syncPolicyLeases() =>
+      WebPPerf.sync('syncPolicyLeases', _syncPolicyLeasesImpl);
+
+  void _syncPolicyLeasesImpl() {
     final liveFullKeys = <String>{};
     resources.forEach((entry) {
       final policy = entry.policy;

@@ -10,20 +10,89 @@
  * 5. 纯 Premultiplied Alpha 管线：MODE_rgbA 解码 → composite_region 合成 → 直接输出（无转换）。
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "webp_decoder.h"
 
 #include <stdlib.h>
+#include <sched.h>
 #include <string.h>
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <android/log.h>
 
 #define LOGTAG "WebP_Native"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOGTAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOGTAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOGTAG, __VA_ARGS__)
+
+/* ================================================================
+ * 大核亲和性：解码线程默认 nice=0 会被 EAS 压在小核（实测大核闲置、
+ * 小核满载，解码 ~4x 慢）。运行时探测最高频核心并 sched_setaffinity 绑定，
+ * 强制解码跑在大核，不依赖内核任务放置启发式或前后台 boost。
+ * ================================================================ */
+static cpu_set_t g_big_core_mask;
+static int       g_big_core_ready = 0;   /* 1=mask 已算好且非空 */
+static pthread_mutex_t g_big_core_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void compute_big_core_mask(void) {
+    pthread_mutex_lock(&g_big_core_mutex);
+    if (g_big_core_ready != 0) {
+        pthread_mutex_unlock(&g_big_core_mutex);
+        return;
+    }
+    long ncpu = sysconf(_SC_NPROCESSORS_CONF);
+    if (ncpu <= 0) ncpu = 8;
+    if (ncpu > CPU_SETSIZE) ncpu = CPU_SETSIZE;
+    long max_freq = 0;
+    long freqs[CPU_SETSIZE];
+    for (long i = 0; i < ncpu; i++) {
+        freqs[i] = 0;
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%ld/cpufreq/cpuinfo_max_freq", i);
+        FILE* f = fopen(path, "r");
+        if (f) {
+            long v = 0;
+            if (fscanf(f, "%ld", &v) == 1) freqs[i] = v;
+            fclose(f);
+        }
+        if (freqs[i] > max_freq) max_freq = freqs[i];
+    }
+    CPU_ZERO(&g_big_core_mask);
+    int count = 0;
+    if (max_freq > 0) {
+        /* 归为“大核”：最高频的 80% 以上（覆盖大核+超大核，排除小核）。 */
+        long threshold = max_freq * 8 / 10;
+        for (long i = 0; i < ncpu; i++) {
+            if (freqs[i] >= threshold) {
+                CPU_SET(i, &g_big_core_mask);
+                count++;
+            }
+        }
+    }
+    /* 探测失败或全同频（无大小核）时不绑定，避免误伤。 */
+    g_big_core_ready = (count > 0 && count < (int)ncpu) ? 1 : -1;
+    pthread_mutex_unlock(&g_big_core_mutex);
+    LOGI("[AFFINITY] big-core mask ready=%d count=%d maxFreq=%ld",
+         g_big_core_ready, count, max_freq);
+}
+
+/* 把当前线程绑到大核并提优先级。对自身线程无需特权，幂等。 */
+static void bind_current_thread_to_big_cores(void) {
+    if (g_big_core_ready == 0) compute_big_core_mask();
+    if (g_big_core_ready != 1) return;
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    sched_setaffinity(tid, sizeof(cpu_set_t), &g_big_core_mask);
+    setpriority(PRIO_PROCESS, (id_t)tid, -10);
+}
 
 #include "src/webp/decode.h"
 #include "src/webp/demux.h"
@@ -68,6 +137,9 @@ static int              g_use_persistent_pool = 0;
 
 static void* pool_thread_main(void* arg) {
     PoolThread* pt = (PoolThread*)arg;
+    /* 绑大核 + 提优先级。默认 nice=0 且无亲和的线程会被 EAS 压在小核（实测大核
+     * 闲置、小核满载，解码约 4x 慢）。这里强制这些 libwebp 重建/滤波 worker 上大核。 */
+    bind_current_thread_to_big_cores();
     pthread_mutex_lock(&pt->mutex);
     for (;;) {
         while (!pt->has_work && !pt->should_exit) {
@@ -205,10 +277,10 @@ void webp_init_native(void) {
     g_pool_initialized = 1;
     pthread_mutex_unlock(&g_pool_alloc_mutex);
 
-    WebPSetWorkerInterface(&g_pool_worker_interface);
-
-    const WebPWorkerInterface* current = WebPGetWorkerInterface();
-    if (current == &g_pool_worker_interface) {
+    /* libwebp 的 WebPSetWorkerInterface 是按值拷贝 interface 到内部静态量，
+     * 返回 1 成功 / 0 失败（成员为 NULL）。之前用指针相等回读校验，因拷贝而
+     * 恒不相等，导致持久池被误判为失败、多线程门控恒为 0。改用返回值判定。 */
+    if (WebPSetWorkerInterface(&g_pool_worker_interface)) {
         g_use_persistent_pool = 1;
         LOGI("[POOL] Persistent thread pool activated: %d threads", POOL_THREAD_COUNT);
     } else {
@@ -644,6 +716,7 @@ uint8_t* webp_anim_decoder_get_frame(WebPAnimContext* ctx, int* duration_ms) {
 int webp_anim_decoder_get_frames(WebPAnimContext* ctx, int count,
                                  int64_t* out_results) {
     if (!ctx || !out_results || count <= 0) return 0;
+    bind_current_thread_to_big_cores();
     for (int i = 0; i < count; i++) {
         int duration = 0;
         uint8_t* frame = webp_anim_decoder_get_frame(ctx, &duration);
@@ -896,6 +969,9 @@ int webp_playback_cursor_get_frames(WebPPlaybackCursor* cursor,
                                     int count,
                                     int64_t* out_results) {
     if (!cursor || !out_results || count <= 0) return WEBP_CURSOR_INVALID;
+    /* 熵解码/合成主体在调用线程（Dart worker isolate）上执行。绑大核，覆盖
+     * 与 pool 线程之外的这条主路径。 */
+    bind_current_thread_to_big_cores();
     pthread_mutex_lock(&cursor->mutex);
     if (cursor->failed) {
         int error = cursor->last_error;
@@ -1209,6 +1285,7 @@ static uint8_t* webp_anim_stream_decoder_get_frame_locked(WebPAnimStreamContext*
 int webp_anim_stream_decoder_get_frames(WebPAnimStreamContext* ctx, int count,
                                         int64_t* out_results) {
     if (!ctx || !out_results || count <= 0) return 0;
+    bind_current_thread_to_big_cores();
     pthread_mutex_lock(&ctx->mutex);
     int n = 0;
     for (; n < count; n++) {

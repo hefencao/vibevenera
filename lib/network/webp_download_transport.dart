@@ -21,6 +21,7 @@ final class WebPTransportProgress {
 
 final class WebPTransportCancelled implements Exception {
   final Object? reason;
+
   const WebPTransportCancelled([this.reason]);
 
   @override
@@ -42,13 +43,14 @@ typedef WebPDownloadEventSource = Stream<ImageDownloadProgress> Function({
   CancelToken? cancelToken,
 });
 
-/// Adapter around the existing Dart network stack.
+/// Adapter around the existing Dart image download stack.
 ///
-/// It owns one monotonic ingress cursor and is the only consumer of legacy
-/// ImageDownloadProgress chunk events. `currentBytes` is progress metadata;
-/// source offsets are never inferred from `currentBytes - chunk.length`.
+/// This transport is the sole consumer of legacy [ImageDownloadProgress]
+/// chunk events. Source offsets are derived only from the monotonic ingress
+/// cursor; `currentBytes` remains progress metadata and is never used to infer
+/// a chunk start offset.
 final class ImageDownloaderWebPTransport implements WebPTransport {
-  static const _localReadSize = 256 * 1024;
+  static const int _localReadSize = 256 * 1024;
 
   final DownloadIdentity identity;
   final WebPDownloadArtifact Function(String cacheKey) artifactFactory;
@@ -58,25 +60,27 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     this.identity, {
     WebPDownloadArtifact Function(String cacheKey)? artifactFactory,
     WebPDownloadEventSource? eventSource,
-  })  : artifactFactory = artifactFactory ?? WebPDownloadArtifact.forCacheKey,
+  })  : artifactFactory =
+            artifactFactory ?? WebPDownloadArtifact.forCacheKey,
         eventSource = eventSource ??
             (({
               required int resumeOffset,
               required int? expectedLength,
               CancelToken? cancelToken,
-            }) =>
-                ImageDownloader.loadComicImage(
-                  identity.imageKey,
-                  identity.sourceKey,
-                  identity.cid,
-                  identity.eid,
-                  cancelToken: cancelToken,
-                  debugLabel: 'webp-session:${identity.imageKey}',
-                  resumeFromBytes: resumeOffset > 0 ? resumeOffset : null,
-                  resumeExpectedBytes: expectedLength,
-                  replayPartial: false,
-                  streamOnly: true,
-                ));
+            }) {
+              return ImageDownloader.loadComicImage(
+                identity.imageKey,
+                identity.sourceKey,
+                identity.cid,
+                identity.eid,
+                cancelToken: cancelToken,
+                debugLabel: 'webp-session:${identity.imageKey}',
+                resumeFromBytes: resumeOffset > 0 ? resumeOffset : null,
+                resumeExpectedBytes: expectedLength,
+                replayPartial: false,
+                streamOnly: true,
+              );
+            });
 
   @override
   Future<File> execute(
@@ -94,94 +98,40 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         activeWriter,
         checkCancelled: () => _throwIfCancelled(cancelToken),
       );
+
       var ingress = _WebPIngress(
         session: session,
         writer: activeWriter,
         artifact: artifact,
         restored: restored,
       );
+
       _throwIfCancelled(cancelToken);
 
       final localFile = await _localFile();
       if (localFile != null) {
-        final localLength = await localFile.length();
-        if (localLength <= 0) throw StateError('Local image file is empty');
-        if (ingress.receivedLength > localLength) {
-          await artifact.reset();
-          activeWriter = session.resetSource(
-            writer: activeWriter,
-            epoch: session.source.epoch + 1,
-            expectedLength: localLength,
-          );
-          ingress = _WebPIngress.empty(
-            session: session,
-            writer: activeWriter,
-            artifact: artifact,
-          );
-        } else {
-          session.updateExpectedLength(localLength, writer: activeWriter);
-        }
-        final reader = await localFile.open();
-        try {
-          await reader.setPosition(ingress.receivedLength);
-          while (ingress.receivedLength < localLength) {
-            _throwIfCancelled(cancelToken);
-            final remaining = localLength - ingress.receivedLength;
-            final chunk = await reader.read(
-              remaining < _localReadSize ? remaining : _localReadSize,
-            );
-            if (chunk.isEmpty) {
-              throw WebPSourceInvariantError(
-                'local file ended at ${ingress.receivedLength}/$localLength',
-              );
-            }
-            await ingress.append(chunk);
-            onProgress?.call(
-              WebPTransportProgress(
-                currentBytes: ingress.receivedLength,
-                totalBytes: localLength,
-              ),
-            );
-          }
-        } finally {
-          await reader.close();
-        }
-        await ingress.finalizeContent(finalLength: localLength);
-        await artifact.flush();
-        final file = await artifact.promote(sealedLength: localLength);
-        if (ingress.isFallback) {
-          session.sealFallback(
-            activeWriter,
-            file,
-            finalLength: localLength,
-          );
-        } else {
-          session.seal(activeWriter, file);
-        }
-        onProgress?.call(
-          WebPTransportProgress(
-            currentBytes: localLength,
-            totalBytes: localLength,
-            done: true,
-          ),
+        return await _executeLocalFile(
+          localFile,
+          session: session,
+          writer: activeWriter,
+          ingress: ingress,
+          artifact: artifact,
+          cancelToken: cancelToken,
+          onProgress: onProgress,
         );
-        return file;
       }
 
       final resumeOffset = restored.length;
-      onProgress?.call(
-        WebPTransportProgress(
-          currentBytes: resumeOffset,
-          totalBytes:
-              session.expectedLength > 0 ? session.expectedLength : null,
-        ),
+      _publishProgress(
+        onProgress,
+        currentBytes: ingress.receivedLength,
+        session: session,
       );
 
       iterator = StreamIterator<ImageDownloadProgress>(
         eventSource(
           resumeOffset: resumeOffset,
-          expectedLength:
-              session.expectedLength > 0 ? session.expectedLength : null,
+          expectedLength: _sessionExpectedLength(session),
           cancelToken: cancelToken,
         ),
       );
@@ -195,7 +145,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
           activeWriter = session.resetSource(
             writer: activeWriter,
             epoch: session.source.epoch + 1,
-            expectedLength: event.totalBytes ?? 0,
+            expectedLength: _positiveOrZero(event.totalBytes),
           );
           ingress = _WebPIngress.empty(
             session: session,
@@ -203,9 +153,14 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
             artifact: artifact,
           );
         } else {
-          session.updateExpectedLength(
-            event.totalBytes,
-            writer: activeWriter,
+          _updateExpectedLength(
+            session,
+            activeWriter,
+            _normalizeReportedTotal(
+              reportedTotal: event.totalBytes,
+              currentLength: ingress.receivedLength,
+              existingExpectedLength: session.expectedLength,
+            ),
           );
         }
 
@@ -216,10 +171,17 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
 
         final finalBytes = event.imageBytes;
         if (finalBytes != null) {
-          // One-shot legacy responses are valid initial input. Once any range
-          // has been committed, the final payload is only a completion/length
-          // signal and may not repair a discontinuous stream.
-          if (ingress.receivedLength == 0 && finalBytes.isNotEmpty) {
+          if (finalBytes.isEmpty && ingress.receivedLength == 0) {
+            throw StateError(
+              'Image stream completed with an empty final payload: '
+              '${identity.imageKey}',
+            );
+          }
+
+          // A one-shot legacy response is valid when no bytes have yet entered
+          // the authoritative ingress. After streaming has started, finalBytes
+          // may only confirm the exact final length; it must never repair a gap.
+          if (ingress.receivedLength == 0) {
             await ingress.append(finalBytes);
           } else if (finalBytes.length != ingress.receivedLength) {
             throw WebPSourceInvariantError(
@@ -229,77 +191,202 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
             );
           }
 
-          await ingress.finalizeContent(finalLength: finalBytes.length);
-          session.updateExpectedLength(
-            finalBytes.length,
+          return await _completeIngress(
+            session: session,
             writer: activeWriter,
+            ingress: ingress,
+            artifact: artifact,
+            finalLength: ingress.receivedLength,
+            onProgress: onProgress,
           );
-          await artifact.flush();
-          final file = await artifact.promote(
-            sealedLength: ingress.receivedLength,
-          );
-          if (ingress.isFallback) {
-            session.sealFallback(
-              activeWriter,
-              file,
-              finalLength: ingress.receivedLength,
-            );
-          } else {
-            session.seal(activeWriter, file);
-          }
-          onProgress?.call(
-            WebPTransportProgress(
-              currentBytes: ingress.receivedLength,
-              totalBytes: ingress.receivedLength,
-              done: true,
-            ),
-          );
-          return file;
         }
 
         if (event.done) {
-          await ingress.finalizeContent(finalLength: event.currentBytes);
-          session.updateExpectedLength(
-            event.currentBytes,
+          // currentBytes is progress metadata. The ingress cursor is the only
+          // authoritative final byte length.
+          return await _completeIngress(
+            session: session,
             writer: activeWriter,
+            ingress: ingress,
+            artifact: artifact,
+            finalLength: ingress.receivedLength,
+            onProgress: onProgress,
           );
-          await artifact.flush();
-          final file = await artifact.promote(
-            sealedLength: ingress.receivedLength,
-          );
-          if (ingress.isFallback) {
-            session.sealFallback(
-              activeWriter,
-              file,
-              finalLength: ingress.receivedLength,
-            );
-          } else {
-            session.seal(activeWriter, file);
-          }
-          onProgress?.call(
-            WebPTransportProgress(
-              currentBytes: ingress.receivedLength,
-              totalBytes: ingress.receivedLength,
-              done: true,
-            ),
-          );
-          return file;
         }
 
-        onProgress?.call(
-          WebPTransportProgress(
-            currentBytes: ingress.receivedLength,
-            totalBytes: event.totalBytes,
-          ),
+        _publishProgress(
+          onProgress,
+          currentBytes: ingress.receivedLength,
+          reportedTotal: event.totalBytes,
+          session: session,
         );
       }
 
       _throwIfCancelled(cancelToken);
-      throw StateError('WebP stream ended without final bytes');
+
+      // Some stream implementations close after the final chunk without
+      // emitting imageBytes or a separate done event. This is safe only when a
+      // previously established authoritative expected length is reached.
+      final expectedLength = _sessionExpectedLength(session);
+      if (expectedLength != null &&
+          ingress.receivedLength > 0 &&
+          ingress.receivedLength == expectedLength) {
+        return await _completeIngress(
+          session: session,
+          writer: activeWriter,
+          ingress: ingress,
+          artifact: artifact,
+          finalLength: ingress.receivedLength,
+          onProgress: onProgress,
+        );
+      }
+
+      throw StateError(
+        'WebP stream ended without a complete payload: '
+        '${ingress.receivedLength}/${expectedLength ?? '?'} '
+        'for ${identity.imageKey}',
+      );
     } finally {
       await iterator?.cancel();
       await artifact.close();
     }
+  }
+
+  Future<File> _executeLocalFile(
+    File localFile, {
+    required DownloadSession session,
+    required DownloadWriterLease writer,
+    required _WebPIngress ingress,
+    required WebPDownloadArtifact artifact,
+    required CancelToken? cancelToken,
+    required void Function(WebPTransportProgress progress)? onProgress,
+  }) async {
+    var activeWriter = writer;
+    var activeIngress = ingress;
+
+    final localLength = await localFile.length();
+    if (localLength <= 0) {
+      throw StateError('Local image file is empty: ${identity.imageKey}');
+    }
+
+    if (activeIngress.receivedLength > localLength) {
+      await artifact.reset();
+      activeWriter = session.resetSource(
+        writer: activeWriter,
+        epoch: session.source.epoch + 1,
+        expectedLength: localLength,
+      );
+      activeIngress = _WebPIngress.empty(
+        session: session,
+        writer: activeWriter,
+        artifact: artifact,
+      );
+    } else {
+      session.updateExpectedLength(
+        localLength,
+        writer: activeWriter,
+      );
+    }
+
+    _publishProgress(
+      onProgress,
+      currentBytes: activeIngress.receivedLength,
+      reportedTotal: localLength,
+      session: session,
+    );
+
+    final reader = await localFile.open();
+    try {
+      // Keep the original file:// string untouched. File/IOOverrides resolves
+      // the actual local or SAF-backed object.
+      await reader.setPosition(activeIngress.receivedLength);
+
+      while (activeIngress.receivedLength < localLength) {
+        _throwIfCancelled(cancelToken);
+
+        final remaining = localLength - activeIngress.receivedLength;
+        final chunk = await reader.read(
+          remaining < _localReadSize ? remaining : _localReadSize,
+        );
+
+        if (chunk.isEmpty) {
+          throw WebPSourceInvariantError(
+            'local file ended at '
+            '${activeIngress.receivedLength}/$localLength',
+          );
+        }
+
+        await activeIngress.append(chunk);
+        _publishProgress(
+          onProgress,
+          currentBytes: activeIngress.receivedLength,
+          reportedTotal: localLength,
+          session: session,
+        );
+      }
+    } finally {
+      await reader.close();
+    }
+
+    return _completeIngress(
+      session: session,
+      writer: activeWriter,
+      ingress: activeIngress,
+      artifact: artifact,
+      finalLength: localLength,
+      onProgress: onProgress,
+    );
+  }
+
+  Future<File> _completeIngress({
+    required DownloadSession session,
+    required DownloadWriterLease writer,
+    required _WebPIngress ingress,
+    required WebPDownloadArtifact artifact,
+    required int finalLength,
+    required void Function(WebPTransportProgress progress)? onProgress,
+  }) async {
+    if (finalLength <= 0) {
+      throw StateError('Cannot seal an empty image: ${identity.imageKey}');
+    }
+    if (!writer.active) {
+      throw const WebPTransportCancelled('stale writer before seal');
+    }
+    if (finalLength != ingress.receivedLength) {
+      throw WebPSourceInvariantError(
+        'seal length $finalLength does not match ingress '
+        '${ingress.receivedLength}',
+      );
+    }
+
+    await ingress.finalizeContent(finalLength: finalLength);
+    session.updateExpectedLength(finalLength, writer: writer);
+    await artifact.flush();
+
+    if (!writer.active) {
+      throw const WebPTransportCancelled('stale writer before promote');
+    }
+
+    final file = await artifact.promote(sealedLength: finalLength);
+
+    if (ingress.isFallback) {
+      session.sealFallback(
+        writer,
+        file,
+        finalLength: finalLength,
+      );
+    } else {
+      session.seal(writer, file);
+    }
+
+    onProgress?.call(
+      WebPTransportProgress(
+        currentBytes: finalLength,
+        totalBytes: finalLength,
+        done: true,
+      ),
+    );
+    return file;
   }
 
   Future<bool> _moveNext(
@@ -307,22 +394,20 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     CancelToken? cancelToken,
   ) async {
     if (cancelToken == null) return iterator.moveNext();
-    if (cancelToken.isCancelled) {
-      throw WebPTransportCancelled('cancelled');
-    }
+    _throwIfCancelled(cancelToken);
+
     final result = await Future.any<bool>([
       iterator.moveNext(),
       cancelToken.whenCancel.then((_) => false),
     ]);
-    if (cancelToken.isCancelled) {
-      throw WebPTransportCancelled('cancelled');
-    }
+
+    _throwIfCancelled(cancelToken);
     return result;
   }
 
   void _throwIfCancelled(CancelToken? token) {
     if (token?.isCancelled == true) {
-      throw WebPTransportCancelled('cancelled');
+      throw const WebPTransportCancelled('cancelled');
     }
   }
 
@@ -330,15 +415,19 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     final key = identity.imageKey;
     final explicitFileUri = key.startsWith('file://');
 
-    // Keep file:// untouched. The project's IOOverrides implementation is
-    // responsible for resolving it to the actual local/SAF file.
     if (!explicitFileUri && key.contains('://')) {
       return null;
     }
 
+    // Do not strip or convert file://. The application's IOOverrides owns the
+    // path mapping and may resolve it to SAF or another virtual file backend.
     final file = File(key);
-    if (await file.exists()) {
-      return file;
+
+    try {
+      if (await file.exists()) return file;
+    } on FileSystemException {
+      if (explicitFileUri) rethrow;
+      return null;
     }
 
     if (explicitFileUri) {
@@ -348,8 +437,75 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       );
     }
 
+    // A scheme-less image key can also be a source-specific remote key. Only
+    // treat it as local when the corresponding File actually exists.
     return null;
   }
+
+  void _updateExpectedLength(
+    DownloadSession session,
+    DownloadWriterLease writer,
+    int? length,
+  ) {
+    if (length == null || length <= 0) return;
+    session.updateExpectedLength(length, writer: writer);
+  }
+
+  void _publishProgress(
+    void Function(WebPTransportProgress progress)? onProgress, {
+    required int currentBytes,
+    required DownloadSession session,
+    int? reportedTotal,
+  }) {
+    if (onProgress == null) return;
+
+    final normalizedReported = _normalizeReportedTotal(
+      reportedTotal: reportedTotal,
+      currentLength: currentBytes,
+      existingExpectedLength: session.expectedLength,
+    );
+    final sessionExpected = _sessionExpectedLength(session);
+    final total = sessionExpected != null && sessionExpected >= currentBytes
+        ? sessionExpected
+        : normalizedReported != null && normalizedReported >= currentBytes
+            ? normalizedReported
+            : null;
+
+    onProgress(
+      WebPTransportProgress(
+        currentBytes: currentBytes,
+        totalBytes: total,
+      ),
+    );
+  }
+
+  int? _normalizeReportedTotal({
+    required int? reportedTotal,
+    required int currentLength,
+    required int existingExpectedLength,
+  }) {
+    // A previously known full length is preferred over per-request metadata.
+    // Range responses may report only the remaining Content-Length.
+    if (existingExpectedLength > 0 &&
+        existingExpectedLength >= currentLength) {
+      return existingExpectedLength;
+    }
+
+    if (reportedTotal == null ||
+        reportedTotal <= 0 ||
+        reportedTotal < currentLength) {
+      return null;
+    }
+
+    return reportedTotal;
+  }
+
+  int? _sessionExpectedLength(DownloadSession session) {
+    final value = session.expectedLength;
+    return value > 0 ? value : null;
+  }
+
+  int _positiveOrZero(int? value) => value != null && value > 0 ? value : 0;
 }
 
 final class _WebPIngress {
@@ -388,15 +544,20 @@ final class _WebPIngress {
 
   Future<void> append(Uint8List bytes) async {
     if (bytes.isEmpty) return;
-    if (!writer.active) throw const WebPTransportCancelled('stale writer');
+    if (!writer.active) {
+      throw const WebPTransportCancelled('stale writer');
+    }
 
     final offset = _receivedLength;
     await artifact.append(bytes, offset: offset);
-    // Cancellation is requested asynchronously. Do not let a writer that was
-    // retired while disk I/O was in progress mutate the native source. The
-    // durable artifact may be one chunk ahead and will be reconciled from its
-    // exact length by the next transport writer.
-    if (!writer.active) throw const WebPTransportCancelled('stale writer');
+
+    // Cancellation can arrive while the disk append is pending. In that case
+    // leave the durable artifact one chunk ahead and let the next writer's
+    // artifact.restore reconcile the exact committed prefix into the source.
+    if (!writer.active) {
+      throw const WebPTransportCancelled('stale writer');
+    }
+
     _receivedLength += bytes.length;
 
     switch (_kind) {
@@ -418,14 +579,20 @@ final class _WebPIngress {
   }
 
   Future<void> finalizeContent({required int finalLength}) async {
+    if (!writer.active) {
+      throw const WebPTransportCancelled('stale writer');
+    }
     if (finalLength != _receivedLength) {
       throw WebPSourceInvariantError(
         'final length $finalLength does not match ingress $_receivedLength',
       );
     }
+
     if (_kind == WebPArtifactContentKind.empty ||
         _kind == WebPArtifactContentKind.unknown) {
-      // Fewer than 12 bytes cannot be a RIFF/WEBP payload.
+      // Fewer than 12 bytes cannot contain a RIFF/WEBP signature. Preserve the
+      // payload through the ordinary Flutter fallback path rather than trying
+      // to append it to the native WebP source.
       session.enterFallbackContent(
         writer,
         restoredLength: _receivedLength,
@@ -442,6 +609,7 @@ final class _WebPIngress {
   }) async {
     final oldPrefix = _pendingPrefix;
     final headerLength = oldPrefix.length + bytes.length;
+
     if (headerLength < 12) {
       final next = Uint8List(headerLength)
         ..setRange(0, oldPrefix.length, oldPrefix)
@@ -456,10 +624,12 @@ final class _WebPIngress {
     if (prefixCopy > 0) {
       header.setRange(0, prefixCopy, oldPrefix);
     }
+
     final remaining = 12 - prefixCopy;
     if (remaining > 0) {
       header.setRange(prefixCopy, 12, bytes, 0);
     }
+
     final classified = WebPDownloadArtifact.classifyPrefix(
       header,
       completeLength: _receivedLength,
@@ -479,11 +649,13 @@ final class _WebPIngress {
     if (!_sourceContainsPrefix && oldPrefix.isNotEmpty) {
       session.append(oldPrefix, offset: 0, writer: writer);
     }
+
     session.append(
       bytes,
       offset: session.sourceCommittedLength,
       writer: writer,
     );
+
     _kind = WebPArtifactContentKind.webp;
     _pendingPrefix = Uint8List(0);
     _sourceContainsPrefix = true;

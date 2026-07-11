@@ -248,6 +248,7 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
             : frame.durationMs.clamp(16, 1000).toInt();
         final image = frame.detachImage();
         frame.dispose();
+        WebPPerf.count('framePresented');
         setImage(ImageInfo(image: image, scale: _provider.scale));
         await Future<void>.delayed(
           Duration(

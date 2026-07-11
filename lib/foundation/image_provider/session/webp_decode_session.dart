@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
+import 'package:venera/utils/webp_perf.dart';
 
 import 'webp_frame_holder.dart';
 
@@ -656,15 +657,21 @@ final class WebPDecodeSessionRegistry {
       }
       return existing;
     }
-    final session = WebPDecodeSession(
-      identity: identity,
-      download: download,
-      cursor: cursorFactory(
-        download.source,
-        identity.targetWidth,
-        identity.targetHeight,
+    final session = WebPPerf.sync(
+      'decodeSession.create',
+      () => WebPDecodeSession(
+        identity: identity,
+        download: download,
+        cursor: WebPPerf.sync(
+          'nativeCursor.create',
+          () => cursorFactory(
+            download.source,
+            identity.targetWidth,
+            identity.targetHeight,
+          ),
+        ),
+        reconcile: reconcile,
       ),
-      reconcile: reconcile,
     );
     _sessions[identity] = session;
     return session;

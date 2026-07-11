@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:venera/utils/webp_decoder.dart' as webp;
+import 'package:venera/utils/webp_perf.dart';
 
 final class DownloadIdentity {
   final String imageKey;
@@ -697,11 +698,14 @@ final class DownloadSessionRegistry {
     int epoch = 1,
   }) => _sessions.putIfAbsent(
     identity,
-    () => DownloadSession(
-      identity: identity,
-      source: sourceFactory(expectedLength, epoch),
-      reconcile: reconcile,
-      expectedLength: expectedLength,
+    () => WebPPerf.sync(
+      'downloadSession.create',
+      () => DownloadSession(
+        identity: identity,
+        source: sourceFactory(expectedLength, epoch),
+        reconcile: reconcile,
+        expectedLength: expectedLength,
+      ),
     ),
   );
 

@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/painting.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
+import 'package:venera/utils/webp_perf.dart';
 import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/image_provider/io/image_loader.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
@@ -589,7 +590,11 @@ final class WebPDecodeTask extends SchedulerTask {
     }
 
     final cursor = session.cursor;
-    cursor.setThreadLimit(session.isCurrent ? 2 : 1);
+    // 全画布 VP8 熵解码严格串行，libwebp 多线程只并行少量重建，实测在此 workload
+    // 上多线程抖动更差（4线程 40-120ms vs 单线程稳定 50ms）。恒单线程，性能靠
+    // native 侧解码线程绑大核（webp_decoder.c bind_current_thread_to_big_cores）。
+    cursor.setThreadLimit(session.isCurrent ? 1 : 1);
+    WebPPerf.count(session.isCurrent ? 'decodeDispatch.current' : 'decodeDispatch.near');
     _pool.dispatch(
       webp.DecodeJob(
         generation: generation,
@@ -614,7 +619,10 @@ final class WebPDecodeTask extends SchedulerTask {
   ) {
     List<NativeFrameHandle> frames = const [];
     try {
-      frames = session.importDecodedFrames(claim, decoded);
+      frames = WebPPerf.sync(
+        'importDecodedFrames',
+        () => session.importDecodedFrames(claim, decoded),
+      );
       session.completeDecode(claim, frames, discard: isCancelled);
       _state = isCancelled ? TaskState.cancelled : TaskState.completed;
       notifyCompleted();
