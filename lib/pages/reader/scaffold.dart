@@ -737,14 +737,14 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         final page = i.toInt();
         if (page == context.reader.page) return;
         context.reader.page = page;
-        _updateWebPCurrentOnly(page, context);
+        _reportReaderPage(page);
         context.reader._imageViewController?.toPage(page);
       },
       onChangeEnd: () {
         final page = context.reader.page.clamp(1, context.reader.maxPage);
         context.reader.update();
         WebPImageProvider.setInteractionState(InteractionState.idle);
-        _updateWebPState(page, context);
+        _reportReaderPage(page);
       },
     );
   }

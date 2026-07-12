@@ -9,6 +9,7 @@ import 'package:venera/foundation/image_provider/renderer/webp_texture_channel.d
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
+import 'package:venera/foundation/image_provider/webp_source_registry.dart';
 import 'package:venera/network/webp_download_transport.dart';
 
 import 'download_progress_publisher.dart';
@@ -37,6 +38,28 @@ import 'task_scheduler.dart';
 // ═══════════════════════════════════════════════════════════════
 // PipelineController
 // ═══════════════════════════════════════════════════════════════
+
+final class ReaderPipelineSession {
+  final List<String> images;
+  final String cid;
+  final String eid;
+  final String? sourceKey;
+  final DecodedImageCache? cache;
+  final int targetWidth;
+  final int targetHeight;
+  final int preloadCount;
+
+  const ReaderPipelineSession({
+    required this.images,
+    required this.cid,
+    required this.eid,
+    required this.sourceKey,
+    required this.cache,
+    required this.targetWidth,
+    required this.targetHeight,
+    required this.preloadCount,
+  });
+}
 
 class PipelineController {
   static final PipelineController instance = PipelineController._();
@@ -95,6 +118,54 @@ class PipelineController {
 
   // ── Public API ──────────────────────────────────────────────
 
+  void attachReaderSession(ReaderPipelineSession session) {
+    if (_isLocalStaticSession(session)) {
+      detachReaderSession();
+      return;
+    }
+    setTargetSize(session.targetWidth, session.targetHeight);
+    final contextChanged =
+        !_sameImages(_images, session.images) ||
+        _cid != session.cid ||
+        _eid != session.eid ||
+        _sourceKey != session.sourceKey;
+    if (contextChanged && _images.isNotEmpty) {
+      _detachPolicyScope();
+      _sessionId++;
+    }
+    if (contextChanged) _images = List<String>.unmodifiable(session.images);
+    _cid = session.cid;
+    _eid = session.eid;
+    _sourceKey = session.sourceKey;
+    _cache = session.cache;
+    if (_preloadCount != session.preloadCount || contextChanged) {
+      _currentBufferedFrames = 0;
+      _windowRuleIndex = -1;
+    }
+    _preloadCount = session.preloadCount;
+    if (contextChanged) {
+      _hasCurrentIdx = false;
+      _jumpProtectionTimer?.cancel();
+      _provisionalIdx = null;
+    }
+  }
+
+  void onReaderPageChanged(int currentIdx) {
+    if (_images.isEmpty) return;
+    if (_interaction != InteractionState.jumping) {
+      _setCurrentIndex(currentIdx);
+      return;
+    }
+    if (!_hasCurrentIdx) {
+      _hasCurrentIdx = true;
+      _stableIdx = currentIdx;
+      _jumpProtectionTimer?.cancel();
+      _provisionalIdx = null;
+    }
+    _currentIdx = currentIdx;
+    _scheduleDragCommit();
+  }
+
   void setTargetSize(int w, int h) {
     if (_targetW == w && _targetH == h) return;
     _targetW = w;
@@ -123,107 +194,11 @@ class PipelineController {
     }
   }
 
-  void onPageRangeChanged({
-    required int currentIdx,
-    required List<String> images,
-    required String cid,
-    required String eid,
-    required String? sourceKey,
-    DecodedImageCache? cache,
-    int preloadCount = 5,
-  }) {
-    final contextChanged =
-        !_sameImages(_images, images) ||
-        _cid != cid ||
-        _eid != eid ||
-        _sourceKey != sourceKey;
-    final pageChanged = !_hasCurrentIdx || currentIdx != _currentIdx;
-    final preloadChanged = _preloadCount != preloadCount;
-    if (contextChanged && _images.isNotEmpty) {
-      _detachPolicyScope();
-      _sessionId++;
-    }
-    if (contextChanged) {
-      // Keep an immutable snapshot. Reader widgets commonly rebuild a new List
-      // instance on every page change; object identity must not define a reader
-      // session or all policy leases will be torn down on every swipe.
-      _images = List<String>.unmodifiable(images);
-    }
-    if (pageChanged || contextChanged) {
-      WebPPerf.markPageChange('idx $currentIdx (range)');
-    }
-    _cid = cid;
-    _eid = eid;
-    _sourceKey = sourceKey;
-    _cache = cache;
-    _preloadCount = preloadCount;
-    if (contextChanged || pageChanged || preloadChanged) {
-      _currentBufferedFrames = 0;
-      _windowRuleIndex = -1;
-    }
-    if (contextChanged) {
-      _hasCurrentIdx = false;
-      _jumpProtectionTimer?.cancel();
-      _provisionalIdx = null;
-    }
-
-    _setCurrentIndex(currentIdx);
-  }
-
-  void onCurrentOnlyChanged({
-    required int currentIdx,
-    required List<String> images,
-    required String cid,
-    required String eid,
-    required String? sourceKey,
-    DecodedImageCache? cache,
-    int preloadCount = 5,
-  }) {
-    final contextChanged =
-        !_sameImages(_images, images) ||
-        _cid != cid ||
-        _eid != eid ||
-        _sourceKey != sourceKey;
-    final pageChanged = !_hasCurrentIdx || currentIdx != _currentIdx;
-    final preloadChanged = _preloadCount != preloadCount;
-    if (contextChanged && _images.isNotEmpty) {
-      _detachPolicyScope();
-      _sessionId++;
-    }
-    if (contextChanged) {
-      _images = List<String>.unmodifiable(images);
-    }
-    if (pageChanged || contextChanged) {
-      WebPPerf.markPageChange('idx $currentIdx (currentOnly)');
-    }
-    _cid = cid;
-    _eid = eid;
-    _sourceKey = sourceKey;
-    _cache = cache;
-    _preloadCount = preloadCount;
-    if (contextChanged || pageChanged || preloadChanged) {
-      _currentBufferedFrames = 0;
-      _windowRuleIndex = -1;
-    }
-    if (contextChanged || !_hasCurrentIdx) {
-      _hasCurrentIdx = true;
-      _stableIdx = currentIdx;
-      _jumpProtectionTimer?.cancel();
-      _provisionalIdx = null;
-    }
-    _currentIdx = currentIdx;
-    // customSlider 快拖（jumping）时，onChanged 每一格都会触发一次；若每格都立刻
-    // _applyWindow 就会为每个划过的页 acquire session/建下载解码，浪费资源。此处
-    // 唯一合理的「时长钳制」：拖动中把 window 应用防抖，只有停留超过窗口的页才落
-    // 实工作；离开 jumping（onChangeEnd→idle 走别的入口）会立即应用。
-    if (_interaction == InteractionState.jumping) {
-      _scheduleDragCommit();
-    } else {
-      _dragCommitTimer?.cancel();
-      _dragCommitTimer = null;
-      _applyWindow(protectJump: true);
-    }
-  }
+  bool _isLocalStaticSession(ReaderPipelineSession session) =>
+      session.images.isNotEmpty &&
+      session.images.every((key) => key.startsWith('file://') || !key.contains('://')) &&
+      !session.images.any((key) => key.toLowerCase().contains('.webp')) &&
+      !WebPSourceRegistry.isWebPSource(session.sourceKey);
 
   static const Duration _dragCommitDelay = Duration(milliseconds: 180);
 

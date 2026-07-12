@@ -56,7 +56,8 @@ class _ReaderImagesState extends State<_ReaderImages>
     if (!mounted) return;
     if (state == AppLifecycleState.resumed && reader.images != null) {
       WebPImageProvider.setInteractionState(InteractionState.idle);
-      _updateWebPState(reader.page, context);
+      _attachReaderPipeline(context);
+      _reportReaderPage(reader.page);
     }
   }
 
@@ -95,7 +96,10 @@ class _ReaderImagesState extends State<_ReaderImages>
         // Trigger initial pre-download after images are loaded; initState may
         // run before the image list is available.
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _updateWebPState(reader.page, context);
+          if (mounted) {
+            _attachReaderPipeline(context);
+            _reportReaderPage(reader.page);
+          }
         });
       } catch (e) {
         setState(() {
@@ -128,7 +132,10 @@ class _ReaderImagesState extends State<_ReaderImages>
         });
         // Trigger initial pre-download after images are loaded.
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _updateWebPState(reader.page, context);
+          if (mounted) {
+            _attachReaderPipeline(context);
+            _reportReaderPage(reader.page);
+          }
         });
       }
     }
@@ -262,7 +269,10 @@ class _GalleryModeState extends State<_GalleryMode>
       context.readerScaffold.setFloatingButton(0);
     });
     Future.microtask(() {
-      if (mounted) _updateWebPState(reader.page, context);
+      if (mounted) {
+        _attachReaderPipeline(context);
+        _reportReaderPage(reader.page);
+      }
     });
     super.initState();
   }
@@ -453,11 +463,7 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
-            if (WebPImageProvider.isJumpingInteraction) {
-              _updateWebPCurrentOnly(i, context);
-            } else {
-              _updateWebPState(i, context);
-            }
+            _reportReaderPage(i);
             context.readerScaffold.update();
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
@@ -749,7 +755,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
     WebPSourceRegistry.revision.addListener(_onWebPSourceLearned);
     Future.microtask(() {
-      if (mounted) _updateWebPState(reader.page, context);
+      if (mounted) {
+        _attachReaderPipeline(context);
+        _reportReaderPage(reader.page);
+      }
     });
     super.initState();
   }
@@ -771,11 +780,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     if (page == null) return;
     if (page != reader.page) {
       reader.setPage(page);
-      if (WebPImageProvider.isJumpingInteraction) {
-        _updateWebPCurrentOnly(page, context);
-      } else {
-        _updateWebPState(page, context);
-      }
+      _reportReaderPage(page);
       context.readerScaffold.update();
     }
   }
@@ -1256,131 +1261,27 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
   return _createImageProviderFromKey(imageKey, context);
 }
 
-void _updateWebPState(int page, BuildContext context) {
-  final reader = context.reader;
-  final images = reader.images;
-  if (images == null) {
-    Log.info('WebP.Reader', 'Page:$page images=null, skip pre-download');
-    return;
-  }
-  if (_isLocalStaticReaderPage(reader, page)) {
-    PipelineController.instance.detachReaderSession();
-    _precacheLocalReaderPages(page, context);
-    return;
-  }
-
-  final imageCtrl = reader._imageViewController;
-  final cache = imageCtrl?.webpCache;
-  final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
-    context,
-  );
-  final pipeline = PipelineController.instance;
-  pipeline.setTargetSize(targetWidth, targetHeight);
-  pipeline.onPageRangeChanged(
-    currentIdx: page - 1,
-    images: images,
-    cid: reader.cid,
-    eid: reader.eid,
-    sourceKey: reader.type.comicSource?.key,
-    cache: cache,
-    preloadCount: appdata.settings["preloadImageCount"] ?? 5,
-  );
-  _precacheLocalReaderPages(page, context);
-}
-
-void _updateWebPCurrentOnly(int page, BuildContext context) {
+void _attachReaderPipeline(BuildContext context) {
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
-  if (_isLocalStaticReaderPage(reader, page)) {
-    PipelineController.instance.detachReaderSession();
-    _precacheLocalReaderPages(page, context, radius: 0);
-    return;
-  }
-
-  final imageCtrl = reader._imageViewController;
   final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
     context,
   );
-  final pipeline = PipelineController.instance;
-  pipeline.setTargetSize(targetWidth, targetHeight);
-  pipeline.onCurrentOnlyChanged(
-    currentIdx: page - 1,
+  PipelineController.instance.attachReaderSession(ReaderPipelineSession(
     images: images,
     cid: reader.cid,
     eid: reader.eid,
     sourceKey: reader.type.comicSource?.key,
-    cache: imageCtrl?.webpCache,
+    cache: reader._imageViewController?.webpCache,
+    targetWidth: targetWidth,
+    targetHeight: targetHeight,
     preloadCount: appdata.settings["preloadImageCount"] ?? 5,
-  );
-  _precacheLocalReaderPages(page, context, radius: 0);
+  ));
 }
 
-bool _isLocalStaticReaderPage(_ReaderState reader, int page) =>
-    reader.type == ComicType.local &&
-    !WebPSourceRegistry.isWebPSource(reader.type.comicSource?.key) &&
-    !_imageKeysForReaderPage(reader, page).any(WebPImageProvider.isLikelyWebP);
-
-void _precacheLocalReaderPages(
-  int page,
-  BuildContext context, {
-  int radius = 1,
-}) {
-  final reader = context.reader;
-  final images = reader.images;
-  if (images == null || images.isEmpty) return;
-
-  final pages = <int>{page};
-  for (var i = 1; i <= radius; i++) {
-    pages
-      ..add(page + i)
-      ..add(page - i);
-  }
-
-  for (final p in pages) {
-    for (final imageKey in _imageKeysForReaderPage(reader, p)) {
-      if (!_isLocalImageKey(imageKey)) continue;
-      precacheImage(
-        _createImageProviderFromKey(imageKey, context),
-        context,
-      ).ignore();
-    }
-  }
-}
-
-Iterable<String> _imageKeysForReaderPage(_ReaderState reader, int page) sync* {
-  final images = reader.images;
-  if (images == null || page < 1 || page > reader.maxPage) return;
-
-  if (reader.mode.isContinuous) {
-    final index = page - 1;
-    if (index >= 0 && index < images.length) yield images[index];
-    return;
-  }
-
-  final imagesPerPage = reader.imagesPerPage;
-  int startIndex;
-  int endIndex;
-  if (reader.showSingleImageOnFirstPage()) {
-    if (page == 1) {
-      startIndex = 0;
-      endIndex = 1;
-    } else {
-      startIndex = (page - 2) * imagesPerPage + 1;
-      endIndex = math.min(startIndex + imagesPerPage, images.length);
-    }
-  } else {
-    startIndex = (page - 1) * imagesPerPage;
-    endIndex = math.min(startIndex + imagesPerPage, images.length);
-  }
-  for (var i = startIndex; i < endIndex; i++) {
-    if (i >= 0 && i < images.length) yield images[i];
-  }
-}
-
-bool _isLocalImageKey(String imageKey) {
-  return imageKey.startsWith('file://') || !imageKey.contains('://');
-}
+void _reportReaderPage(int page) =>
+    PipelineController.instance.onReaderPageChanged(page - 1);
 
 class _SwipeChangeChapterProgress extends StatefulWidget {
   const _SwipeChangeChapterProgress({this.controller, required this.isPrev});
@@ -1493,17 +1394,7 @@ class _ProgressPainter extends CustomPainter {
     );
 
     paint.color = color;
-    canvas.drawRRect(
-      RRect.fromLTRBR(
-        0,
-        0,
-        size.width * value,
-        size.height,
-        Radius.circular(16),
-      ),
-      paint,
-    );
-  }
+    canvas.drawRRect( RRect.fromLTRBR( 0, 0, size.width * value, size.height, Radius.circular(16),), paint,); }
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) {
