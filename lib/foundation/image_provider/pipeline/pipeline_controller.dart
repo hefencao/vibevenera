@@ -62,14 +62,6 @@ class PipelineController {
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
   final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
-  void Function(
-    String currentKey,
-    Set<String> decodeNextKeys,
-    Set<String> decodePrevKeys,
-    Set<String> downloadOnlyKeys,
-  )?
-  onWindowChanged;
-
   InteractionState _interaction = InteractionState.idle;
   int _targetW = 0, _targetH = 0;
   int _currentIdx = 0;
@@ -87,6 +79,7 @@ class PipelineController {
   String? _sourceKey;
   String _cid = '';
   String _eid = '';
+  DecodedImageCache? _cache;
   late final WebPSessionCoordinator _sessions;
   final Map<String, WebPResourceLease> _policyLeases = {};
 
@@ -162,6 +155,7 @@ class PipelineController {
     _cid = cid;
     _eid = eid;
     _sourceKey = sourceKey;
+    _cache = cache;
     _preloadCount = preloadCount;
     if (contextChanged || pageChanged || preloadChanged) {
       _currentBufferedFrames = 0;
@@ -205,6 +199,7 @@ class PipelineController {
     _cid = cid;
     _eid = eid;
     _sourceKey = sourceKey;
+    _cache = cache;
     _preloadCount = preloadCount;
     if (contextChanged || pageChanged || preloadChanged) {
       _currentBufferedFrames = 0;
@@ -359,11 +354,11 @@ class PipelineController {
     _applyPolicies();
     _syncPolicyLeases();
     _syncCurrentDownloadProgress();
-
-    onWindowChanged?.call(_currentKey, _nearKeys, _prevKeys, {
-      ..._farKeys,
-      ..._keepKeys,
-    });
+    _cache?.setActivePages(
+      [_currentKey, ..._nearKeys, ..._prevKeys]
+          .where((key) => key.isNotEmpty)
+          .map(fullKey),
+    );
   }
 
   void dispose() {
@@ -387,7 +382,7 @@ class PipelineController {
     _dragCommitTimer?.cancel();
     _dragCommitTimer = null;
     _provisionalIdx = null;
-    onWindowChanged = null;
+    _cache = null;
     _progress.reset();
     // Logical detach only. Native sources and decode sessions survive while
     // visible or other policy leases still reference them.
@@ -558,7 +553,7 @@ class PipelineController {
           (lease.download.identity != downloadIdentity ||
               lease.decode.identity != decodeIdentity);
       if (identityChanged) {
-        lease!.detach();
+        lease.detach();
         _policyLeases.remove(entry.fullKey);
         lease = null;
       }

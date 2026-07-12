@@ -32,6 +32,7 @@ import 'package:venera/foundation/image_provider/reader_image.dart';
 import 'package:venera/foundation/image_provider/pipeline/resource_entry.dart';
 import 'package:venera/foundation/image_provider/renderer/webp_texture_registry.dart';
 import 'package:venera/foundation/image_provider/webp_image.dart';
+import 'package:venera/foundation/image_provider/webp_source_registry.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';

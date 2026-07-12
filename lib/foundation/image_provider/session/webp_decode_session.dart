@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
+import 'package:venera/foundation/image_provider/webp_source_registry.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 import 'package:venera/utils/webp_perf.dart';
 
@@ -419,6 +420,12 @@ final class WebPDecodeSession {
       if (frames.isEmpty) {
         _decodeBlockedAtCommittedLength = claim.sourceCommittedLength;
       } else {
+        // 首帧真正产出 = 该源确认提供动图 WebP（非 webp 走 fallback 不到此，静态 webp
+        // 无 ANMF 帧也解不出）。登记源以便下次会话首页即走流式路由。会话稳定：本次
+        // 仅持久化，当前路由不变。
+        if (!_hasProducedFrame) {
+          WebPSourceRegistry.mark(download.identity.sourceKey);
+        }
         _decodedFramesSinceRestart += frames.length;
         _hasProducedFrame = true;
         _decodeBlockedAtCommittedLength = null;

@@ -84,26 +84,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   int get hashCode =>
       Object.hash(imageKey, sourceKey, cid, eid, targetWidth, targetHeight);
 
-  // ── Static entry points (called by reader UI) ──────────────
-
-  static void onPageChanged({
-    required int currentPageIndex,
-    required List<String> images,
-    required BuildContext context,
-    required String cid,
-    required String eid,
-    required String? sourceKey,
-    DecodedImageCache? cache,
-  }) => _onWebPPageChanged(
-    currentPageIndex: currentPageIndex,
-    images: images,
-    context: context,
-    cid: cid,
-    eid: eid,
-    sourceKey: sourceKey,
-    cache: cache,
-  );
-
   static void clearAll() =>
       PipelineController.instance.evictUndemandedSessions();
 

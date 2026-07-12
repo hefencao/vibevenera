@@ -425,18 +425,6 @@ final class _WebPSessionImageStreamCompleter extends ImageStreamCompleter
 
     _fallbackStarted = true;
     try {
-      // Source sealing performs the final native parse synchronously. Give the
-      // decode reconciler one turn before falling back to Flutter's generic
-      // codec for a non-WebP/static image.
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      if (_disposed) return;
-      if (!snapshot.fallbackContent &&
-          nativeError == null &&
-          lease.decode.hasProducedFrame) {
-        _fallbackStarted = false;
-        _schedulePump();
-        return;
-      }
       final validation = await ImageDataValidator.validateFile(file);
       // 只在「明显不是可解码图像」时提前否决（空文件、HTML/JSON/文本错误页、未知
       // 签名）。已识别出图像格式却仅因完整性/长度校验不过（如 webp 的 RIFF 声明长

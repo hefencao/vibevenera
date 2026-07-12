@@ -245,11 +245,19 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   final DecodedImageCache webpCache = DecodedImageCache();
 
+  // 某源被确认为动图 WebP 时重建：当前页 provider 从 ReaderImageProvider 翻成
+  // WebPImageProvider（挂到管道正在解码的 session）→ 首次浏览即流式。仅首张动图页
+  // 触发一次，之后同源页 build 时已在 registry → 直接 WebP、不再翻转。
+  void _onWebPSourceLearned() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     reader = context.reader;
     controller = PageController(initialPage: reader.page);
     reader._imageViewController = this;
+    WebPSourceRegistry.revision.addListener(_onWebPSourceLearned);
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
     });
@@ -262,6 +270,7 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void dispose() {
     _settlingTimer?.cancel();
+    WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
     PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
@@ -728,11 +737,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool isZoomedIn = false;
   bool isLongPressing = false;
 
+  // 见 _GalleryModeState._onWebPSourceLearned。
+  void _onWebPSourceLearned() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     reader = context.reader;
     reader._imageViewController = this;
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
+    WebPSourceRegistry.revision.addListener(_onWebPSourceLearned);
     Future.microtask(() {
       if (mounted) _updateWebPState(reader.page, context);
     });
@@ -744,6 +759,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     _settlingTimer?.cancel();
     _delayedScrollingTimer?.cancel();
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
+    WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
     PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
@@ -1193,16 +1209,22 @@ ImageProvider _createImageProviderFromKey(
 ) {
   var reader = context.reader;
 
-  // 非 webp（绝大多数漫画页是 jpg/png）走轻量 ReaderImageProvider 快路径：
-  // Flutter 标准 fetch→codec，无流式管线、无 50ms 回退硬等。仅疑似 webp（可能是
-  // 动图）才进 WebPImageProvider 的流式/native texture 管线。判据按文件名，与
-  // WebPImageProvider.isLikelyWebP 一致；极少数 .jpg 后缀的动图 webp 会退化为
-  // 静态首帧，可接受。
-  if (!WebPImageProvider.isLikelyWebP(imageKey)) {
+  // 非 webp（绝大多数漫画页是 jpg/png）走轻量 ReaderImageProvider 快路径：Flutter
+  // 标准 fetch→codec，渐进加载、无 50ms 回退硬等。疑似/已知 webp（可能是动图）才进
+  // WebPImageProvider 的流式/native texture 管线。
+  //
+  // 判据两条：①文件名含 .webp；②WebPSourceRegistry 记得该源上次会话确认过动图 WebP
+  // ——因为有的源图片 key 是纯数字无扩展名（如 111），只靠文件名会误判为非 webp、被
+  // 打回非流式老路（转圈转完才播）。registry 是会话稳定的（只读上次持久化快照），保证
+  // 同一源本会话内所有页 provider 类型一致，翻页无 provider 翻转/无 setState churn。
+  final sourceKey = reader.type.comicSource?.key;
+  final treatAsWebP = WebPImageProvider.isLikelyWebP(imageKey) ||
+      WebPSourceRegistry.isWebPSource(sourceKey);
+  if (!treatAsWebP) {
     final page = reader.images?.indexOf(imageKey) ?? 0;
     return ReaderImageProvider(
       imageKey,
-      reader.type.comicSource?.key,
+      sourceKey,
       reader.cid,
       reader.eid,
       page < 0 ? 0 : page,
@@ -1218,7 +1240,7 @@ ImageProvider _createImageProviderFromKey(
 
   return WebPImageProvider(
     imageKey: imageKey,
-    sourceKey: reader.type.comicSource?.key,
+    sourceKey: sourceKey,
     cid: reader.cid,
     eid: reader.eid,
     targetWidth: targetWidth,
@@ -1241,24 +1263,20 @@ void _updateWebPState(int page, BuildContext context) {
     Log.info('WebP.Reader', 'Page:$page images=null, skip pre-download');
     return;
   }
+  if (_isLocalStaticReaderPage(reader, page)) {
+    PipelineController.instance.detachReaderSession();
+    _precacheLocalReaderPages(page, context);
+    return;
+  }
 
   final imageCtrl = reader._imageViewController;
   final cache = imageCtrl?.webpCache;
   final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
     context,
   );
-
-  WebPImageProvider.onPageChanged(
-    currentPageIndex: page - 1,
-    images: images,
-    context: context,
-    cid: reader.cid,
-    eid: reader.eid,
-    sourceKey: reader.type.comicSource?.key,
-    cache: cache,
-  );
-  PipelineController.instance.setTargetSize(targetWidth, targetHeight);
-  PipelineController.instance.onPageRangeChanged(
+  final pipeline = PipelineController.instance;
+  pipeline.setTargetSize(targetWidth, targetHeight);
+  pipeline.onPageRangeChanged(
     currentIdx: page - 1,
     images: images,
     cid: reader.cid,
@@ -1274,22 +1292,19 @@ void _updateWebPCurrentOnly(int page, BuildContext context) {
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
+  if (_isLocalStaticReaderPage(reader, page)) {
+    PipelineController.instance.detachReaderSession();
+    _precacheLocalReaderPages(page, context, radius: 0);
+    return;
+  }
 
   final imageCtrl = reader._imageViewController;
   final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
     context,
   );
-  WebPImageProvider.onPageChanged(
-    currentPageIndex: page - 1,
-    images: images,
-    context: context,
-    cid: reader.cid,
-    eid: reader.eid,
-    sourceKey: reader.type.comicSource?.key,
-    cache: imageCtrl?.webpCache,
-  );
-  PipelineController.instance.setTargetSize(targetWidth, targetHeight);
-  PipelineController.instance.onCurrentOnlyChanged(
+  final pipeline = PipelineController.instance;
+  pipeline.setTargetSize(targetWidth, targetHeight);
+  pipeline.onCurrentOnlyChanged(
     currentIdx: page - 1,
     images: images,
     cid: reader.cid,
@@ -1300,6 +1315,11 @@ void _updateWebPCurrentOnly(int page, BuildContext context) {
   );
   _precacheLocalReaderPages(page, context, radius: 0);
 }
+
+bool _isLocalStaticReaderPage(_ReaderState reader, int page) =>
+    reader.type == ComicType.local &&
+    !WebPSourceRegistry.isWebPSource(reader.type.comicSource?.key) &&
+    !_imageKeysForReaderPage(reader, page).any(WebPImageProvider.isLikelyWebP);
 
 void _precacheLocalReaderPages(
   int page,
