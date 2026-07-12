@@ -1,16 +1,19 @@
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
+
 import 'package:sliver_tools/sliver_tools.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
-import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
+import 'package:venera/foundation/image_provider/cached_image.dart';
+import 'package:venera/foundation/image_provider/pipeline/cache_download_progress_publisher.dart';
+import 'package:venera/foundation/image_provider/pipeline/pipeline_controller.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/comic_details_page/comic_page.dart';
-import 'package:venera/pages/comic_source_page.dart';
 import 'package:venera/pages/downloading_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/history_page.dart';
@@ -20,6 +23,7 @@ import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/import_comic.dart';
 import 'package:venera/utils/tags_translation.dart';
 import 'package:venera/utils/translations.dart';
+import 'package:venera/network/download.dart';
 
 import 'local_comics_page.dart';
 
@@ -36,7 +40,6 @@ class HomePage extends StatelessWidget {
         const _History(),
         const _Local(),
         const FollowUpdatesWidget(),
-        const _ComicSourceWidget(),
         const ImageFavorites(),
         SliverPadding(padding: EdgeInsets.only(top: context.padding.bottom)),
       ],
@@ -405,13 +408,20 @@ class _LocalState extends State<_Local> {
                   ],
                 ),
               ).paddingHorizontal(16),
-              if (local.isNotEmpty)
+              if (local.isNotEmpty || LocalManager().downloadingTasks.isNotEmpty)
                 SizedBox(
                   height: 136,
                   child: ListView.builder(
                     scrollDirection: Axis.horizontal,
-                    itemCount: local.length,
+                    itemCount: LocalManager().downloadingTasks.length + local.length,
                     itemBuilder: (context, index) {
+                      if (index < LocalManager().downloadingTasks.length) {
+                        return _DownloadingComicTile(
+                          key: ValueKey(LocalManager().downloadingTasks[index]),
+                          task: LocalManager().downloadingTasks[index],
+                        ).paddingHorizontal(8).paddingVertical(2);
+                      }
+                      index -= LocalManager().downloadingTasks.length;
                       final heroID = local[index].id.hashCode;
                       return SimpleComicTile(
                         comic: local[index],
@@ -431,32 +441,32 @@ class _LocalState extends State<_Local> {
                     },
                   ),
                 ).paddingHorizontal(8),
-              Row(
-                children: [
-                  if (LocalManager().downloadingTasks.isNotEmpty)
-                    Button.outlined(
-                      child: Row(
-                        children: [
-                          if (LocalManager().downloadingTasks.first.isPaused)
-                            const Icon(Icons.pause_circle_outline, size: 18)
-                          else
-                            const _AnimatedDownloadingIcon(),
-                          const SizedBox(width: 8),
-                          Text("@a Tasks".tlParams({
-                            'a': LocalManager().downloadingTasks.length,
-                          })),
-                        ],
+              ValueListenableBuilder(
+                valueListenable: PipelineController.instance.cacheDownloadProgress,
+                builder: (context, downloads, _) => Row(
+                  children: [
+                    if (downloads.isNotEmpty)
+                      Expanded(
+                        child: SizedBox(
+                          height: 32,
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: downloads.length > 3 ? 3 : downloads.length,
+                            separatorBuilder: (_, _) => const SizedBox(width: 8),
+                            itemBuilder: (context, index) => _CacheDownloadChip(
+                              download: downloads[index],
+                            ),
+                          ),
+                        ),
                       ),
-                      onPressed: () {
-                        showPopUpWidget(context, const DownloadingPage());
-                      },
+                    if (downloads.isEmpty) const Spacer(),
+                    if (downloads.isNotEmpty) const SizedBox(width: 8),
+                    Button.filled(
+                      onPressed: import,
+                      child: Text("Import".tl),
                     ),
-                  const Spacer(),
-                  Button.filled(
-                    onPressed: import,
-                    child: Text("Import".tl),
-                  ),
-                ],
+                  ],
+                ),
               ).paddingHorizontal(16).paddingVertical(8),
             ],
           ),
@@ -644,150 +654,134 @@ class _ImportComicsWidgetState extends State<_ImportComicsWidget> {
   }
 }
 
-class _ComicSourceWidget extends StatefulWidget {
-  const _ComicSourceWidget();
+class _DownloadingComicTile extends StatefulWidget {
+  const _DownloadingComicTile({required this.task, super.key});
+
+  final DownloadTask task;
 
   @override
-  State<_ComicSourceWidget> createState() => _ComicSourceWidgetState();
+  State<_DownloadingComicTile> createState() => _DownloadingComicTileState();
 }
 
-class _ComicSourceWidgetState extends State<_ComicSourceWidget> {
-  late List<String> comicSources;
-
-  void onComicSourceChange() {
-    setState(() {
-      comicSources = ComicSource.all().map((e) => e.name).toList();
-    });
-  }
-
+class _DownloadingComicTileState extends State<_DownloadingComicTile> {
   @override
   void initState() {
-    comicSources = ComicSource.all().map((e) => e.name).toList();
-    ComicSourceManager().addListener(onComicSourceChange);
+    widget.task.addListener(update);
     super.initState();
   }
 
   @override
   void dispose() {
-    ComicSourceManager().removeListener(onComicSourceChange);
+    widget.task.removeListener(update);
     super.dispose();
   }
 
-  int get _availableUpdates {
-    int c = 0;
-    ComicSourceManager().availableUpdates.forEach((key, version) {
-      var source = ComicSource.find(key);
-      if (source != null) {
-        if (compareSemVer(version, source.version)) {
-          c++;
-        }
-      }
-    });
-    return c;
+  void update() {
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    return SliverToBoxAdapter(
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: Theme.of(context).colorScheme.outlineVariant,
-            width: 0.6,
+    return Tooltip(
+      message: widget.task.title,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => showPopUpWidget(context, const DownloadingPage()),
+        child: Container(
+          width: 98,
+          height: 136,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            color: context.colorScheme.secondaryContainer,
           ),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () {
-            context.to(() => const ComicSourcePage());
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
             children: [
-              SizedBox(
-                height: 56,
-                child: Row(
-                  children: [
-                    Center(
-                      child: Text('Comic Source'.tl, style: ts.s18),
-                    ),
-                    Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 8),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.secondaryContainer,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child:
-                          Text(comicSources.length.toString(), style: ts.s12),
-                    ),
-                    const Spacer(),
-                    const Icon(Icons.arrow_right),
-                  ],
+              if (widget.task.cover != null)
+                Positioned.fill(
+                  child: Image(
+                    image: CachedImageProvider(widget.task.cover!),
+                    fit: BoxFit.cover,
+                    filterQuality: FilterQuality.medium,
+                  ),
                 ),
-              ).paddingHorizontal(16),
-              if (comicSources.isNotEmpty)
-                SizedBox(
-                  width: double.infinity,
-                  child: Wrap(
-                    runSpacing: 8,
-                    spacing: 8,
-                    children: comicSources.map((e) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color:
-                              Theme.of(context).colorScheme.secondaryContainer,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(e),
-                      );
-                    }).toList(),
-                  ).paddingHorizontal(16).paddingBottom(16),
+              Positioned.fill(
+                child: ColoredBox(color: Colors.black.withAlpha(88)),
+              ),
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: FractionallySizedBox(
+                  heightFactor: widget.task.progress,
+                  widthFactor: 1,
+                  child: ColoredBox(
+                    color: context.colorScheme.primary.withAlpha(96),
+                  ),
                 ),
-              if (_availableUpdates > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: context.colorScheme.outlineVariant,
-                      width: 0.6,
-                    ),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.update,
-                        color: context.colorScheme.primary,
-                        size: 20,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        "@c updates".tlParams({
-                          'c': _availableUpdates,
-                        }),
-                        style: ts.withColor(context.colorScheme.primary),
-                      ),
-                    ],
-                  ),
-                )
-                    .toAlign(Alignment.centerLeft)
-                    .paddingHorizontal(16)
-                    .paddingBottom(8),
+              ),
             ],
           ),
         ),
       ),
     );
+  }
+}
+
+class _CacheDownloadChip extends StatelessWidget {
+  const _CacheDownloadChip({required this.download});
+
+  final CacheDownloadProgress download;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _downloadSpeedColor(download.speedBytesPerSecond);
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () => showPopUpWidget(context, const DownloadingPage()),
+      child: Container(
+        width: 84,
+        height: 32,
+        decoration: BoxDecoration(
+          color: color.withAlpha(48),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          children: [
+            FractionallySizedBox(
+              widthFactor: download.progress,
+              heightFactor: 1,
+              alignment: Alignment.centerLeft,
+              child: ColoredBox(color: color),
+            ),
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Text(
+                  download.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: context.colorScheme.onPrimary,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _downloadSpeedColor(double bytesPerSecond) {
+    const base = 128 * 1024.0;
+    const max = 8 * 1024 * 1024.0;
+    final t = (math.log(1 + bytesPerSecond / base) /
+            math.log(1 + max / base))
+        .clamp(0.0, 1.0);
+    return t < 0.7
+        ? Color.lerp(Colors.red, Colors.amber, t / 0.7)!
+        : Color.lerp(Colors.amber, Colors.green, (t - 0.7) / 0.3)!;
   }
 }
 

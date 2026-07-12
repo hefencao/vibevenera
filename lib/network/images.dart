@@ -643,6 +643,23 @@ abstract class ImageDownloader {
     );
   }
 
+  static Future<io.File?> findCachedComicImageFile(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) async {
+    final cached = await CacheManager().findCache(
+      '$imageKey@$sourceKey@$cid@$eid',
+    );
+    if (cached == null) return null;
+    final validation = ImageDataValidator.validateBytes(
+      await cached.readAsBytes(),
+      allowUnknown: true,
+    );
+    return validation.valid ? cached : null;
+  }
+
   // ─────────────────────────────────────────────────────────────
   // Private: Comic image loader (with retry loop)
   // ─────────────────────────────────────────────────────────────

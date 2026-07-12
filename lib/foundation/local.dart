@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/download.dart';
@@ -485,18 +486,48 @@ class LocalManager with ChangeNotifier {
         .any((element) => element.id == id && element.comicType == type);
   }
 
-  Future<Directory> findValidDirectory(
-      String id, ComicType type, String name) async {
+  String getSourceDownloadPath(String sourceKey) {
+    final paths = appdata.implicitData['sourceDownloadPaths'];
+    final path = paths is Map ? paths[sourceKey] as String? ?? '' : '';
+    return App.isAndroid && path.startsWith('android://') ? '' : path;
+  }
+
+  void setSourceDownloadPath(String sourceKey, String path) {
+    final paths = Map<String, dynamic>.from(
+      appdata.implicitData['sourceDownloadPaths'] as Map? ?? const {},
+    );
+    paths[sourceKey] = path;
+    appdata.implicitData['sourceDownloadPaths'] = paths;
+    appdata.writeImplicitData();
+  }
+
+  void removeSourceDownloadPath(String sourceKey) {
+    final paths = appdata.implicitData['sourceDownloadPaths'];
+    if (paths is! Map || paths.remove(sourceKey) == null) return;
+    appdata.writeImplicitData();
+  }
+
+  Future<Directory> findValidDownloadDirectory(
+    String id, ComicType type, String name) async {
     var comic = find(id, type);
     if (comic != null) {
-      return Directory(FilePath.join(path, comic.directory));
+      return Directory(comic.baseDir);
+    }
+    if (!await requestStoragePermission()) {
+      throw StateError('Storage permission is required');
+    }
+    final downloadPath = getSourceDownloadPath(type.sourceKey);
+    if (downloadPath.isEmpty) {
+      throw StateError('Download directory is not configured');
     }
     const comicDirectoryMaxLength = 80;
     if (name.length > comicDirectoryMaxLength) {
       name = name.substring(0, comicDirectoryMaxLength);
     }
-    var dir = findValidDirectoryName(path, name);
-    return Directory(FilePath.join(path, dir)).create().then((value) => value);
+    var dir = findValidDirectoryName(downloadPath, name);
+    return Directory(FilePath.join(downloadPath, dir))
+        .create()
+        .then((value) => value);
   }
 
   void completeTask(DownloadTask task) {
@@ -560,7 +591,7 @@ class LocalManager with ChangeNotifier {
 
   void deleteComic(LocalComic c, [bool removeFileOnDisk = true]) {
     if (removeFileOnDisk) {
-      var dir = Directory(FilePath.join(path, c.directory));
+      var dir = Directory(c.baseDir);
       dir.deleteIgnoreError(recursive: true);
     }
     // Deleting a local comic means that it's no longer available, thus both favorite and history should be deleted.
@@ -625,7 +656,7 @@ class LocalManager with ChangeNotifier {
     try {
       for (var c in comics) {
         if (removeFileOnDisk) {
-          var dir = Directory(FilePath.join(path, c.directory));
+          var dir = Directory(c.baseDir);
           if (dir.existsSync()) {
             shouldRemovedDirs.add(dir);
           }

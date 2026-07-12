@@ -14,6 +14,7 @@ import 'package:venera/foundation/image_provider/webp_source_registry.dart';
 import 'package:venera/network/webp_download_transport.dart';
 
 import 'download_progress_publisher.dart';
+import 'cache_download_progress_publisher.dart';
 import 'download_ranker.dart';
 import 'pipeline_policy_applier.dart';
 import 'pipeline_window.dart';
@@ -69,6 +70,7 @@ class PipelineController {
       scheduler: _scheduler,
       transportFactory: (identity) => ImageDownloaderWebPTransport(identity),
       onProgress: _onSessionProgress,
+      onDownloadSession: _cacheDownloads.observe,
       // Android 用 native texture 渲染动图帧：解码产出的 native RGBA 帧不转
       // ui.Image，而是交给显示层按播放节奏上传平台纹理，消除每帧 ui.Image 分配 +
       // setState 对主 isolate 的饱和。其它平台仍用 FlutterImageRenderer。
@@ -81,8 +83,12 @@ class PipelineController {
   final ResourceManager resources = ResourceManager();
   final TaskScheduler _scheduler = TaskScheduler.instance;
   final DownloadProgressPublisher _progress = DownloadProgressPublisher();
+  final CacheDownloadProgressPublisher _cacheDownloads =
+      CacheDownloadProgressPublisher();
   ValueNotifier<ReaderDownloadProgress> get currentDownloadProgress =>
       _progress.notifier;
+  ValueListenable<List<CacheDownloadProgress>> get cacheDownloadProgress =>
+      _cacheDownloads.notifier;
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
   final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
@@ -356,6 +362,7 @@ class PipelineController {
     _detachPolicyScope();
     _sessionId++;
     _progress.reset();
+    _cacheDownloads.dispose();
     _sessions.dispose();
     _scheduler.clear();
     resources.dispose();

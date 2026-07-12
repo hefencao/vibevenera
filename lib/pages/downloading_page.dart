@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
+import 'package:venera/foundation/image_provider/pipeline/cache_download_progress_publisher.dart';
+import 'package:venera/foundation/image_provider/pipeline/pipeline_controller.dart';
+import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/utils/io.dart';
@@ -51,22 +54,58 @@ class _DownloadingPageState extends State<DownloadingPage> {
 
   @override
   Widget build(BuildContext context) {
-    return PopUpWidgetScaffold(
-      title: "",
-      body: ListView.builder(
-        itemCount: LocalManager().downloadingTasks.length + 1,
-        itemBuilder: (BuildContext context, int i) {
-          if (i == 0) {
-            return buildTop();
-          }
-          i--;
-
-          return _DownloadTaskTile(
-            key: ValueKey(LocalManager().downloadingTasks[i]),
-            task: LocalManager().downloadingTasks[i],
-          );
-        },
+    return DefaultTabController(
+      length: 2,
+      child: PopUpWidgetScaffold(
+        title: "Download".tl,
+        body: Column(
+          children: [
+            TabBar(
+              tabs: [
+                Tab(text: "Requests".tl),
+                Tab(text: "Cache".tl),
+              ],
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _buildRequestedDownloads(),
+                  _buildCacheDownloads(),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildRequestedDownloads() {
+    return ListView.builder(
+      itemCount: LocalManager().downloadingTasks.length + 1,
+      itemBuilder: (BuildContext context, int i) {
+        if (i == 0) return buildTop();
+        i--;
+        return _DownloadTaskTile(
+          key: ValueKey(LocalManager().downloadingTasks[i]),
+          task: LocalManager().downloadingTasks[i],
+        );
+      },
+    );
+  }
+
+  Widget _buildCacheDownloads() {
+    return ValueListenableBuilder<List<CacheDownloadProgress>>(
+      valueListenable: PipelineController.instance.cacheDownloadProgress,
+      builder: (context, downloads, _) {
+        if (downloads.isEmpty) return const SizedBox();
+        return ListView.builder(
+          itemCount: downloads.length,
+          itemBuilder: (context, index) => _CacheDownloadTaskTile(
+            download: downloads[index],
+          ),
+        );
+      },
     );
   }
 
@@ -143,6 +182,61 @@ class _DownloadTaskTile extends StatefulWidget {
 
   @override
   State<_DownloadTaskTile> createState() => _DownloadTaskTileState();
+}
+
+class _CacheDownloadTaskTile extends StatelessWidget {
+  const _CacheDownloadTaskTile({required this.download});
+
+  final CacheDownloadProgress download;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = switch (download.transport) {
+      DownloadTransportState.paused => "Paused".tl,
+      DownloadTransportState.failed => "Error".tl,
+      _ => '${bytesToReadableString(download.speedBytesPerSecond.toInt())}/s',
+    };
+    return Container(
+      height: 88,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: context.colorScheme.secondaryContainer,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.cached),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  download.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const Spacer(),
+                Row(
+                  children: [
+                    Expanded(
+                      child: LinearProgressIndicator(value: download.progress),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(status, style: ts.s12),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _DownloadTaskTileState extends State<_DownloadTaskTile> {

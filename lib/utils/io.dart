@@ -212,6 +212,17 @@ class DirectoryPicker {
 
   static const _methodChannel = MethodChannel("venera/method_channel");
 
+  Future<String?> pickWritableDirectoryPath() async {
+    IO._isSelectingFiles = true;
+    try {
+      return await _methodChannel.invokeMethod<String?>("getDirectoryPath");
+    } finally {
+      Future.delayed(const Duration(milliseconds: 100), () {
+        IO._isSelectingFiles = false;
+      });
+    }
+  }
+
   Future<Directory?> pickDirectory({bool directAccess = false}) async {
     IO._isSelectingFiles = true;
     try {
@@ -244,6 +255,13 @@ class DirectoryPicker {
       });
     }
   }
+}
+
+const _storageChannel = MethodChannel('venera/storage');
+
+Future<bool> requestStoragePermission() async {
+  if (!App.isAndroid) return true;
+  return await _storageChannel.invokeMethod<bool>('request') ?? false;
 }
 
 class IOSDirectoryPicker {

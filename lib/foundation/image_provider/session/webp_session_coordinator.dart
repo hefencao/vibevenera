@@ -115,6 +115,7 @@ final class WebPSessionCoordinator {
     WebPTransportProgress progress,
   )?
   onProgress;
+  final void Function(DownloadSession session)? onDownloadSession;
 
   late final DownloadSessionRegistry downloads;
   late final WebPDecodeSessionRegistry decodes;
@@ -129,6 +130,7 @@ final class WebPSessionCoordinator {
     required this.transportFactory,
     this.renderer = const FlutterImageRenderer(),
     this.onProgress,
+    this.onDownloadSession,
     webp.WebPByteSource Function(int expectedLength, int epoch)? sourceFactory,
     webp.WebPFrameCursor Function(
       webp.WebPByteSource source,
@@ -154,6 +156,7 @@ final class WebPSessionCoordinator {
     required WebPResourceDemand demand,
   }) {
     final download = downloads.getOrCreate(downloadIdentity);
+    onDownloadSession?.call(download);
     _replaceDecodeBindingIfNeeded(decodeIdentity, download);
     final decode = decodes.getOrCreate(decodeIdentity, download);
     final lease = WebPResourceLease._(this, scopeId, download, decode, demand);

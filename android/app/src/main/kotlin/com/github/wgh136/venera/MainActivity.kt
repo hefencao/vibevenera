@@ -235,10 +235,21 @@ class MainActivity : FlutterFragmentActivity() {
             if(plain.contains("%3A")) {
                 plain = Uri.decode(plain)
             }
-            val externalStoragePrefix = "content://com.android.externalstorage.documents/tree/primary:";
+            val externalStoragePrefix = "content://com.android.externalstorage.documents/tree/";
             if(plain.startsWith(externalStoragePrefix)) {
-                val path = plain.substring(externalStoragePrefix.length)
-                result.success(Environment.getExternalStorageDirectory().absolutePath + "/" + path)
+                val treeId = plain.substring(externalStoragePrefix.length)
+                val separator = treeId.indexOf(':')
+                if(separator >= 0) {
+                    val volume = treeId.substring(0, separator)
+                    val relativePath = treeId.substring(separator + 1)
+                    val root = if(volume == "primary") {
+                        Environment.getExternalStorageDirectory().absolutePath
+                    } else {
+                        "/storage/$volume"
+                    }
+                    result.success(if(relativePath.isEmpty()) root else "$root/$relativePath")
+                    return
+                }
             }
             // The uri cannot be parsed to plain path, use copy method
         }

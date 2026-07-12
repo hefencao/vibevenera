@@ -269,9 +269,12 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       }
     }
 
+    if (App.isAndroid && path?.startsWith('android://') == true) {
+      path = null;
+    }
     if (path == null) {
       try {
-        var dir = await LocalManager().findValidDirectory(
+        var dir = await LocalManager().findValidDownloadDirectory(
           comicId,
           comicType,
           comic!.title,
@@ -494,7 +497,7 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
       tags: comic!.tags.entries.expand((e) {
         return e.value.map((v) => "${e.key}:$v");
       }).toList(),
-      directory: Directory(path!).name,
+      directory: path!,
       chapters: comic!.chapters,
       cover: File(_cover!.split("file://").last).name,
       comicType: ComicType(source.key.hashCode),
@@ -571,6 +574,27 @@ class _ImageDownloadWrapper {
     while (retry > 0) {
       int lastBytes = 0;
       try {
+        final cached = await ImageDownloader.findCachedComicImageFile(
+          image,
+          task.source.key,
+          task.comicId,
+          chapter,
+        );
+        if (cached != null) {
+          final reader = await cached.open();
+          final fileType = detectFileType(await reader.read(64));
+          await reader.close();
+          if (isCancelled) return;
+          final file = saveTo.joinFile('$index${fileType.ext}');
+          await cached.copy(file.path);
+          task.onData(await cached.length());
+          isComplete = true;
+          for (final completer in completers) {
+            completer.complete(this);
+          }
+          completers.clear();
+          return;
+        }
         await for (var p in ImageDownloader.loadComicImageUnwrapped(
             image, task.source.key, task.comicId, chapter)) {
           if (isCancelled) {
@@ -745,25 +769,27 @@ class ArchiveDownloadTask extends DownloadTask {
     notifyListeners();
     _message = "Downloading...";
 
+    if (App.isAndroid && path?.startsWith('android://') == true) {
+      path = null;
+    }
     if (path == null) {
-      var dir = await LocalManager().findValidDirectory(
-        comic.id,
-        comicType,
-        comic.title,
-      );
-      if (!(await dir.exists())) {
-        try {
+      try {
+        var dir = await LocalManager().findValidDownloadDirectory(
+          comic.id,
+          comicType,
+          comic.title,
+        );
+        if (!(await dir.exists())) {
           await dir.create();
-        } catch (e) {
-          _setError("Error: $e");
-          return;
         }
+        path = dir.path;
+      } catch (e) {
+        _setError("Error: $e");
+        return;
       }
-      path = dir.path;
     }
 
-    var archiveFile =
-        File(FilePath.join(App.dataPath, "archive_downloading.zip"));
+    var archiveFile = File(FilePath.join(path!, ".archive_downloading.zip"));
 
     Log.info("Download", "Downloading $archiveUrl");
 
@@ -873,7 +899,7 @@ class ArchiveDownloadTask extends DownloadTask {
       tags: comic.tags.entries.expand((e) {
         return e.value.map((v) => "${e.key}:$v");
       }).toList(),
-      directory: Directory(path!).name,
+      directory: path!,
       chapters: null,
       cover: _findCover(),
       comicType: ComicType(source.key.hashCode),

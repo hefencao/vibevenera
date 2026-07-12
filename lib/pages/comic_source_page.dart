@@ -7,6 +7,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/network/app_dio.dart';
 import 'package:venera/network/cookie_jar.dart';
@@ -115,6 +116,9 @@ class _Body extends StatefulWidget {
 
 class _BodyState extends State<_Body> {
   var url = "";
+  late final Set<String> _initialSourceKeys;
+  bool _allowPop = false;
+  bool _showingExitPrompt = false;
 
   void updateUI() {
     setState(() {});
@@ -123,6 +127,7 @@ class _BodyState extends State<_Body> {
   @override
   void initState() {
     super.initState();
+    _initialSourceKeys = ComicSource.all().map((source) => source.key).toSet();
     ComicSourceManager().addListener(updateUI);
   }
 
@@ -134,21 +139,63 @@ class _BodyState extends State<_Body> {
 
   @override
   Widget build(BuildContext context) {
-    return SmoothCustomScrollView(
-      slivers: [
-        SliverAppbar(title: Text('Comic Source'.tl), style: AppbarStyle.shadow),
-        buildCard(context),
-        for (var source in ComicSource.all())
-          _SliverComicSource(
-            key: ValueKey(source.key),
-            source: source,
-            edit: edit,
-            update: update,
-            delete: delete,
-          ),
-        SliverPadding(padding: EdgeInsets.only(bottom: context.padding.bottom)),
-      ],
+    return PopScope(
+      canPop: _allowPop,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _handlePop(result);
+      },
+      child: SmoothCustomScrollView(
+        slivers: [
+          SliverAppbar(title: Text('Comic Source'.tl), style: AppbarStyle.shadow),
+          buildCard(context),
+          for (var source in ComicSource.all())
+            _SliverComicSource(
+              key: ValueKey(source.key),
+              source: source,
+              edit: edit,
+              update: update,
+              delete: delete,
+            ),
+          SliverPadding(padding: EdgeInsets.only(bottom: context.padding.bottom)),
+        ],
+      ),
     );
+  }
+
+  Future<void> _handlePop(Object? result) async {
+    if (_showingExitPrompt) return;
+    final missing = ComicSource.all().where(
+      (source) =>
+          !_initialSourceKeys.contains(source.key) &&
+          LocalManager().getSourceDownloadPath(source.key).isEmpty,
+    );
+    if (missing.isNotEmpty) {
+      _showingExitPrompt = true;
+      final exit = await showDialog<bool>(
+        context: context,
+        builder: (context) => ContentDialog(
+          title: "Download Directory".tl,
+          content: Text(
+            "New comic sources need a download directory before leaving.".tl,
+          ).paddingHorizontal(16).paddingVertical(8),
+          actions: [
+            Button.text(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text("Cancel".tl),
+            ),
+            Button.filled(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text("Exit".tl),
+            ),
+          ],
+        ),
+      );
+      _showingExitPrompt = false;
+      if (exit != true) return;
+    }
+    setState(() => _allowPop = true);
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) Navigator.of(context).pop(result);
   }
 
   void delete(ComicSource source) {
@@ -161,6 +208,7 @@ class _BodyState extends State<_Body> {
         var file = File(source.filePath);
         file.delete();
         ComicSourceManager().remove(source.key);
+        LocalManager().removeSourceDownloadPath(source.key);
         _validatePages();
         App.forceRebuild();
       },
@@ -875,6 +923,7 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
             ),
           ),
         ),
+        SliverToBoxAdapter(child: _buildDownloadDirectory()),
         SliverToBoxAdapter(
           child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 8),
@@ -894,6 +943,40 @@ class _SliverComicSourceState extends State<_SliverComicSource> {
         SliverToBoxAdapter(child: Column(children: _buildAccount().toList())),
       ],
     );
+  }
+
+  Widget _buildDownloadDirectory() {
+    final path = LocalManager().getSourceDownloadPath(source.key);
+    return ListTile(
+      title: Text("Download Directory".tl),
+      subtitle: Text(
+        path.isEmpty ? "Not set".tl : path,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: Button.normal(
+        onPressed: _setDownloadDirectory,
+        child: Text("Set".tl),
+      ).fixHeight(32),
+    );
+  }
+
+  Future<void> _setDownloadDirectory() async {
+    if (!await requestStoragePermission()) {
+      context.showMessage(message: "Storage permission is required".tl);
+      return;
+    }
+    String? path;
+    if (App.isAndroid) {
+      path = await DirectoryPicker().pickWritableDirectoryPath();
+    } else if (App.isIOS) {
+      path = await selectDirectoryIOS();
+    } else {
+      path = await selectDirectory();
+    }
+    if (path == null) return;
+    LocalManager().setSourceDownloadPath(source.key, path);
+    setState(() {});
   }
 
   Iterable<Widget> buildSourceSettings() sync* {
