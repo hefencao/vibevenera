@@ -200,28 +200,47 @@ class LocalManager with ChangeNotifier {
   }
 
   // return error message if failed
-  Future<String?> setNewPath(String newPath) async {
+  Future<String?> setNewPath(String newPath, {bool migrate = true}) async {
     var newDir = Directory(newPath);
     if (!await newDir.exists()) {
       return "Directory does not exist";
     }
-    if (!await newDir.list().isEmpty) {
-      return "Directory is not empty";
+    final oldPath = directory.absolute.path;
+    final targetPath = newDir.absolute.path;
+    if (oldPath == targetPath) return null;
+    if (migrate) {
+      final separator = Platform.pathSeparator;
+      if (oldPath.startsWith('$targetPath$separator') ||
+          targetPath.startsWith('$oldPath$separator')) {
+        return "The new directory cannot contain the current directory";
+      }
     }
     try {
-      await copyDirectoryIsolate(
-        directory,
-        newDir,
-      );
+      if (migrate) await moveDirectoryContents(directory, newDir);
       await File(FilePath.join(App.dataPath, 'local_path'))
           .writeAsString(newPath);
     } catch (e, s) {
       Log.error("IO", e, s);
       return e.toString();
     }
-    await directory.deleteContents(recursive: true);
+    if (!migrate) {
+      final comics = _db.select(
+        'SELECT id, directory FROM comics WHERE comic_type = ?;',
+        [ComicType.local.value],
+      );
+      for (final comic in comics) {
+        final directory = comic[1] as String;
+        if (!directory.contains('/') && !directory.contains('\\')) {
+          _db.execute(
+            'UPDATE comics SET directory = ? WHERE id = ? AND comic_type = ?;',
+            [FilePath.join(oldPath, directory), comic[0], ComicType.local.value],
+          );
+        }
+      }
+    }
     path = newPath;
     _checkNoMedia();
+    notifyListeners();
     return null;
   }
 

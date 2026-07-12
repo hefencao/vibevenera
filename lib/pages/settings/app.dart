@@ -42,16 +42,61 @@ class _AppSettingsState extends State<AppSettings> {
               result = await selectDirectory();
             }
             if (result == null) return;
+            var migrate = true;
+            var restoreDownloads = false;
+            final hasFiles = !await Directory(result).list().isEmpty;
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (context) => StatefulBuilder(
+                builder: (context, setState) => ContentDialog(
+                  title: "Set New Storage Path".tl,
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CheckboxListTile(
+                        title: Text("Migrate current local comics".tl),
+                        value: migrate,
+                        onChanged: (value) => setState(() {
+                          migrate = value ?? false;
+                        }),
+                      ),
+                      if (hasFiles)
+                        CheckboxListTile(
+                          title: Text("Restore local downloads".tl),
+                          value: restoreDownloads,
+                          onChanged: (value) => setState(() {
+                            restoreDownloads = value ?? false;
+                          }),
+                        ),
+                    ],
+                  ),
+                  actions: [
+                    Button.text(
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: Text("Cancel".tl),
+                    ),
+                    Button.filled(
+                      onPressed: () => Navigator.of(context).pop(true),
+                      child: Text("Set".tl),
+                    ),
+                  ],
+                ),
+              ),
+            );
+            if (confirmed != true) return;
             var loadingDialog = showLoadingDialog(
               App.rootContext,
               barrierDismissible: false,
               allowCancel: false,
             );
-            var res = await LocalManager().setNewPath(result);
+            var res = await LocalManager().setNewPath(result, migrate: migrate);
             loadingDialog.close();
             if (res != null) {
               context.showMessage(message: res);
             } else {
+              if (restoreDownloads) {
+                await ImportComic().localDownloads();
+              }
               context.showMessage(message: "Path set successfully".tl);
               setState(() {});
             }

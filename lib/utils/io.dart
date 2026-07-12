@@ -183,6 +183,36 @@ Future<void> copyDirectoryIsolate(
   await Isolate.run(() => overrideIO(() => copyDirectory(source, destination)));
 }
 
+Future<void> moveDirectoryContents(
+    Directory source, Directory destination) async {
+  final contents = await source.list().toList();
+  for (final content in contents) {
+    if (content.name == '.nomedia') continue;
+    final target = FilePath.join(destination.path, content.name);
+    if (await File(target).exists() || await Directory(target).exists()) {
+      throw StateError('Destination already contains ${content.name}');
+    }
+  }
+  for (final content in contents) {
+    if (content.name == '.nomedia') continue;
+    final target = FilePath.join(destination.path, content.name);
+    try {
+      await content.rename(target);
+    } on FileSystemException catch (e) {
+      final code = e.osError?.errorCode;
+      if (code != 17 && code != 18) rethrow;
+      if (content is Directory) {
+        final targetDirectory = await Directory(target).create();
+        await copyDirectoryIsolate(content, targetDirectory);
+        await content.delete(recursive: true);
+      } else if (content is File) {
+        await content.copy(target);
+        await content.delete();
+      }
+    }
+  }
+}
+
 String findValidDirectoryName(String path, String directory) {
   var name = sanitizeFileName(directory);
   var dir = Directory("$path/$name");
