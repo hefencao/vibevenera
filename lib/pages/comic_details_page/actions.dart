@@ -102,7 +102,7 @@ abstract mixin class _ComicPageActions {
   ///
   /// [group] the chapter group number, start from 1
   void read([int? ep, int? page, int? group]) {
-    App.rootContext
+    App.mainNavigatorKey!.currentContext!
         .to(
       () => Reader(
         type: comic.comicType,

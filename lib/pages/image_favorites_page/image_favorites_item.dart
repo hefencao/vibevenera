@@ -30,7 +30,7 @@ class _ImageFavoritesItemState extends State<_ImageFavoritesItem> {
   }
 
   void goReaderPage(ImageFavoritesComic comic, int ep, int page) {
-    App.rootContext.to(
+    App.mainNavigatorKey!.currentContext!.to(
       () => ReaderWithLoading(
         id: comic.id,
         sourceKey: comic.sourceKey,

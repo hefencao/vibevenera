@@ -571,7 +571,7 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                     text: "Read".tl,
                     onClick: () {
                       final c = selectedComics.keys.first as FavoriteItem;
-                      App.rootContext.to(() => ReaderWithLoading(
+                      App.mainNavigatorKey!.currentContext!.to(() => ReaderWithLoading(
                             id: c.id,
                             sourceKey: c.sourceKey,
                           )

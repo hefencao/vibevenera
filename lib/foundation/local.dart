@@ -136,7 +136,7 @@ class LocalComic with HistoryMixin implements Comic {
         }
       }
     }
-    App.rootContext.to(
+    App.mainNavigatorKey!.currentContext!.to(
       () => Reader(
         type: comicType,
         cid: id,
