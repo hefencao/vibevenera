@@ -1626,11 +1626,13 @@ class _SMClipper extends CustomClipper<Rect> {
 
 class SimpleComicTile extends StatelessWidget {
   const SimpleComicTile(
-      {super.key, required this.comic, this.onTap, this.withTitle = false, this.heroID});
+      {super.key, required this.comic, this.onTap, this.onLongPress, this.withTitle = false, this.heroID});
 
   final Comic comic;
 
   final void Function()? onTap;
+
+  final void Function()? onLongPress;
 
   final bool withTitle;
 
@@ -1682,6 +1684,7 @@ class SimpleComicTile extends StatelessWidget {
               ),
             );
           },
+      onLongPress: onLongPress,
       child: child,
     );
 

@@ -41,11 +41,13 @@ class _ReaderWithLoadingState
 
   @override
   Future<Res<ReaderProps>> loadData() async {
+    final stopwatch = Stopwatch()..start();
     var comicSource = ComicSource.find(widget.sourceKey);
     var history = HistoryManager().find(
       widget.id,
       ComicType.fromKey(widget.sourceKey),
     );
+    final type = ComicType.fromKey(widget.sourceKey);
     if (comicSource == null) {
       var localComic = LocalManager().find(
         widget.id,
@@ -71,7 +73,29 @@ class _ReaderWithLoadingState
         ),
       );
     } else {
+      final cached = HistoryManager().findReaderMetadata(widget.id, type);
+      if (cached != null) {
+        Log.info(
+          'Reader.Load',
+          'metadata cache hit: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
+        );
+        return Res(
+          ReaderProps(
+            type: type,
+            cid: widget.id,
+            name: cached.title,
+            chapters: cached.chapters,
+            history: history ?? History.fromModel(model: cached, ep: 0, page: 0),
+            author: cached.subTitle ?? '',
+            tags: cached.tags,
+          ),
+        );
+      }
       var comic = await comicSource.loadComicInfo!(widget.id);
+      Log.info(
+        'Reader.Load',
+        'loadComicInfo: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
+      );
       if (comic.error) {
         return Res.fromErrorRes(comic);
       }

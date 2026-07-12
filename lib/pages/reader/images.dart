@@ -71,6 +71,7 @@ class _ReaderImagesState extends State<_ReaderImages>
   void load() async {
     if (inProgress) return;
     inProgress = true;
+    final stopwatch = Stopwatch()..start();
     if (reader.type == ComicType.local ||
         (LocalManager().isDownloaded(
           reader.cid,
@@ -83,6 +84,10 @@ class _ReaderImagesState extends State<_ReaderImages>
           reader.cid,
           reader.type,
           reader.chapter,
+        );
+        Log.info(
+          'Reader.Load',
+          'local image list: ${reader.type.sourceKey}/${reader.cid} in ${stopwatch.elapsedMilliseconds}ms',
         );
         setState(() {
           reader.images = images;
@@ -110,9 +115,36 @@ class _ReaderImagesState extends State<_ReaderImages>
       }
     } else {
       var cp = reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1);
+      var cached = HistoryManager().findReaderPages(reader.cid, reader.type, cp);
+      if (cached != null) {
+        Log.info(
+          'Reader.Load',
+          'page cache hit: ${reader.type.sourceKey}/${reader.cid}/$cp in ${stopwatch.elapsedMilliseconds}ms',
+        );
+        setState(() {
+          reader.images = cached;
+          reader.isLoading = false;
+          inProgress = false;
+          _handleJumpToLastPage();
+          Future.microtask(reader.updateHistory);
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _attachReaderPipeline(context);
+            _reportReaderPage(reader.page);
+          }
+        });
+        _refreshReaderPages(cp);
+        context.readerScaffold.update();
+        return;
+      }
       var res = await reader.type.comicSource!.loadComicPages!(
         reader.widget.cid,
         cp,
+      );
+      Log.info(
+        'Reader.Load',
+        'loadComicPages: ${reader.type.sourceKey}/${reader.cid}/$cp in ${stopwatch.elapsedMilliseconds}ms',
       );
       if (res.error) {
         setState(() {
@@ -121,6 +153,7 @@ class _ReaderImagesState extends State<_ReaderImages>
           inProgress = false;
         });
       } else {
+        HistoryManager().cacheReaderPages(reader.cid, reader.type, cp, res.data);
         setState(() {
           reader.images = res.data;
           reader.isLoading = false;
@@ -140,6 +173,26 @@ class _ReaderImagesState extends State<_ReaderImages>
       }
     }
     context.readerScaffold.update();
+  }
+
+  Future<void> _refreshReaderPages(String? chapterId) async {
+    final stopwatch = Stopwatch()..start();
+    final res = await reader.type.comicSource!.loadComicPages!(
+      reader.widget.cid,
+      chapterId,
+    );
+    Log.info(
+      'Reader.Load',
+      'refreshComicPages: ${reader.type.sourceKey}/${reader.cid}/$chapterId in ${stopwatch.elapsedMilliseconds}ms',
+    );
+    if (!res.error) {
+      HistoryManager().cacheReaderPages(
+        reader.cid,
+        reader.type,
+        chapterId,
+        res.data,
+      );
+    }
   }
 
   @override

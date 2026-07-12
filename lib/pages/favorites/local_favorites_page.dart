@@ -349,6 +349,19 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                   ),
                 ),
               Tooltip(
+                message: "Manage".tl,
+                child: IconButton(
+                  icon: const Icon(Icons.checklist),
+                  onPressed: () {
+                    setState(() {
+                      multiSelectMode = true;
+                      selectedComics.clear();
+                      lastSelectedIndex = null;
+                    });
+                  },
+                ),
+              ),
+              Tooltip(
                 message: "Filter".tl,
                 child: IconButton(
                   icon: const Icon(Icons.sort_rounded),
@@ -680,19 +693,18 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                     );
                   },
                 ),
-                if (appdata.settings["onClickFavorite"] == "viewDetail")
-                  MenuEntry(
-                    icon: Icons.menu_book_outlined,
-                    text: "Read".tl,
-                    onClick: () {
-                      App.mainNavigatorKey?.currentContext?.to(
-                        () => ReaderWithLoading(
-                          id: c.id,
-                          sourceKey: c.sourceKey,
-                        )
-                      );
-                    },
-                  ),
+                MenuEntry(
+                  icon: Icons.menu_book_outlined,
+                  text: "Read".tl,
+                  onClick: () {
+                    App.mainNavigatorKey?.currentContext?.to(
+                      () => ReaderWithLoading(
+                        id: c.id,
+                        sourceKey: c.sourceKey,
+                      )
+                    );
+                  },
+                ),
               ];
             },
             onTap: (c, heroID) {
@@ -706,7 +718,14 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                   }
                   lastSelectedIndex = comics.indexOf(c);
                 });
-              } else if (appdata.settings["onClickFavorite"] == "viewDetail") {
+              } else {
+                App.mainNavigatorKey?.currentContext?.to(
+                  () => ReaderWithLoading(id: c.id, sourceKey: c.sourceKey),
+                );
+              }
+            },
+            onLongPressed: (c, heroID) {
+              if (!multiSelectMode) {
                 App.mainNavigatorKey?.currentContext?.to(
                   () => ComicPage(
                     id: c.id,
@@ -716,43 +735,30 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                     heroID: heroID,
                   )
                 );
-              } else {
-                App.mainNavigatorKey?.currentContext?.to(
-                  () => ReaderWithLoading(id: c.id, sourceKey: c.sourceKey),
-                );
+                return;
               }
-            },
-            onLongPressed: (c, heroID) {
               setState(() {
-                if (!multiSelectMode) {
-                  multiSelectMode = true;
-                  if (!selectedComics.containsKey(c as FavoriteItem)) {
-                    selectedComics[c] = true;
+                if (lastSelectedIndex != null) {
+                  int start = lastSelectedIndex!;
+                  int end = comics.indexOf(c as FavoriteItem);
+                  if (start > end) {
+                    int temp = start;
+                    start = end;
+                    end = temp;
                   }
-                  lastSelectedIndex = comics.indexOf(c);
-                } else {
-                  if (lastSelectedIndex != null) {
-                    int start = lastSelectedIndex!;
-                    int end = comics.indexOf(c as FavoriteItem);
-                    if (start > end) {
-                      int temp = start;
-                      start = end;
-                      end = temp;
-                    }
 
-                    for (int i = start; i <= end; i++) {
-                      if (i == lastSelectedIndex) continue;
+                  for (int i = start; i <= end; i++) {
+                    if (i == lastSelectedIndex) continue;
 
-                      var comic = comics[i];
-                      if (selectedComics.containsKey(comic)) {
-                        selectedComics.remove(comic);
-                      } else {
-                        selectedComics[comic] = true;
-                      }
+                    var comic = comics[i];
+                    if (selectedComics.containsKey(comic)) {
+                      selectedComics.remove(comic);
+                    } else {
+                      selectedComics[comic] = true;
                     }
                   }
-                  lastSelectedIndex = comics.indexOf(c as FavoriteItem);
                 }
+                lastSelectedIndex = comics.indexOf(c as FavoriteItem);
                 _checkExitSelectMode();
               });
             },

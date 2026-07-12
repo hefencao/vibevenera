@@ -193,6 +193,15 @@ class _ReaderState extends State<Reader>
 
   @override
   void initState() {
+    HistoryManager().cacheReaderMetadata(
+      id: widget.cid,
+      type: widget.type,
+      title: widget.name,
+      subtitle: widget.author,
+      cover: widget.history.cover,
+      tags: widget.tags,
+      chapters: widget.chapters,
+    );
     page = widget.initialPage ?? 1;
     if (page < 1) {
       page = 1;

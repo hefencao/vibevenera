@@ -178,6 +178,37 @@ class History implements Comic {
   }
 }
 
+class ReaderMetadata with HistoryMixin {
+  @override
+  final String id;
+
+  @override
+  final HistoryType historyType;
+
+  @override
+  final String title;
+
+  @override
+  final String? subTitle;
+
+  @override
+  final String cover;
+
+  final List<String> tags;
+
+  final ComicChapters? chapters;
+
+  const ReaderMetadata({
+    required this.id,
+    required this.historyType,
+    required this.title,
+    required this.subTitle,
+    required this.cover,
+    required this.tags,
+    required this.chapters,
+  });
+}
+
 class HistoryManager with ChangeNotifier {
   static HistoryManager? cache;
 
@@ -219,10 +250,37 @@ class HistoryManager with ChangeNotifier {
           chapter_group int
         );
       """);
+    _db.execute("""
+        create table if not exists reader_metadata (
+          id text not null,
+          type int not null,
+          title text not null,
+          subtitle text,
+          cover text not null,
+          tags text not null,
+          chapters text not null,
+          updated_at int not null,
+          primary key (id, type)
+        );
+      """);
+    _db.execute("""
+        create table if not exists reader_pages (
+          id text not null,
+          type int not null,
+          chapter_id text not null,
+          images text not null,
+          updated_at int not null,
+          primary key (id, type, chapter_id)
+        );
+      """);
 
     var columns = _db.select("PRAGMA table_info(history);");
     if (!columns.any((element) => element["name"] == "chapter_group")) {
       _db.execute("alter table history add column chapter_group int;");
+    }
+    var metadataColumns = _db.select("PRAGMA table_info(reader_metadata);");
+    if (!metadataColumns.any((element) => element["name"] == "updated_at")) {
+      _db.execute("alter table reader_metadata add column updated_at int;");
     }
 
     notifyListeners();
@@ -306,8 +364,79 @@ class HistoryManager with ChangeNotifier {
     notifyListeners();
   }
 
+  ReaderMetadata? findReaderMetadata(String id, HistoryType type) {
+    final rows = _db.select(
+      'SELECT title, subtitle, cover, tags, chapters FROM reader_metadata WHERE id = ? AND type = ?;',
+      [id, type.value],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return ReaderMetadata(
+      id: id,
+      historyType: type,
+      title: row[0] as String,
+      subTitle: row[1] as String?,
+      cover: row[2] as String,
+      tags: List<String>.from(jsonDecode(row[3] as String)),
+      chapters: ComicChapters.fromJsonOrNull(jsonDecode(row[4] as String)),
+    );
+  }
+
+  void cacheReaderMetadata({
+    required String id,
+    required HistoryType type,
+    required String title,
+    required String? subtitle,
+    required String cover,
+    required List<String> tags,
+    required ComicChapters? chapters,
+  }) {
+    _db.execute(
+      'INSERT OR REPLACE INTO reader_metadata VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+      [
+        id,
+        type.value,
+        title,
+        subtitle,
+        cover,
+        jsonEncode(tags),
+        jsonEncode(chapters?.toJson()),
+        DateTime.now().millisecondsSinceEpoch,
+      ],
+    );
+    _db.execute('''
+      DELETE FROM reader_metadata WHERE rowid IN (
+        SELECT rowid FROM reader_metadata ORDER BY updated_at DESC LIMIT -1 OFFSET 128
+      );
+    ''');
+  }
+
+  List<String>? findReaderPages(
+    String id, HistoryType type, String? chapterId) {
+    final rows = _db.select(
+      'SELECT images FROM reader_pages WHERE id = ? AND type = ? AND chapter_id = ?;',
+      [id, type.value, chapterId ?? ''],
+    );
+    return rows.isEmpty ? null : List<String>.from(jsonDecode(rows.first[0] as String));
+  }
+
+  void cacheReaderPages(
+    String id, HistoryType type, String? chapterId, List<String> images) {
+    _db.execute(
+      'INSERT OR REPLACE INTO reader_pages VALUES (?, ?, ?, ?, ?);',
+      [id, type.value, chapterId ?? '', jsonEncode(images), DateTime.now().millisecondsSinceEpoch],
+    );
+    _db.execute('''
+      DELETE FROM reader_pages WHERE rowid IN (
+        SELECT rowid FROM reader_pages ORDER BY updated_at DESC LIMIT -1 OFFSET 128
+      );
+    ''');
+  }
+
   void clearHistory() {
     _db.execute("delete from history;");
+    _db.execute("delete from reader_metadata;");
+    _db.execute("delete from reader_pages;");
     updateCache();
     notifyListeners();
   }

@@ -27,12 +27,15 @@ class AnimatedTapRegion extends StatefulWidget {
     super.key,
     required this.child,
     required this.onTap,
+    this.onLongPress,
     this.borderRadius = 0,
   });
 
   final Widget child;
 
   final void Function() onTap;
+
+  final void Function()? onLongPress;
 
   final double borderRadius;
 
@@ -58,6 +61,7 @@ class _AnimatedTapRegionState extends State<AnimatedTapRegion> {
       },
       child: GestureDetector(
         onTap: widget.onTap,
+        onLongPress: widget.onLongPress,
         child: AnimatedPhysicalModel(
           duration: _fastAnimationDuration,
           elevation: isHovered ? 3 : 1,

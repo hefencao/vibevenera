@@ -18,6 +18,7 @@ import 'package:venera/pages/downloading_page.dart';
 import 'package:venera/pages/follow_updates_page.dart';
 import 'package:venera/pages/history_page.dart';
 import 'package:venera/pages/image_favorites_page/image_favorites_page.dart';
+import 'package:venera/pages/reader/reader.dart';
 import 'package:venera/pages/search_page.dart';
 import 'package:venera/utils/data_sync.dart';
 import 'package:venera/utils/import_comic.dart';
@@ -268,15 +269,19 @@ class _HistoryState extends State<_History> {
           ),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () {
-            context.to(() => const HistoryPage());
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => context.to(() => const HistoryPage()),
+              ),
+            ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+            IgnorePointer(
+              child: SizedBox(
                 height: 56,
                 child: Row(
                   children: [
@@ -298,7 +303,8 @@ class _HistoryState extends State<_History> {
                   ],
                 ),
               ).paddingHorizontal(16),
-              if (history.isNotEmpty)
+            ),
+            if (history.isNotEmpty)
                 SizedBox(
                   height: 136,
                   child: ListView.builder(
@@ -310,22 +316,32 @@ class _HistoryState extends State<_History> {
                         comic: history[index],
                         heroID: heroID,
                         onTap: () {
-                          context.to(
-                            () => ComicPage(
-                              id: history[index].id,
-                              sourceKey: history[index].type.sourceKey,
-                              cover: history[index].cover,
-                              title: history[index].title,
-                              heroID: heroID,
+                          final item = history[index];
+                          App.mainNavigatorKey!.currentContext!.to(
+                            () => ReaderWithLoading(
+                              id: item.id,
+                              sourceKey: item.type.sourceKey,
+                              initialEp: item.ep,
+                              initialPage: item.page,
                             ),
                           );
                         },
+                        onLongPress: () => context.to(
+                          () => ComicPage(
+                            id: history[index].id,
+                            sourceKey: history[index].type.sourceKey,
+                            cover: history[index].cover,
+                            title: history[index].title,
+                            heroID: heroID,
+                          ),
+                        ),
                       ).paddingHorizontal(8).paddingVertical(2);
                     },
                   ),
                 ).paddingHorizontal(8).paddingBottom(16),
             ],
           ),
+          ],
         ),
       ),
     );
@@ -376,15 +392,19 @@ class _LocalState extends State<_Local> {
           ),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () {
-            context.to(() => const LocalComicsPage());
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => context.to(() => const LocalComicsPage()),
+              ),
+            ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+            IgnorePointer(
+              child: SizedBox(
                 height: 56,
                 child: Row(
                   children: [
@@ -408,7 +428,8 @@ class _LocalState extends State<_Local> {
                   ],
                 ),
               ).paddingHorizontal(16),
-              if (local.isNotEmpty || LocalManager().downloadingTasks.isNotEmpty)
+            ),
+            if (local.isNotEmpty || LocalManager().downloadingTasks.isNotEmpty)
                 SizedBox(
                   height: 136,
                   child: ListView.builder(
@@ -426,17 +447,16 @@ class _LocalState extends State<_Local> {
                       return SimpleComicTile(
                         comic: local[index],
                         heroID: heroID,
-                        onTap: () {
-                          context.to(
-                            () => ComicPage(
-                              id: local[index].id,
-                              sourceKey: local[index].sourceKey,
-                              cover: local[index].cover,
-                              title: local[index].title,
-                              heroID: heroID,
-                            ),
-                          );
-                        },
+                        onTap: local[index].read,
+                        onLongPress: () => context.to(
+                          () => ComicPage(
+                            id: local[index].id,
+                            sourceKey: local[index].sourceKey,
+                            cover: local[index].cover,
+                            title: local[index].title,
+                            heroID: heroID,
+                          ),
+                        ),
                       ).paddingHorizontal(8).paddingVertical(2);
                     },
                   ),
@@ -468,8 +488,9 @@ class _LocalState extends State<_Local> {
                   ],
                 ),
               ).paddingHorizontal(16).paddingVertical(8),
-            ],
-          ),
+          ],
+        ),
+          ],
         ),
       ),
     );
