@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_perf.dart';
@@ -119,6 +120,7 @@ class PipelineController {
   // ── Public API ──────────────────────────────────────────────
 
   void attachReaderSession(ReaderPipelineSession session) {
+    _syncNetworkConcurrency();
     if (_isLocalStaticSession(session)) {
       detachReaderSession();
       return;
@@ -151,8 +153,9 @@ class PipelineController {
   }
 
   void onReaderPageChanged(int currentIdx) {
+    _syncNetworkConcurrency();
     if (_images.isEmpty) return;
-    if (_interaction != InteractionState.jumping) {
+    if (_interaction != InteractionState.scroll) {
       _setCurrentIndex(currentIdx);
       return;
     }
@@ -186,6 +189,10 @@ class PipelineController {
   void setInteractionState(InteractionState state) {
     if (_interaction == state) return;
     _interaction = state;
+    if (state != InteractionState.scroll) {
+      _dragCommitTimer?.cancel();
+      _dragCommitTimer = null;
+    }
     if (_images.isEmpty) {
       _applyPolicies(markDistant: false);
       _syncPolicyLeases();
@@ -199,6 +206,11 @@ class PipelineController {
       session.images.every((key) => key.startsWith('file://') || !key.contains('://')) &&
       !session.images.any((key) => key.toLowerCase().contains('.webp')) &&
       !WebPSourceRegistry.isWebPSource(session.sourceKey);
+
+  void _syncNetworkConcurrency() {
+    final value = appdata.settings['downloadThreads'];
+    _scheduler.setNetworkConcurrency(value is int ? value : 5);
+  }
 
   static const Duration _dragCommitDelay = Duration(milliseconds: 180);
 

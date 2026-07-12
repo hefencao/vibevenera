@@ -263,8 +263,9 @@ final class WebPSessionCoordinator {
 
     if (!session.hasDemand) {
       _cancelRetry(session.identity);
-      // A running transport is retained and may finish. Queued/paused work has
-      // no consumer and can be removed without destroying the source.
+      // Retain an established transport: several sources do not support HTTP
+      // range requests, so cancelling here would discard an unusable prefix
+      // and force the next current page to download from zero.
       if (session.transport != DownloadTransportState.receiving &&
           session.transport != DownloadTransportState.sealed) {
         scheduler.cancelInLane(SchedulerLane.network, key);

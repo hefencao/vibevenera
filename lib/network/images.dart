@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_qjs/flutter_qjs.dart';
 import 'package:venera/foundation/cache_manager.dart';
+import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/image.dart';
@@ -393,6 +394,17 @@ class _PartialImageCache {
       await file.delete();
     }
   }
+
+  Future<void> adopt(io.File source) async {
+    await close();
+    final sourceLength = await source.length();
+    final existingLength = await file.exists() ? await file.length() : 0;
+    if (sourceLength > existingLength) {
+      await file.parent.create(recursive: true);
+      await source.copy(file.path);
+    }
+    _memory.remove(_memoryKey);
+  }
 }
 
 class _PartialImageMemory {
@@ -656,7 +668,17 @@ abstract class ImageDownloader {
     if (cached != null) {
       final data = await cached.readAsBytes();
       _throwIfCancelled(cancelToken);
-      if (isIncompleteWebPBytes(data)) {
+      final validation = ImageDataValidator.validateBytes(
+        data,
+        allowUnknown: true,
+      );
+      if (!validation.valid) {
+        final partial = _PartialImageCache(cacheKey);
+        if (validation.format != ImageDataFormat.unknown) {
+          await partial.adopt(cached);
+        } else {
+          await partial.clear();
+        }
         await CacheManager().delete(cacheKey);
       } else {
         unawaited(_PartialImageCache(cacheKey).clear());

@@ -104,7 +104,6 @@ void main() {
     expect(lease.download.transport, DownloadTransportState.receiving);
     transport.release.complete();
     await transport.completed.future;
-    await Future<void>.delayed(Duration.zero);
     coordinator.dispose();
   });
 }

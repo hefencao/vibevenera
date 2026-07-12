@@ -334,8 +334,18 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   Widget build(BuildContext context) {
-    return Listener(
-      onPointerDown: (event) {
+    return NotificationListener<ScrollNotification>(
+      onNotification: (notification) {
+        if (notification.depth != 0) return false;
+        if (notification is ScrollStartNotification) {
+          WebPImageProvider.setInteractionState(InteractionState.dragging);
+        } else if (notification is ScrollEndNotification) {
+          WebPImageProvider.setInteractionState(InteractionState.idle);
+        }
+        return false;
+      },
+      child: Listener(
+        onPointerDown: (event) {
         fingers++;
       },
       onPointerUp: (event) {
@@ -352,7 +362,7 @@ class _GalleryModeState extends State<_GalleryMode>
           controller.updateMultiple(position: controller.position + value);
         }
       },
-      child: PhotoViewGallery.builder(
+        child: PhotoViewGallery.builder(
         backgroundDecoration: BoxDecoration(color: context.colorScheme.surface),
         reverse: reader.mode == ReaderMode.galleryRightToLeft,
         scrollDirection: reader.mode == ReaderMode.galleryTopToBottom
@@ -474,6 +484,7 @@ class _GalleryModeState extends State<_GalleryMode>
             if (key != i) photoViewControllers.remove(key);
           }
         },
+        ),
       ),
     );
   }
@@ -993,7 +1004,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onNotification: (notification) {
         if (notification is ScrollStartNotification) {
           delayedSetIsScrolling(true);
-          WebPImageProvider.setInteractionState(InteractionState.dragging);
+          WebPImageProvider.setInteractionState(InteractionState.scroll);
         } else if (notification is ScrollEndNotification) {
           delayedSetIsScrolling(false);
           WebPImageProvider.setInteractionState(InteractionState.idle);

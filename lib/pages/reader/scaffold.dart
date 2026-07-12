@@ -731,7 +731,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       reversed: isReversed,
       divisions: (context.reader.maxPage - 1).clamp(2, 1 << 16),
       onChangeStart: () {
-        WebPImageProvider.setInteractionState(InteractionState.jumping);
+        WebPImageProvider.setInteractionState(InteractionState.scroll);
       },
       onChanged: (i) {
         final page = i.toInt();

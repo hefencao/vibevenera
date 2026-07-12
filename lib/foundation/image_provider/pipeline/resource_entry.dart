@@ -6,7 +6,7 @@ import 'package:venera/foundation/log.dart';
 // 1. Enums
 // ───────────────────────────────────────────────────────────────
 
-enum InteractionState { idle, dragging, jumping, settling }
+enum InteractionState { idle, dragging, scroll, jumping, settling }
 
 enum PagePriority { current, near, far, keep, distant }
 
@@ -144,6 +144,13 @@ class ResourcePolicy {
       PagePriority.current: _draggingCurrent,
       PagePriority.near: _draggingNear,
       PagePriority.far: _draggingFar,
+      PagePriority.keep: _keep,
+      PagePriority.distant: _distant,
+    },
+    InteractionState.scroll: {
+      PagePriority.current: _current,
+      PagePriority.near: _distant,
+      PagePriority.far: _distant,
       PagePriority.keep: _keep,
       PagePriority.distant: _distant,
     },

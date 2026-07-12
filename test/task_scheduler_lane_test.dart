@@ -8,6 +8,7 @@ void main() {
   test('network saturation does not delay decode lane', () async {
     final scheduler = TaskScheduler.instance;
     scheduler.clear();
+    scheduler.setNetworkConcurrency(5);
     // network lane maxConcurrent=5：塞 6 个饱和该 lane，第 6 个应排队；同时另一 lane
     // 的 decode 不受网络饱和影响，立即起。
     final network = List.generate(

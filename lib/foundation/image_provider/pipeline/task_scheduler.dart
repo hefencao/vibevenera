@@ -131,7 +131,7 @@ class _TaskLaneScheduler {
   final _TaskRegistry _registry = _TaskRegistry();
   final _MigrationManager _migration = _MigrationManager();
   final List<SchedulerTask> _queue = [];
-  final int maxConcurrent;
+  int maxConcurrent;
   final int preemptionThreshold;
   final int reservedHighPrioritySlots;
   final int highPriorityThreshold;
@@ -171,6 +171,12 @@ class _TaskLaneScheduler {
     _registry.addQueued(task);
     _queue.add(task);
     _sortQueue();
+    _dispatchNext();
+  }
+
+  void setMaxConcurrent(int value) {
+    if (maxConcurrent == value) return;
+    maxConcurrent = value;
     _dispatchNext();
   }
 
@@ -331,9 +337,8 @@ class TaskScheduler {
 
   TaskScheduler._() {
     _lanes = {
-      // Near/far transport work may occupy the lower permits. One permit is
-      // reserved for a current-page rank (DownloadRanker current >= 950), so a
-      // page switch does not wait for an unrelated range request to unwind.
+      // One controlled handoff lets a current-page request start while the
+      // preempted transport is still unwinding, avoiding a visible stall.
       SchedulerLane.network: _createLane(
         5,
         reservedHighPrioritySlots: 1,
@@ -370,6 +375,9 @@ class TaskScheduler {
       );
 
   void submit(SchedulerTask task) => _lanes[task.lane]!.submit(task);
+
+  void setNetworkConcurrency(int value) =>
+      _lanes[SchedulerLane.network]!.setMaxConcurrent(value.clamp(1, 16));
 
   bool hasTaskInLane(SchedulerLane lane, String key) =>
       _lanes[lane]!.hasTask(key);
