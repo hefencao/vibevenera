@@ -85,7 +85,7 @@ class _ReaderWithLoadingState
     } else {
       final cached = HistoryManager().findReaderMetadata(widget.id, type);
       if (cached != null) {
-        Log.warning(
+        Log.info(
           'Reader.Load',
           'metadata cache hit: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
         );
@@ -103,7 +103,7 @@ class _ReaderWithLoadingState
         );
       }
       var comic = await comicSource.loadComicInfo!(widget.id);
-      Log.warning(
+      Log.info(
         'Reader.Load',
         'loadComicInfo: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
       );

@@ -78,12 +78,12 @@ class _ReaderImagesState extends State<_ReaderImages>
     final preparation = reader.widget.prepareImages;
     if (preparation != null) {
       final reuseStopwatch = Stopwatch()..start();
-      Log.warning(
+      Log.info(
         'Reader.Load',
         'waiting cache reuse: ${reader.type.sourceKey}/${reader.cid}',
       );
       await preparation;
-      Log.warning(
+      Log.info(
         'Reader.Load',
         'cache reuse ready: ${reader.type.sourceKey}/${reader.cid} '
             'wait=${reuseStopwatch.elapsedMilliseconds}ms '
@@ -104,7 +104,7 @@ class _ReaderImagesState extends State<_ReaderImages>
           reader.type,
           reader.chapter,
         );
-        Log.warning(
+        Log.info(
           'Reader.Load',
           'local image list: ${reader.type.sourceKey}/${reader.cid} in ${stopwatch.elapsedMilliseconds}ms',
         );
@@ -137,7 +137,7 @@ class _ReaderImagesState extends State<_ReaderImages>
       final pagesStopwatch = Stopwatch()..start();
       var cached = HistoryManager().findReaderPages(reader.cid, reader.type, cp);
       if (cached != null) {
-        Log.warning(
+        Log.info(
           'Reader.Load',
           'page cache hit: ${reader.type.sourceKey}/${reader.cid}/$cp '
               'lookup=${pagesStopwatch.elapsedMilliseconds}ms '
@@ -165,7 +165,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         reader.widget.cid,
         cp,
       );
-      Log.warning(
+      Log.info(
         'Reader.Load',
         'loadComicPages: ${reader.type.sourceKey}/${reader.cid}/$cp '
             'request=${pagesStopwatch.elapsedMilliseconds}ms '
@@ -266,7 +266,7 @@ class _ReaderImagesState extends State<_ReaderImages>
     unawaited(future.then(
       (res) {
         _pageListRefreshes.remove(key);
-        Log.warning(
+        Log.info(
           'Reader.Load',
           'refreshComicPages: ${reader.type.sourceKey}/${reader.cid}/$chapterId in ${stopwatch.elapsedMilliseconds}ms',
         );

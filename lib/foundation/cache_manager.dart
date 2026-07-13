@@ -60,7 +60,7 @@ class CacheManager {
         'unmanagedFiles': unmanagedFiles,
       };
     });
-    Log.warning(
+    Log.info(
       'Cache.Scan',
       'filesystem ${stopwatch.elapsedMilliseconds}ms '
           'unmanaged=${(res['unmanagedFiles'] as List).length}',
@@ -114,10 +114,10 @@ class CacheManager {
           continue;
         }
       }
-      Log.warning('Cache.Trace', 'delete: reason=startup-unmanaged path=${file.path}');
+      Log.info('Cache.Trace', 'delete: reason=startup-unmanaged path=${file.path}');
       await file.delete();
     }
-    Log.warning(
+    Log.info(
       'Cache.Scan',
       'complete ${stopwatch.elapsedMilliseconds}ms unmanaged=$processed bytes=$totalSize',
     );
@@ -192,7 +192,7 @@ class CacheManager {
       INSERT OR REPLACE INTO cache (key, dir, name, expires) VALUES (?, ?, ?, ?)
     ''', [key, dir.toString(), name, expires]);
     _aliases.remove(key);
-    Log.warning('Cache.Trace', 'promote: key=$key path=${promoted.path} size=$size');
+    Log.info('Cache.Trace', 'promote: key=$key path=${promoted.path} size=$size');
     if (_currentSize != null) _currentSize = _currentSize! + size;
     checkCacheIfRequired();
     return promoted;
@@ -423,7 +423,7 @@ class CacheManager {
       if (await file.exists()) {
         var size = await file.length();
         _currentSize = _currentSize! - size;
-        Log.warning('Cache.Trace', 'delete: reason=expired key=$key path=${file.path}');
+        Log.info('Cache.Trace', 'delete: reason=expired key=$key path=${file.path}');
         await file.delete();
       }
     }
@@ -455,7 +455,7 @@ class CacheManager {
         var file = File('$cachePath/$dir/$name');
         if (await file.exists()) {
           var size = await file.length();
-          Log.warning('Cache.Trace', 'delete: reason=limit key=$key path=${file.path}');
+          Log.info('Cache.Trace', 'delete: reason=limit key=$key path=${file.path}');
           await file.delete();
           _db.execute('''
             DELETE FROM cache
@@ -492,7 +492,7 @@ class CacheManager {
     var file = File('$cachePath/$dir/$name');
     var fileSize = 0;
     final exists = await file.exists();
-    Log.warning(
+    Log.info(
       'Cache.Trace',
       'delete: reason=$reason key=$key path=${file.path} exists=$exists',
     );
@@ -512,7 +512,7 @@ class CacheManager {
   /// Delete all cache.
   Future<void> clear() async {
     await _startupScan;
-    Log.warning('Cache.Trace', 'delete: reason=clear-all');
+    Log.info('Cache.Trace', 'delete: reason=clear-all');
     await Directory(cachePath).delete(recursive: true);
     Directory(cachePath).createSync(recursive: true);
     _db.execute('''

@@ -455,13 +455,13 @@ final class ComicVersionMigration {
     final stopwatch = Stopwatch()..start();
     final relations = appdata.implicitData['comicVersionRelations'];
     if (relations is! Map) {
-      Log.warning('ComicVersion.Reuse',
+      Log.info('ComicVersion.Reuse',
           'restore skipped: no relations new=$comicId');
       return;
     }
     final values = relations['$sourceKey:${_versionKey(comicId)}'];
     if (values is! List) {
-      Log.warning('ComicVersion.Reuse',
+      Log.info('ComicVersion.Reuse',
           'restore skipped: no predecessors new=$comicId');
       _restoredTargets.add(restoreKey);
       return;
@@ -472,7 +472,7 @@ final class ComicVersionMigration {
       null,
     );
     if (newPages == null) {
-      Log.warning('ComicVersion.Reuse',
+      Log.info('ComicVersion.Reuse',
           'restore skipped: no target pages new=$comicId');
       return;
     }
@@ -508,7 +508,7 @@ final class ComicVersionMigration {
         },
       );
     }
-    Log.warning(
+    Log.info(
       'ComicVersion.Reuse',
       'restored matches=$matchedVersions sources=${predecessors.length} '
           'reused=$reused in ${stopwatch.elapsedMilliseconds}ms new=$comicId',
@@ -568,7 +568,7 @@ final class ComicVersionMigration {
     }
     final matchInfoMs = stopwatch.elapsedMilliseconds - pagesMs;
     if (!registerAliases) {
-      Log.warning(
+      Log.info(
         'ComicVersion.Reuse',
         'page match prepared pages=${pagesMs}ms matchInfo=${matchInfoMs}ms '
             'mapped=${mapping.length}',
@@ -584,7 +584,7 @@ final class ComicVersionMigration {
       mapping: mapping,
     );
     _restoredTargets.add(_restoreKey(newComic.sourceKey, newComic.id));
-    Log.warning(
+    Log.info(
       'ComicVersion.Reuse',
       'pages=${pagesMs}ms matchInfo=${matchInfoMs}ms '
           'files=${stopwatch.elapsedMilliseconds - pagesMs - matchInfoMs}ms '
@@ -701,7 +701,7 @@ final class ComicVersionMigration {
       newPages.length,
     );
     if (cachedOffset != null) {
-      Log.warning(
+      Log.info(
         'ComicVersion',
         'page match cache hit old=${oldPages.length} new=${newPages.length} '
             'offset=$cachedOffset',
@@ -740,7 +740,7 @@ final class ComicVersionMigration {
           newPages.length,
           offset,
         );
-        Log.warning(
+        Log.info(
           'ComicVersion',
           'page match old=${oldPages.length} new=${newPages.length} '
               'offset=$offset anchors=${anchors.length} matches=$matches',

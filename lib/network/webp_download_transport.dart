@@ -100,7 +100,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         activeWriter,
         checkCancelled: () => _throwIfCancelled(cancelToken),
       );
-      Log.warning(
+      Log.info(
         'WebP.Cache',
         'artifact ${restored.length == 0 ? 'empty' : 'restored'}: '
             'source=${identity.sourceKey} cid=${identity.cid} eid=${identity.eid} '
@@ -429,7 +429,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       totalBytes: length,
       done: true,
     ));
-    Log.warning(
+    Log.info(
       'WebP.Cache',
       'reuse: image=${identity.imageKey} source=${identity.sourceKey} '
           'cid=${identity.cid} eid=${identity.eid} bytes=$length',
@@ -467,7 +467,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     }
 
     final file = await artifact.promote(sealedLength: finalLength);
-    Log.warning(
+    Log.info(
       'WebP.Cache',
       'promoted: image=${identity.imageKey} source=${identity.sourceKey} '
           'cid=${identity.cid} eid=${identity.eid} bytes=$finalLength exists=${await file.exists()}',

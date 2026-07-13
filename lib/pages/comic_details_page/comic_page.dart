@@ -286,7 +286,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       request = comicSource.loadComicInfo!(widget.id);
     }
     final result = await request;
-    Log.warning('ComicPage.Load',
+    Log.info('ComicPage.Load',
         'comic info ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
     return result;
   }
@@ -322,7 +322,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     }
     final stopwatch = Stopwatch()..start();
     final res = await comicSource.favoriteData!.loadFolders!(comic.id);
-    Log.warning('ComicPage.Load',
+    Log.info('ComicPage.Load',
         'favorite folders ${stopwatch.elapsedMilliseconds}ms id=${comic.id}');
     if (!mounted || res.error || res.subData is! List) return;
     isFavorite = List<String>.from(res.subData).isNotEmpty;
@@ -341,7 +341,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       setState(() => oldVersions = predecessors);
     }
     final versions = await versionsFuture;
-    Log.warning('ComicPage.Load',
+    Log.info('ComicPage.Load',
         'version check ${stopwatch.elapsedMilliseconds}ms id=${comic.id}');
     if (mounted && versions.isNotEmpty) {
       setState(() => newVersions = versions);
@@ -402,7 +402,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       if (matched) {
         prepared = await _prepareVersionReuse(version, registerAliases: true);
       } else {
-        Log.warning(
+        Log.info(
           'ComicVersion',
           'cache reuse skipped: no page match old=${comic.id} '
               'new=${version.url}',
@@ -556,7 +556,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     await readerPreparation;
     final stopwatch = Stopwatch()..start();
     final phase = registerAliases ? 'cache reuse' : 'page match preparation';
-    Log.warning(
+    Log.info(
       'ComicVersion',
       '$phase started old=${comic.id} new=${version.url}',
     );
@@ -567,7 +567,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     }
     final assetsMs = stopwatch.elapsedMilliseconds;
     if (assets.cachedPages == 0) {
-      Log.warning('ComicVersion',
+      Log.info('ComicVersion',
           'cache reuse skipped: no cache old=${comic.id}');
       return false;
     }
@@ -587,7 +587,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             oldComic: comic,
             newComic: detailResult.data,
           );
-    Log.warning(
+    Log.info(
       'ComicVersion',
       '$phase ${stopwatch.elapsedMilliseconds}ms assets=${assetsMs}ms '
           'info=${infoMs}ms '

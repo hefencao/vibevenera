@@ -455,7 +455,7 @@ class PipelineController {
     );
     final logicalKey = '$imageKey@$sourceKey@$cid@$eid';
     if (logicalKey != downloadIdentity.cacheKey) {
-      Log.warning(
+      Log.info(
         'WebP.Reuse',
         'bind logical=$logicalKey download=${downloadIdentity.cacheKey} '
             'decode=$fullKey source=${identityHashCode(lease.download.source)} '

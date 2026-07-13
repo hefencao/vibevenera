@@ -687,7 +687,7 @@ abstract class ImageDownloader {
       onLookup: isWebPSession ? (state) => cacheState = state : null,
     );
     if (isWebPSession) {
-      Log.warning(
+      Log.info(
         'WebP.Cache',
         'disk ${cacheState!.name}: source=$sourceKey cid=$cid eid=$eid key=${_shortDownloadKey(cacheKey)}',
       );
