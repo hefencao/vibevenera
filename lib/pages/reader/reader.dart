@@ -20,6 +20,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -252,6 +253,16 @@ class _ReaderState extends State<Reader>
       LocalFavoritesManager().onRead(cid, type);
     });
     super.initState();
+    if (appdata.settings['checkComicVersionInReader'] == true) {
+      unawaited(_checkVersionUpdate());
+    }
+  }
+
+  Future<void> _checkVersionUpdate() async {
+    final version = await ComicVersionMigration.readerUpdate(type.sourceKey, cid);
+    if (!mounted || version == null) return;
+    context.showMessage(message: 'New gallery version available'.tl);
+    ComicVersionMigration.markReaderUpdateNotified(type.sourceKey, cid, version);
   }
 
   bool _isInitialized = false;

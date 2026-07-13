@@ -1,4 +1,5 @@
 import 'dart:isolate';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -272,6 +273,62 @@ class CacheManager {
     if (newRows.isNotEmpty) return true;
     _db.execute('UPDATE cache SET key = ? WHERE key = ?;', [newKey, oldKey]);
     return true;
+  }
+
+  Future<int> countExisting(Iterable<String> keys) async {
+    final values = keys.toSet().toList();
+    var count = 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (var start = 0; start < values.length; start += 400) {
+      final chunk = values.sublist(start, math.min(start + 400, values.length));
+      final rows = _db.select(
+        'SELECT key, dir, name, expires FROM cache WHERE key IN '
+        '(${List.filled(chunk.length, '?').join(',')});',
+        chunk,
+      );
+      for (final row in rows) {
+        if ((row[3] as int) < now) continue;
+        final file = File('$cachePath/${row[1]}/${row[2]}');
+        if (await file.exists() ||
+            await _findAndRepairCacheFile(
+                  row[0] as String,
+                  row[2] as String,
+                  row[1] as String,
+                ) !=
+                null) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  Future<int> countComicEntries(String sourceKey, String comicId) async {
+    String escape(String value) => value
+        .replaceAll(r'\', r'\\')
+        .replaceAll('%', r'\%')
+        .replaceAll('_', r'\_');
+    final rows = _db.select(
+      "SELECT key, dir, name, expires FROM cache "
+      "WHERE key LIKE ? ESCAPE '\\';",
+      ['%@${escape(sourceKey)}@${escape(comicId)}@%'],
+    );
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var count = 0;
+    for (final row in rows) {
+      if ((row[3] as int) < now) continue;
+      final file = File('$cachePath/${row[1]}/${row[2]}');
+      if (await file.exists() ||
+          await _findAndRepairCacheFile(
+                row[0] as String,
+                row[2] as String,
+                row[1] as String,
+              ) !=
+              null) {
+        count++;
+      }
+    }
+    return count;
   }
 
   bool _isChecking = false;

@@ -161,6 +161,25 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               Divider().toSliver(),
             ],
           ),
+        if (comicId == null) ...[
+          _SwitchSetting(
+            title: 'Check for gallery updates when opening reader'.tl,
+            subtitle: 'Notify only once for each new version'.tl,
+            settingKey: 'checkComicVersionInReader',
+          ).toSliver(),
+          SelectSetting(
+            title: 'Automatic gallery version migration'.tl,
+            settingKey: 'comicVersionAutoMigration',
+            optionTranslation: {
+              'none': 'Disabled'.tl,
+              'favorites': 'Favorites'.tl,
+              'recentHistory': 'Recent history'.tl,
+              'onDetails': 'When opening details'.tl,
+            },
+            help: 'Automatic migration execution is reserved for a later version'.tl,
+          ).toSliver(),
+          const Divider().toSliver(),
+        ],
         _SwitchSetting(
           title: "Tap to turn Pages".tl,
           settingKey: "enableTapToTurnPages",

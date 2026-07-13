@@ -82,7 +82,8 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   bool showFAB = false;
 
   List<ComicVersionLink> newVersions = const [];
-  String? downloadedOldVersion;
+  ComicVersionAssets? currentVersionAssets;
+  ComicVersionAssets? valuableOldVersion;
 
   @override
   void onReadEnd() {
@@ -259,91 +260,193 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       widget.id,
       ComicType(widget.sourceKey.hashCode),
     );
-    return comicSource.loadComicInfo!(widget.id);
+    final stopwatch = Stopwatch()..start();
+    final result = await comicSource.loadComicInfo!(widget.id);
+    Log.warning('ComicPage.Load',
+        'comic info ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
+    return result;
   }
 
   @override
-  Future<void> onDataLoaded() async {
+  void onDataLoaded() {
     isLiked = comic.isLiked ?? false;
     isFavorite = comic.isFavorite ?? false;
-    // For sources with multi-folder favorites, prefer querying folders to get accurate favorite status
-    // Some sources may not set isFavorite reliably when multi-folder is enabled
-    if (comicSource.favoriteData?.loadFolders != null && comicSource.isLogged) {
-      var res = await comicSource.favoriteData!.loadFolders!(comic.id);
-      if (!res.error) {
-        if (res.subData is List) {
-          var list = List<String>.from(res.subData);
-          isFavorite = list.isNotEmpty;
-          update();
-        }
-      }
-    }
     if (comic.chapters == null) {
       isDownloaded = LocalManager().isDownloaded(comic.id, comic.comicType, 0);
     }
+    unawaited(_loadFavoriteFolders());
     unawaited(_loadNewVersions());
   }
 
+  Future<void> _loadFavoriteFolders() async {
+    if (comicSource.favoriteData?.loadFolders == null || !comicSource.isLogged) {
+      return;
+    }
+    final stopwatch = Stopwatch()..start();
+    final res = await comicSource.favoriteData!.loadFolders!(comic.id);
+    Log.warning('ComicPage.Load',
+        'favorite folders ${stopwatch.elapsedMilliseconds}ms id=${comic.id}');
+    if (!mounted || res.error || res.subData is! List) return;
+    isFavorite = List<String>.from(res.subData).isNotEmpty;
+    update();
+  }
+
   Future<void> _loadNewVersions() async {
+    final stopwatch = Stopwatch()..start();
     final versions = await ComicVersionMigration.findVersions(comic);
+    final values = await Future.wait([
+      ComicVersionMigration.assets(comic),
+      ComicVersionMigration.valuablePredecessor(comic),
+    ]);
+    Log.warning('ComicPage.Load',
+        'version check ${stopwatch.elapsedMilliseconds}ms id=${comic.id}');
     if (!mounted) return;
     setState(() {
       newVersions = versions;
-      downloadedOldVersion = ComicVersionMigration.downloadedPredecessor(comic);
+      currentVersionAssets = values[0] as ComicVersionAssets;
+      valuableOldVersion = values[1];
     });
   }
 
   Widget buildVersionUpdate() {
-    if (newVersions.isEmpty && downloadedOldVersion == null) {
+    if (newVersions.isEmpty && valuableOldVersion == null) {
       return const SliverToBoxAdapter();
     }
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
       sliver: SliverToBoxAdapter(
-        child: ListTile(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          tileColor: context.colorScheme.secondaryContainer,
-          leading: const Icon(Icons.system_update_alt),
-          title: Text((newVersions.isNotEmpty
-              ? 'New gallery version available'
-              : 'A downloaded older version exists').tl),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: newVersions.isNotEmpty
-              ? _selectVersion
-              : () => context.to(() => ComicPage(
-                    id: downloadedOldVersion!,
-                    sourceKey: comic.sourceKey,
-                  )),
+        child: Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: context.colorScheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: IntrinsicHeight(
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextButton.icon(
+                    onPressed: newVersions.isNotEmpty
+                        ? _viewNewVersion
+                        : _viewOldVersion,
+                    icon: const Icon(Icons.visibility_outlined),
+                    label: Text((newVersions.isNotEmpty
+                        ? 'View version'
+                        : 'View old version').tl),
+                  ),
+                ),
+                VerticalDivider(
+                  width: 1,
+                  color: context.colorScheme.outlineVariant,
+                ),
+                Expanded(
+                  child: TextButton.icon(
+                    onPressed: newVersions.isNotEmpty
+                        ? _migrateNewVersion
+                        : _migrateOldVersion,
+                    icon: const Icon(Icons.move_down),
+                    label: Text('Migrate'.tl),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _selectVersion() async {
-    ComicVersionLink? version;
-    if (newVersions.length == 1) {
-      version = newVersions.single;
-    } else {
-      version = await showDialog<ComicVersionLink>(
+  Future<ComicVersionLink?> _chooseNewVersion({bool alwaysShow = false}) async {
+    if (!alwaysShow && newVersions.length == 1) return newVersions.single;
+    return showDialog<ComicVersionLink>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('New gallery version'.tl),
+        children: newVersions.map((item) => SimpleDialogOption(
+          onPressed: () => context.pop(item),
+          child: ListTile(
+            title: Text([
+              'Successor version @version'.tlParams({
+                'version': item.generation,
+              }),
+              if (item.date?.isNotEmpty == true) item.date!,
+            ].join(' · ')),
+            subtitle: Text(item.title.isEmpty ? item.url : item.title),
+          ),
+        )).toList(),
+      ),
+    );
+  }
+
+  Future<void> _viewNewVersion() async {
+    final version = await _chooseNewVersion();
+    if (version == null || !mounted) return;
+    context.to(() => ComicPage(
+      id: version.url,
+      sourceKey: comic.sourceKey,
+    ));
+  }
+
+  void _viewOldVersion() {
+    context.to(() => ComicPage(
+      id: valuableOldVersion!.id,
+      sourceKey: comic.sourceKey,
+    ));
+  }
+
+  Future<void> _migrateNewVersion() async {
+    final version = await _chooseNewVersion(alwaysShow: true);
+    if (version == null || !mounted) return;
+    await _migrateVersion(comic, version, currentVersionAssets!);
+  }
+
+  Future<void> _migrateOldVersion() async {
+    final loading = showLoadingDialog(
+      context,
+      barrierDismissible: false,
+      allowCancel: false,
+      message: 'Loading old version'.tl,
+    );
+    final result = await comicSource.loadComicInfo!(valuableOldVersion!.id);
+    loading.close();
+    if (!mounted) return;
+    if (result.error) {
+      context.showMessage(message: result.errorMessage!);
+      return;
+    }
+    await _migrateVersion(
+      result.data,
+      ComicVersionLink(comic.title, comic.id, comic.uploadTime, 1),
+      valuableOldVersion!,
+    );
+  }
+
+  Future<void> _migrateVersion(
+    ComicDetails oldComic,
+    ComicVersionLink version,
+    ComicVersionAssets assets,
+  ) async {
+    if (!assets.hasValue) {
+      final open = await showDialog<bool>(
         context: context,
-        builder: (context) => SimpleDialog(
-          title: Text('New gallery version'.tl),
-          children: newVersions.map((item) => SimpleDialogOption(
-            onPressed: () => context.pop(item),
-            child: ListTile(
-              title: Text([
-                'Successor version @version'.tlParams({
-                  'version': item.generation,
-                }),
-                if (item.date?.isNotEmpty == true) item.date!,
-              ].join(' · ')),
-              subtitle: Text(item.title.isEmpty ? item.url : item.title),
+        builder: (context) => AlertDialog(
+          title: Text('No reusable local data'.tl),
+          content: Text('Opening the new version is safer than migration'.tl),
+          actions: [
+            TextButton(
+              onPressed: () => context.pop(false),
+              child: Text('Cancel'.tl),
             ),
-          )).toList(),
+            FilledButton(
+              onPressed: () => context.pop(true),
+              child: Text('Open new version'.tl),
+            ),
+          ],
         ),
       );
+      if (open == true && mounted) _openVersion(version);
+      return;
     }
-    if (version == null || !mounted) return;
     final mode = await showDialog<ComicVersionMigrationMode>(
       context: context,
       builder: (context) => SimpleDialog(
@@ -355,7 +458,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
             Text(
               [
                 'Successor version @version'.tlParams({
-                  'version': version!.generation,
+                  'version': version.generation,
                 }),
                 if (version.date?.isNotEmpty == true) version.date!,
               ].join(' · '),
@@ -372,14 +475,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
               subtitle: Text('Reuse matched cache and downloaded pages'.tl),
             ),
           ),
-          SimpleDialogOption(
-            onPressed: () => context.pop(ComicVersionMigrationMode.redownload),
-            child: ListTile(
-              leading: const Icon(Icons.download_for_offline_outlined),
-              title: Text('Redownload'.tl),
-              subtitle: Text('Discard the old manual download'.tl),
+          if (assets.manualDownload)
+            SimpleDialogOption(
+              onPressed: () => context.pop(ComicVersionMigrationMode.redownload),
+              child: ListTile(
+                leading: const Icon(Icons.download_for_offline_outlined),
+                title: Text('Redownload'.tl),
+                subtitle: Text('Discard the old manual download'.tl),
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -393,7 +497,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     late Res<ComicVersionMigrationResult> result;
     try {
       result = await ComicVersionMigration.migrate(
-        oldComic: comic,
+        oldComic: oldComic,
         newUrl: version.url,
         mode: mode,
       );
@@ -409,6 +513,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         mode == ComicVersionMigrationMode.incremental &&
         result.errorMessage == 'No unchanged pages could be matched' &&
         result.subData is ComicVersionMigrationPlan &&
+        assets.manualDownload &&
         (result.subData as ComicVersionMigrationPlan).newPages.length >=
             (result.subData as ComicVersionMigrationPlan).oldPages.length) {
       final plan = result.subData as ComicVersionMigrationPlan;
@@ -453,7 +558,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       );
       try {
         result = await ComicVersionMigration.migrate(
-          oldComic: comic,
+          oldComic: oldComic,
           newUrl: version.url,
           mode: mode,
           forcedOffset: offset,
@@ -469,6 +574,29 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       if (!mounted) return;
     }
     if (result.error) {
+      if (mode == ComicVersionMigrationMode.incremental &&
+          !assets.manualDownload &&
+          result.errorMessage == 'No unchanged pages could be matched') {
+        final rebuild = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Cache migration is not reliable'.tl),
+            content: Text('Rebuild is safer than guessing the page offset'.tl),
+            actions: [
+              TextButton(
+                onPressed: () => context.pop(false),
+                child: Text('Cancel'.tl),
+              ),
+              FilledButton(
+                onPressed: () => context.pop(true),
+                child: Text('Open new version'.tl),
+              ),
+            ],
+          ),
+        );
+        if (rebuild == true && mounted) _openVersion(version);
+        return;
+      }
       context.showMessage(message: result.errorMessage!);
       return;
     }
@@ -481,6 +609,13 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       sourceKey: migrated.comic.sourceKey,
       cover: migrated.comic.cover,
       title: migrated.comic.title,
+    ));
+  }
+
+  void _openVersion(ComicVersionLink version) {
+    context.toReplacement(() => ComicPage(
+      id: version.url,
+      sourceKey: comic.sourceKey,
     ));
   }
 

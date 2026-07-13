@@ -39,16 +39,34 @@ final class ComicVersionMigrationPlan {
   const ComicVersionMigrationPlan(this.comic, this.oldPages, this.newPages);
 }
 
+final class ComicVersionAssets {
+  final String id;
+  final bool manualDownload;
+  final int cachedPages;
+
+  const ComicVersionAssets(this.id, this.manualDownload, this.cachedPages);
+
+  bool get hasValue => manualDownload || cachedPages > 0;
+}
+
 final class ComicVersionMigration {
   static Future<List<ComicVersionLink>> findVersions(ComicDetails comic) async {
-    if (comic.sourceKey != 'ehentai') return const [];
+    return _findVersions(comic.sourceKey, comic.id, comic.url ?? comic.id);
+  }
+
+  static Future<List<ComicVersionLink>> _findVersions(
+    String sourceKey,
+    String comicId,
+    String url,
+  ) async {
+    if (sourceKey != 'ehentai') return const [];
     try {
       final response = await AppDio(BaseOptions(responseType: ResponseType.plain))
-          .get<String>(comic.url ?? comic.id);
+          .get<String>(url);
       final document = html.parse(response.data!);
       final container = document.getElementById('gnd');
       if (container == null) return const [];
-      final base = Uri.parse(comic.url ?? comic.id);
+      final base = Uri.parse(url);
       final anchors = container.querySelectorAll('a[href]');
       final dates = RegExp(
         r'</a>\s*,\s*added\s+(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)',
@@ -60,7 +78,7 @@ final class ComicVersionMigration {
         final date = dates.elementAtOrNull(index);
         return ComicVersionLink(anchor.text.trim(), url, date, index + 1);
       }).where((version) => version.url.contains('/g/')).toList();
-      _recordRelations(comic, versions);
+      _recordRelations(sourceKey, comicId, versions);
       return versions;
     } catch (error, stack) {
       Log.error('ComicVersion', error, stack);
@@ -68,19 +86,82 @@ final class ComicVersionMigration {
     }
   }
 
-  static String? downloadedPredecessor(ComicDetails comic) {
+  static Future<ComicVersionLink?> readerUpdate(
+    String sourceKey,
+    String comicId,
+  ) async {
+    final versions = await _findVersions(sourceKey, comicId, comicId);
+    if (versions.isEmpty) return null;
+    final version = versions.last;
+    final notice = '$sourceKey:${_versionKey(comicId)}>${_versionKey(version.url)}';
+    final notices = List<String>.from(
+      appdata.implicitData['readerVersionNotices'] as List? ?? const [],
+    );
+    if (notices.contains(notice)) return null;
+    return version;
+  }
+
+  static void markReaderUpdateNotified(
+    String sourceKey,
+    String comicId,
+    ComicVersionLink version,
+  ) {
+    final notice = '$sourceKey:${_versionKey(comicId)}>${_versionKey(version.url)}';
+    final notices = List<String>.from(
+      appdata.implicitData['readerVersionNotices'] as List? ?? const [],
+    );
+    if (notices.contains(notice)) return;
+    notices.add(notice);
+    if (notices.length > 256) notices.removeRange(0, notices.length - 256);
+    appdata.implicitData['readerVersionNotices'] = notices;
+    appdata.writeImplicitData();
+  }
+
+  static Future<ComicVersionAssets> assets(ComicDetails comic) async {
+    return _assets(comic.id, comic.sourceKey, comic.comicType);
+  }
+
+  static Future<ComicVersionAssets> _assets(
+    String id,
+    String sourceKey,
+    HistoryType type,
+  ) async {
+    final manual = LocalManager().find(id, type) != null;
+    final pages = HistoryManager().findReaderPages(
+      id,
+      type,
+      null,
+    );
+    if (pages == null || pages.isEmpty) {
+      final cached = await CacheManager().countComicEntries(sourceKey, id);
+      return ComicVersionAssets(id, manual, cached);
+    }
+    final keys = <String>[
+      for (final page in pages)
+        for (final ep in const ['', '0'])
+          '$page@$sourceKey@$id@$ep',
+    ];
+    final cached = await CacheManager().countExisting(keys);
+    return ComicVersionAssets(id, manual, cached);
+  }
+
+  static Future<ComicVersionAssets?> valuablePredecessor(
+    ComicDetails comic,
+  ) async {
     final relations = appdata.implicitData['comicVersionRelations'];
     if (relations is! Map) return null;
     final predecessors = relations['${comic.sourceKey}:${_versionKey(comic.id)}'];
     if (predecessors is! List) return null;
     for (final id in predecessors.whereType<String>()) {
-      if (LocalManager().find(id, comic.comicType) != null) return id;
+      final value = await _assets(id, comic.sourceKey, comic.comicType);
+      if (value.hasValue) return value;
     }
     return null;
   }
 
   static void _recordRelations(
-    ComicDetails comic,
+    String sourceKey,
+    String comicId,
     List<ComicVersionLink> versions,
   ) {
     if (versions.isEmpty) return;
@@ -89,10 +170,10 @@ final class ComicVersionMigration {
     );
     var changed = false;
     for (final version in versions) {
-      final key = '${comic.sourceKey}:${_versionKey(version.url)}';
+      final key = '$sourceKey:${_versionKey(version.url)}';
       final ids = List<String>.from(relations[key] as List? ?? const []);
-      if (!ids.contains(comic.id)) {
-        ids.add(comic.id);
+      if (!ids.contains(comicId)) {
+        ids.add(comicId);
         changed = true;
       }
       relations[key] = ids;
