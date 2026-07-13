@@ -45,10 +45,11 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   });
 
   String get _fullKey {
+    final identity = '$imageKey@$sourceKey@$cid@$eid';
     if (targetWidth > 0 || targetHeight > 0) {
-      return '$imageKey@${targetWidth}x$targetHeight';
+      return '$identity@${targetWidth}x$targetHeight';
     }
-    return imageKey;
+    return identity;
   }
 
   /// native texture 侧通道的键（含目标尺寸）。ComicImage 用它监听是否有可显示的纹理。

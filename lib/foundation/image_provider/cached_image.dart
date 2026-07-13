@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/network/images.dart';
@@ -89,4 +90,10 @@ class CachedImageProvider extends BaseImageProvider<CachedImageProvider> {
 
   @override
   String get key => url + (sourceKey ?? '') + (cid ?? '');
+
+  @override
+  Future<void> evictInvalidCache() => CacheManager().delete(
+        '$url@$sourceKey${cid != null ? '@$cid' : ''}',
+        reason: 'invalid-thumbnail',
+      );
 }

@@ -92,6 +92,7 @@ class Reader extends StatefulWidget {
     this.initialChapterGroup,
     required this.author,
     required this.tags,
+    this.prepareImages,
   });
 
   final ComicType type;
@@ -116,6 +117,8 @@ class Reader extends StatefulWidget {
   final int? initialChapterGroup;
 
   final History history;
+
+  final Future<void>? prepareImages;
 
   @override
   State<Reader> createState() => _ReaderState();

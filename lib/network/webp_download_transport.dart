@@ -51,7 +51,8 @@ typedef WebPDownloadEventSource = Stream<ImageDownloadProgress> Function({
 /// cursor; `currentBytes` remains progress metadata and is never used to infer
 /// a chunk start offset.
 final class ImageDownloaderWebPTransport implements WebPTransport {
-  static const int _localReadSize = 256 * 1024;
+  static const int _initialLocalReadSize = 1024 * 1024;
+  static const int _localReadSize = 512 * 1024;
 
   final DownloadIdentity identity;
   final WebPDownloadArtifact Function(String cacheKey) artifactFactory;
@@ -324,8 +325,11 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         _throwIfCancelled(cancelToken);
 
         final remaining = localLength - activeIngress.receivedLength;
+        final readSize = activeIngress.receivedLength == 0
+            ? _initialLocalReadSize
+            : _localReadSize;
         final chunk = await reader.read(
-          remaining < _localReadSize ? remaining : _localReadSize,
+          remaining < readSize ? remaining : readSize,
         );
 
         if (chunk.isEmpty) {
@@ -391,10 +395,11 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         var offset = 0;
         while (offset < length) {
           _throwIfCancelled(cancelToken);
+          final readSize = offset == 0
+              ? _initialLocalReadSize
+              : _localReadSize;
           final chunk = await reader.read(
-            length - offset < _localReadSize
-                ? length - offset
-                : _localReadSize,
+            length - offset < readSize ? length - offset : readSize,
           );
           if (chunk.isEmpty) {
             throw WebPSourceInvariantError(

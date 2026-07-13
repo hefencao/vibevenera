@@ -134,6 +134,14 @@ Appending only changes `WebPSource`. Partial looping only resets `WebPPlaybackCu
 - Display leases follow active ImageStream listeners, not ImageCache residency, and never create transport demand.
 - Publishes an immediate state snapshot followed by ordered frame/status events.
 
+### Cross-version cache reuse
+
+An unchanged page alias canonicalizes only `DownloadIdentity`, so both versions
+read the same compressed source and source epoch. `fullKey` keeps the logical
+gallery/page identity: every version owns an independent `WebPDecodeSession`,
+playback cursor and frame holder. A holder queue is single-consumer playback
+state and must not be shared by two visible completers.
+
 ### Display lease
 
 Visible UI obtains a display lease from the decode session. It does not start or join a download, append bytes, create a second decoder, or resume a stream. Releasing the lease is a logical detach.

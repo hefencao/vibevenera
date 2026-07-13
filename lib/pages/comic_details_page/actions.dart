@@ -9,6 +9,8 @@ abstract mixin class _ComicPageActions {
 
   History? get history;
 
+  Future<void>? get readerPreparation;
+
   bool isLiking = false;
 
   bool isLiked = false;
@@ -115,6 +117,7 @@ abstract mixin class _ComicPageActions {
         history: history ?? History.fromModel(model: comic, ep: 0, page: 0),
         author: comic.findAuthor() ?? '',
         tags: comic.plainTags,
+        prepareImages: readerPreparation,
       ),
     ).then((_) {
       onReadEnd();

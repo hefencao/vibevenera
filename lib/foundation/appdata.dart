@@ -238,7 +238,10 @@ class Settings with ChangeNotifier {
     'showChapterCommentsAtEnd':
         false, // show chapter comments at end of chapter
     'checkComicVersionInReader': false,
-    'comicVersionAutoMigration': 'none',
+    'comicVersionAutoMigration': <String>[],
+    'comicVersionHistoryLimit': 5,
+    'reuseOldVersionCache': false,
+    'showAdditionalComicVersions': false,
   };
 
   operator [](String key) {

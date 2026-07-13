@@ -52,6 +52,8 @@ class ComicPage extends StatefulWidget {
     this.cover,
     this.title,
     this.heroID,
+    this.initialComicInfo,
+    this.cacheReuseReady,
   });
 
   final String id;
@@ -64,12 +66,20 @@ class ComicPage extends StatefulWidget {
 
   final int? heroID;
 
+  final Future<Res<ComicDetails>>? initialComicInfo;
+
+  final Future<void>? cacheReuseReady;
+
   @override
   State<ComicPage> createState() => _ComicPageState();
 }
 
 class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     with _ComicPageActions {
+  @override
+  Future<void>? get readerPreparation =>
+      widget.cacheReuseReady ?? restoredCacheReuse;
+
   @override
   History? history;
 
@@ -83,7 +93,14 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   List<ComicVersionLink> newVersions = const [];
   ComicVersionAssets? currentVersionAssets;
-  ComicVersionAssets? valuableOldVersion;
+  List<ComicVersionAssets> oldVersions = const [];
+  Future<void>? restoredCacheReuse;
+  bool initialComicInfoConsumed = false;
+  final Map<String, Future<Res<ComicDetails>>> _versionDetails = {};
+  final Map<String, Future<bool>> _matchPreparations = {};
+  final Map<String, Future<void>> _reusePreparations = {};
+  Future<void>? versionCheck;
+  Future<void>? assetsCheck;
 
   @override
   void onReadEnd() {
@@ -197,7 +214,6 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         controller: scrollController,
         slivers: [
           ...buildTitle(),
-          buildVersionUpdate(),
           buildActions(),
           buildDescription(),
           buildInfo(),
@@ -261,7 +277,15 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       ComicType(widget.sourceKey.hashCode),
     );
     final stopwatch = Stopwatch()..start();
-    final result = await comicSource.loadComicInfo!(widget.id);
+    final initial = widget.initialComicInfo;
+    late final Future<Res<ComicDetails>> request;
+    if (initial != null && !initialComicInfoConsumed) {
+      initialComicInfoConsumed = true;
+      request = initial;
+    } else {
+      request = comicSource.loadComicInfo!(widget.id);
+    }
+    final result = await request;
     Log.warning('ComicPage.Load',
         'comic info ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
     return result;
@@ -271,11 +295,25 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   void onDataLoaded() {
     isLiked = comic.isLiked ?? false;
     isFavorite = comic.isFavorite ?? false;
+    newVersions = ComicVersionMigration.cachedVersions(
+      comic.sourceKey,
+      comic.id,
+    );
     if (comic.chapters == null) {
       isDownloaded = LocalManager().isDownloaded(comic.id, comic.comicType, 0);
     }
     unawaited(_loadFavoriteFolders());
-    unawaited(_loadNewVersions());
+    versionCheck = _loadNewVersions();
+    unawaited(versionCheck);
+    if (comic.sourceKey == 'ehentai' &&
+        widget.cacheReuseReady == null &&
+        appdata.settings['reuseOldVersionCache'] == true) {
+      restoredCacheReuse = ComicVersionMigration.restoreCacheReuse(comic);
+    }
+    if (newVersions.isNotEmpty) {
+      unawaited(_loadCurrentVersionAssets());
+    }
+    _warmCacheReuse(newVersions);
   }
 
   Future<void> _loadFavoriteFolders() async {
@@ -293,70 +331,184 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   Future<void> _loadNewVersions() async {
     final stopwatch = Stopwatch()..start();
-    final versions = await ComicVersionMigration.findVersions(comic);
-    final values = await Future.wait([
-      ComicVersionMigration.assets(comic),
-      ComicVersionMigration.valuablePredecessor(comic),
-    ]);
+    final versionsFuture = ComicVersionMigration.findVersions(
+      comic,
+      force: newVersions.isNotEmpty,
+    );
+    await readerPreparation;
+    final predecessors = await ComicVersionMigration.predecessors(comic);
+    if (mounted) {
+      setState(() => oldVersions = predecessors);
+    }
+    final versions = await versionsFuture;
     Log.warning('ComicPage.Load',
         'version check ${stopwatch.elapsedMilliseconds}ms id=${comic.id}');
-    if (!mounted) return;
-    setState(() {
-      newVersions = versions;
-      currentVersionAssets = values[0] as ComicVersionAssets;
-      valuableOldVersion = values[1];
+    if (mounted && versions.isNotEmpty) {
+      setState(() => newVersions = versions);
+      unawaited(_loadCurrentVersionAssets());
+      _warmCacheReuse(versions);
+    }
+  }
+
+  Future<void> _loadCurrentVersionAssets() => assetsCheck ??= Future<void>(() async {
+    await readerPreparation;
+    final assets = await ComicVersionMigration.assets(comic);
+    currentVersionAssets = assets;
+    if (mounted) setState(() {});
+  });
+
+  void _warmCacheReuse(List<ComicVersionLink> versions) {
+    if (appdata.settings['reuseOldVersionCache'] != true || versions.isEmpty) {
+      return;
+    }
+    unawaited(Future<void>(() async {
+      for (final version in versions) {
+        if (!await _matchFor(version)) await _matchFor(version);
+      }
+    }).then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {
+        Log.error('ComicVersion', error, stack);
+      },
+    ));
+  }
+
+  Future<Res<ComicDetails>> _detailsFor(ComicVersionLink version) {
+    final existing = _versionDetails[version.url];
+    if (existing != null) return existing;
+    late Future<Res<ComicDetails>> future;
+    future = comicSource.loadComicInfo!(version.url);
+    _versionDetails[version.url] = future;
+    future.then((result) {
+      if (result.error && identical(_versionDetails[version.url], future)) {
+        _versionDetails.remove(version.url);
+      }
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_versionDetails[version.url], future)) {
+        _versionDetails.remove(version.url);
+      }
     });
+    return future;
+  }
+
+  Future<void> _reuseFor(ComicVersionLink version) {
+    final existing = _reusePreparations[version.url];
+    if (existing != null) return existing;
+    var prepared = false;
+    late Future<void> future;
+    future = Future<void>(() async {
+      var matched = await _matchFor(version);
+      if (!matched) matched = await _matchFor(version);
+      if (matched) {
+        prepared = await _prepareVersionReuse(version, registerAliases: true);
+      } else {
+        Log.warning(
+          'ComicVersion',
+          'cache reuse skipped: no page match old=${comic.id} '
+              'new=${version.url}',
+        );
+      }
+    });
+    _reusePreparations[version.url] = future;
+    future.then((_) {
+      if (!prepared && identical(_reusePreparations[version.url], future)) {
+        _reusePreparations.remove(version.url);
+      }
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_reusePreparations[version.url], future)) {
+        _reusePreparations.remove(version.url);
+      }
+    });
+    return future;
+  }
+
+  Future<bool> _matchFor(ComicVersionLink version) {
+    final existing = _matchPreparations[version.url];
+    if (existing != null) return existing;
+    late Future<bool> future;
+    future = Future<bool>(() =>
+        _prepareVersionReuse(version, registerAliases: false));
+    _matchPreparations[version.url] = future;
+    future.then((matched) {
+      if (!matched && identical(_matchPreparations[version.url], future)) {
+        _matchPreparations.remove(version.url);
+      }
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_matchPreparations[version.url], future)) {
+        _matchPreparations.remove(version.url);
+      }
+    });
+    return future;
   }
 
   Widget buildVersionUpdate() {
-    if (newVersions.isEmpty && valuableOldVersion == null) {
-      return const SliverToBoxAdapter();
+    if (newVersions.isEmpty && oldVersions.isEmpty) {
+      return const SizedBox();
     }
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      sliver: SliverToBoxAdapter(
-        child: Container(
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: context.colorScheme.secondaryContainer,
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: IntrinsicHeight(
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextButton.icon(
-                    onPressed: newVersions.isNotEmpty
-                        ? _viewNewVersion
-                        : _viewOldVersion,
-                    icon: const Icon(Icons.visibility_outlined),
-                    label: Text((newVersions.isNotEmpty
-                        ? 'View version'
-                        : 'View old version').tl),
-                  ),
-                ),
-                VerticalDivider(
-                  width: 1,
-                  color: context.colorScheme.outlineVariant,
-                ),
-                Expanded(
-                  child: TextButton.icon(
-                    onPressed: newVersions.isNotEmpty
-                        ? _migrateNewVersion
-                        : _migrateOldVersion,
-                    icon: const Icon(Icons.move_down),
-                    label: Text('Migrate'.tl),
-                  ),
-                ),
-              ],
-            ),
-          ),
+    final showAdditional =
+        appdata.settings['showAdditionalComicVersions'] == true;
+    final hasNew = newVersions.isNotEmpty;
+    final rows = <Widget>[
+      _versionActionRow(
+        viewText: hasNew ? 'View new version' : 'View old version',
+        onView: hasNew ? _viewNewVersion : _viewOldVersion,
+        showMigrate: true,
+        onMigrate: hasNew
+            ? currentVersionAssets?.hasValue == true
+                ? _migrateNewVersion
+                : null
+            : oldVersions.any((version) => version.hasValue)
+                ? _migrateOldVersion
+                : null,
+      ),
+      if (hasNew && oldVersions.isNotEmpty && showAdditional)
+        _versionActionRow(
+          viewText: 'View old version',
+          onView: _viewOldVersion,
+          showMigrate: true,
+          onMigrate: oldVersions.any((version) => version.hasValue)
+              ? _migrateOldVersion
+              : null,
         ),
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, right: 16),
+      child: Column(
+        children: List.generate(rows.length, (index) => Padding(
+          padding: EdgeInsets.only(top: index == 0 ? 0 : 8),
+          child: rows[index],
+        )),
       ),
     );
   }
 
+  Widget _versionActionRow({
+    required String viewText,
+    required VoidCallback onView,
+    bool showMigrate = false,
+    VoidCallback? onMigrate,
+  }) => Row(
+    children: [
+      Expanded(
+        child: FilledButton(
+          onPressed: onView,
+          child: Text(viewText.tl),
+        ),
+      ),
+      if (showMigrate) ...[
+        const SizedBox(width: 8),
+        Expanded(
+          child: FilledButton(
+            onPressed: onMigrate,
+            child: Text('Migrate'.tl),
+          ),
+        ),
+      ],
+    ],
+  );
+
   Future<ComicVersionLink?> _chooseNewVersion({bool alwaysShow = false}) async {
+    if (newVersions.isEmpty) return null;
     if (!alwaysShow && newVersions.length == 1) return newVersions.single;
     return showDialog<ComicVersionLink>(
       context: context,
@@ -381,15 +533,98 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   Future<void> _viewNewVersion() async {
     final version = await _chooseNewVersion();
     if (version == null || !mounted) return;
+    final details = _detailsFor(version);
+    final reuseReady = appdata.settings['reuseOldVersionCache'] == true &&
+            !ComicVersionMigration.isCacheReuseRestored(
+              comic.sourceKey,
+              version.url,
+            )
+        ? _reuseFor(version)
+        : null;
     context.to(() => ComicPage(
       id: version.url,
       sourceKey: comic.sourceKey,
+      initialComicInfo: details,
+      cacheReuseReady: reuseReady,
     ));
   }
 
-  void _viewOldVersion() {
+  Future<bool> _prepareVersionReuse(
+    ComicVersionLink version, {
+    required bool registerAliases,
+  }) async {
+    await readerPreparation;
+    final stopwatch = Stopwatch()..start();
+    final phase = registerAliases ? 'cache reuse' : 'page match preparation';
+    Log.warning(
+      'ComicVersion',
+      '$phase started old=${comic.id} new=${version.url}',
+    );
+    var assets = currentVersionAssets;
+    if (assets == null) {
+      assets = await ComicVersionMigration.assets(comic);
+      currentVersionAssets = assets;
+    }
+    final assetsMs = stopwatch.elapsedMilliseconds;
+    if (assets.cachedPages == 0) {
+      Log.warning('ComicVersion',
+          'cache reuse skipped: no cache old=${comic.id}');
+      return false;
+    }
+    final detailResult = await _detailsFor(version);
+    final infoMs = stopwatch.elapsedMilliseconds - assetsMs;
+    if (detailResult.error) {
+      Log.warning('ComicVersion',
+          'cache reuse info error=${detailResult.errorMessage} new=${version.url}');
+      return false;
+    }
+    final result = registerAliases
+        ? await ComicVersionMigration.prepareCacheReuse(
+            oldComic: comic,
+            newComic: detailResult.data,
+          )
+        : await ComicVersionMigration.preparePageMatch(
+            oldComic: comic,
+            newComic: detailResult.data,
+          );
+    Log.warning(
+      'ComicVersion',
+      '$phase ${stopwatch.elapsedMilliseconds}ms assets=${assetsMs}ms '
+          'info=${infoMs}ms '
+          'old=${comic.id} '
+          'new=${version.url} ${result.error ? 'error=${result.errorMessage}' : 'pages=${result.data}'}',
+    );
+    return !result.error;
+  }
+
+  Future<ComicVersionAssets?> _chooseOldVersion() async {
+    final versions = oldVersions;
+    if (versions.length == 1) return versions.single;
+    return showDialog<ComicVersionAssets>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('Old gallery version'.tl),
+        children: List.generate(versions.length, (index) {
+          final item = versions[index];
+          return SimpleDialogOption(
+            onPressed: () => context.pop(item),
+            child: ListTile(
+              title: Text('Predecessor version @version'.tlParams({
+                'version': index + 1,
+              })),
+              subtitle: Text(item.id),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+
+  Future<void> _viewOldVersion() async {
+    final version = await _chooseOldVersion();
+    if (version == null || !mounted) return;
     context.to(() => ComicPage(
-      id: valuableOldVersion!.id,
+      id: version.id,
       sourceKey: comic.sourceKey,
     ));
   }
@@ -397,17 +632,50 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   Future<void> _migrateNewVersion() async {
     final version = await _chooseNewVersion(alwaysShow: true);
     if (version == null || !mounted) return;
+    if (currentVersionAssets == null) {
+      final loading = showLoadingDialog(
+        context,
+        barrierDismissible: false,
+        allowCancel: false,
+        message: 'Checking local data'.tl,
+      );
+      currentVersionAssets = await ComicVersionMigration.assets(comic);
+      loading.close();
+      if (!mounted) return;
+    }
     await _migrateVersion(comic, version, currentVersionAssets!);
   }
 
   Future<void> _migrateOldVersion() async {
+    final versions = oldVersions.where((version) => version.hasValue).toList();
+    final oldVersion = versions.length == 1
+        ? versions.single
+        : await showDialog<ComicVersionAssets>(
+            context: context,
+            builder: (context) => SimpleDialog(
+              title: Text('Old gallery version'.tl),
+              children: List.generate(versions.length, (index) {
+                final item = versions[index];
+                return SimpleDialogOption(
+                  onPressed: () => context.pop(item),
+                  child: ListTile(
+                    title: Text('Predecessor version @version'.tlParams({
+                      'version': index + 1,
+                    })),
+                    subtitle: Text(item.id),
+                  ),
+                );
+              }),
+            ),
+          );
+    if (oldVersion == null || !mounted) return;
     final loading = showLoadingDialog(
       context,
       barrierDismissible: false,
       allowCancel: false,
       message: 'Loading old version'.tl,
     );
-    final result = await comicSource.loadComicInfo!(valuableOldVersion!.id);
+    final result = await comicSource.loadComicInfo!(oldVersion.id);
     loading.close();
     if (!mounted) return;
     if (result.error) {
@@ -417,7 +685,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     await _migrateVersion(
       result.data,
       ComicVersionLink(comic.title, comic.id, comic.uploadTime, 1),
-      valuableOldVersion!,
+      oldVersion,
     );
   }
 
@@ -685,9 +953,18 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
                     style: ts.s14,
                   ).paddingVertical(4),
                 Text(
-                  (ComicSource.find(comic.sourceKey)?.name) ?? '',
+                  [
+                    (ComicSource.find(comic.sourceKey)?.name) ?? '',
+                    if (newVersions.isNotEmpty || oldVersions.isNotEmpty)
+                      'Reverse version @version'.tlParams({
+                        'version': newVersions.length + 1,
+                      }),
+                  ].where((value) => value.isNotEmpty).join(' · '),
                   style: ts.s12,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
+                buildVersionUpdate(),
               ],
             ),
           ),

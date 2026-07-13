@@ -75,6 +75,22 @@ class _ReaderImagesState extends State<_ReaderImages>
     if (inProgress) return;
     inProgress = true;
     final stopwatch = Stopwatch()..start();
+    final preparation = reader.widget.prepareImages;
+    if (preparation != null) {
+      final reuseStopwatch = Stopwatch()..start();
+      Log.warning(
+        'Reader.Load',
+        'waiting cache reuse: ${reader.type.sourceKey}/${reader.cid}',
+      );
+      await preparation;
+      Log.warning(
+        'Reader.Load',
+        'cache reuse ready: ${reader.type.sourceKey}/${reader.cid} '
+            'wait=${reuseStopwatch.elapsedMilliseconds}ms '
+            'total=${stopwatch.elapsedMilliseconds}ms',
+      );
+      if (!mounted) return;
+    }
     if (reader.type == ComicType.local ||
         (LocalManager().isDownloaded(
           reader.cid,
@@ -88,7 +104,7 @@ class _ReaderImagesState extends State<_ReaderImages>
           reader.type,
           reader.chapter,
         );
-        Log.info(
+        Log.warning(
           'Reader.Load',
           'local image list: ${reader.type.sourceKey}/${reader.cid} in ${stopwatch.elapsedMilliseconds}ms',
         );
@@ -118,13 +134,16 @@ class _ReaderImagesState extends State<_ReaderImages>
       }
     } else {
       var cp = reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1);
+      final pagesStopwatch = Stopwatch()..start();
       var cached = HistoryManager().findReaderPages(reader.cid, reader.type, cp);
       if (cached != null) {
-        if (!await _waitForRouteTransition() || !mounted) return;
-        Log.info(
+        Log.warning(
           'Reader.Load',
-          'page cache hit: ${reader.type.sourceKey}/${reader.cid}/$cp in ${stopwatch.elapsedMilliseconds}ms',
+          'page cache hit: ${reader.type.sourceKey}/${reader.cid}/$cp '
+              'lookup=${pagesStopwatch.elapsedMilliseconds}ms '
+              'total=${stopwatch.elapsedMilliseconds}ms',
         );
+        if (!await _waitForRouteTransition() || !mounted) return;
         setState(() {
           reader.images = cached;
           reader.isLoading = false;
@@ -146,9 +165,11 @@ class _ReaderImagesState extends State<_ReaderImages>
         reader.widget.cid,
         cp,
       );
-      Log.info(
+      Log.warning(
         'Reader.Load',
-        'loadComicPages: ${reader.type.sourceKey}/${reader.cid}/$cp in ${stopwatch.elapsedMilliseconds}ms',
+        'loadComicPages: ${reader.type.sourceKey}/${reader.cid}/$cp '
+            'request=${pagesStopwatch.elapsedMilliseconds}ms '
+            'total=${stopwatch.elapsedMilliseconds}ms',
       );
       if (res.error) {
         setState(() {
@@ -245,7 +266,7 @@ class _ReaderImagesState extends State<_ReaderImages>
     unawaited(future.then(
       (res) {
         _pageListRefreshes.remove(key);
-        Log.info(
+        Log.warning(
           'Reader.Load',
           'refreshComicPages: ${reader.type.sourceKey}/${reader.cid}/$chapterId in ${stopwatch.elapsedMilliseconds}ms',
         );

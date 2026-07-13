@@ -36,6 +36,7 @@ class _ReaderWithLoadingState
       initialChapterGroup: data.history.group,
       author: data.author,
       tags: data.tags,
+      prepareImages: data.prepareImages,
     );
   }
 
@@ -48,6 +49,15 @@ class _ReaderWithLoadingState
       ComicType.fromKey(widget.sourceKey),
     );
     final type = ComicType.fromKey(widget.sourceKey);
+    final cacheReuse = widget.sourceKey == 'ehentai' &&
+            comicSource != null &&
+            appdata.settings['reuseOldVersionCache'] == true
+        ? ComicVersionMigration.restoreCacheReuseFor(
+            sourceKey: widget.sourceKey,
+            comicId: widget.id,
+            type: type,
+          )
+        : null;
     if (comicSource == null) {
       var localComic = LocalManager().find(
         widget.id,
@@ -75,7 +85,7 @@ class _ReaderWithLoadingState
     } else {
       final cached = HistoryManager().findReaderMetadata(widget.id, type);
       if (cached != null) {
-        Log.info(
+        Log.warning(
           'Reader.Load',
           'metadata cache hit: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
         );
@@ -88,11 +98,12 @@ class _ReaderWithLoadingState
             history: history ?? History.fromModel(model: cached, ep: 0, page: 0),
             author: cached.subTitle ?? '',
             tags: cached.tags,
+            prepareImages: cacheReuse,
           ),
         );
       }
       var comic = await comicSource.loadComicInfo!(widget.id);
-      Log.info(
+      Log.warning(
         'Reader.Load',
         'loadComicInfo: ${widget.sourceKey}/${widget.id} in ${stopwatch.elapsedMilliseconds}ms',
       );
@@ -113,6 +124,7 @@ class _ReaderWithLoadingState
               ),
           author: comic.data.findAuthor() ?? "",
           tags: comic.data.plainTags,
+          prepareImages: cacheReuse,
         ),
       );
     }
@@ -134,6 +146,8 @@ class ReaderProps {
 
   final List<String> tags;
 
+  final Future<void>? prepareImages;
+
   const ReaderProps({
     required this.type,
     required this.cid,
@@ -142,5 +156,6 @@ class ReaderProps {
     required this.history,
     required this.author,
     required this.tags,
+    this.prepareImages,
   });
 }

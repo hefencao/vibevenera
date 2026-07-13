@@ -10,6 +10,15 @@ import 'log.dart';
 
 enum CacheLookupState { hit, missing, expired, fileMissing }
 
+final class CacheAliasTarget {
+  final String imageKey;
+  final String? sourceKey;
+  final String cid;
+  final String eid;
+
+  const CacheAliasTarget(this.imageKey, this.sourceKey, this.cid, this.eid);
+}
+
 class CacheManager {
   static String get cachePath => '${App.cachePath}/cache';
 
@@ -17,6 +26,7 @@ class CacheManager {
 
   late Database _db;
   late final Future<void> _startupScan;
+  final Map<String, CacheAliasTarget> _aliases = {};
 
   int? _currentSize;
 
@@ -160,6 +170,7 @@ class CacheManager {
     _db.execute('''
       INSERT OR REPLACE INTO cache (key, dir, name, expires) VALUES (?, ?, ?, ?)
     ''', [key, dir.toString(), name, expires]);
+    _aliases.remove(key);
     if (_currentSize != null) {
       _currentSize = _currentSize! + data.length;
     }
@@ -180,6 +191,7 @@ class CacheManager {
     _db.execute('''
       INSERT OR REPLACE INTO cache (key, dir, name, expires) VALUES (?, ?, ?, ?)
     ''', [key, dir.toString(), name, expires]);
+    _aliases.remove(key);
     Log.warning('Cache.Trace', 'promote: key=$key path=${promoted.path} size=$size');
     if (_currentSize != null) _currentSize = _currentSize! + size;
     checkCacheIfRequired();
@@ -267,6 +279,7 @@ class CacheManager {
 
   bool rekey(String oldKey, String newKey) {
     if (oldKey == newKey) return true;
+    _aliases.remove(newKey);
     final oldRows = _db.select('SELECT key FROM cache WHERE key = ?;', [oldKey]);
     if (oldRows.isEmpty) return false;
     final newRows = _db.select('SELECT key FROM cache WHERE key = ?;', [newKey]);
@@ -275,9 +288,46 @@ class CacheManager {
     return true;
   }
 
+  void aliasImage({
+    required String imageKey,
+    required String? sourceKey,
+    required String cid,
+    required String eid,
+    required CacheAliasTarget target,
+  }) {
+    _aliases['$imageKey@$sourceKey@$cid@$eid'] = target;
+    if (_aliases.length > 8192) _aliases.remove(_aliases.keys.first);
+  }
+
+  CacheAliasTarget? resolveImageAlias(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    var key = '$imageKey@$sourceKey@$cid@$eid';
+    var target = _aliases[key];
+    if (target == null) return null;
+    final visited = <String>{key};
+    while (true) {
+      key = '${target!.imageKey}@${target.sourceKey}@${target.cid}@${target.eid}';
+      if (!visited.add(key)) throw StateError('Circular image cache alias: $key');
+      final next = _aliases[key];
+      if (next == null) return target;
+      target = next;
+    }
+  }
+
   Future<int> countExisting(Iterable<String> keys) async {
+    return (await findExistingKeys(keys)).length;
+  }
+
+  Future<Set<String>> findExistingKeys(
+    Iterable<String> keys, {
+    bool touch = false,
+  }) async {
     final values = keys.toSet().toList();
-    var count = 0;
+    final existing = <String>{};
     final now = DateTime.now().millisecondsSinceEpoch;
     for (var start = 0; start < values.length; start += 400) {
       final chunk = values.sublist(start, math.min(start + 400, values.length));
@@ -296,11 +346,23 @@ class CacheManager {
                   row[1] as String,
                 ) !=
                 null) {
-          count++;
+          existing.add(row[0] as String);
         }
       }
     }
-    return count;
+    if (touch) {
+      final values = existing.toList();
+      final expires = now + 7 * 24 * 60 * 60 * 1000;
+      for (var start = 0; start < values.length; start += 400) {
+        final chunk = values.sublist(start, math.min(start + 400, values.length));
+        _db.execute(
+          'UPDATE cache SET expires = ? WHERE key IN '
+          '(${List.filled(chunk.length, '?').join(',')});',
+          [expires, ...chunk],
+        );
+      }
+    }
+    return existing;
   }
 
   Future<int> countComicEntries(String sourceKey, String comicId) async {

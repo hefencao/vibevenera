@@ -2,6 +2,7 @@ import 'dart:async' show Future;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/network/images.dart';
 
@@ -61,4 +62,10 @@ class HistoryImageProvider extends BaseImageProvider<HistoryImageProvider> {
 
   @override
   String get key => 'history${history.id}${history.type.value}';
+
+  @override
+  Future<void> evictInvalidCache() => CacheManager().delete(
+        '${history.cover}@${history.type.sourceKey}@${history.id}',
+        reason: 'invalid-history-cover',
+      );
 }

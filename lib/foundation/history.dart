@@ -428,7 +428,7 @@ class HistoryManager with ChangeNotifier {
     );
     _db.execute('''
       DELETE FROM reader_pages WHERE rowid IN (
-        SELECT rowid FROM reader_pages ORDER BY updated_at DESC LIMIT -1 OFFSET 128
+        SELECT rowid FROM reader_pages ORDER BY updated_at DESC LIMIT -1 OFFSET 512
       );
     ''');
   }

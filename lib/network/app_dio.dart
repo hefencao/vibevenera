@@ -71,53 +71,31 @@ class MyLogInterceptor implements Interceptor {
   @override
   void onResponse(
       Response<dynamic> response, ResponseInterceptorHandler handler) {
-    var headers = response.headers.map.map((key, value) => MapEntry(
-        key.toLowerCase(), value.length == 1 ? value.first : value.toString()));
-    headers.remove("cookie");
-    String content;
-    if (response.data is List<int>) {
-      try {
-        content = utf8.decode(response.data, allowMalformed: false);
-      } catch (e) {
-        content = "<Bytes>\nlength:${response.data.length}";
+    if (response.statusCode == null || response.statusCode! >= 400) {
+      var headers = response.headers.map.map((key, value) => MapEntry(
+          key.toLowerCase(), value.length == 1 ? value.first : value.toString()));
+      headers.remove("cookie");
+      String content;
+      if (response.data is List<int>) {
+        try {
+          content = utf8.decode(response.data, allowMalformed: false);
+        } catch (e) {
+          content = "<Bytes>\nlength:${response.data.length}";
+        }
+      } else {
+        content = response.data.toString();
       }
-    } else {
-      content = response.data.toString();
-    }
-    Log.addLog(
-        (response.statusCode != null && response.statusCode! < 400)
-            ? LogLevel.info
-            : LogLevel.error,
+      Log.error(
         "Network",
-        "Response ${response.realUri.toString()} ${response.statusCode}\n"
-            "headers:\n$headers\n$content");
+        "Response ${response.realUri} ${response.statusCode}\n"
+            "headers:\n$headers\n$content",
+      );
+    }
     handler.next(response);
   }
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    const String headerMask = "********";
-    const String dataMask = "****** DATA_PROTECTED ******";
-    Log.info(
-        "Network",
-        "${options.method} ${options.uri}\n"
-            "headers:\n${
-              options.extra.containsKey("maskHeadersInLog")
-                ? options.headers.map((key, value) =>
-                  MapEntry(
-                    key,
-                    options.extra["maskHeadersInLog"].contains(key)
-                      ? headerMask
-                      : value
-                  ))
-                : options.headers
-            }\n"
-            "data:\n${
-              options.extra["maskDataInLog"] == true
-                ? dataMask
-                : options.data
-            }"
-    );
     options.connectTimeout = const Duration(seconds: 15);
     options.receiveTimeout = options.extra["disableReceiveTimeout"] == true
         ? null

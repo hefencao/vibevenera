@@ -50,8 +50,44 @@ final class ComicVersionAssets {
 }
 
 final class ComicVersionMigration {
-  static Future<List<ComicVersionLink>> findVersions(ComicDetails comic) async {
-    return _findVersions(comic.sourceKey, comic.id, comic.url ?? comic.id);
+  static final _restoredTargets = <String>{};
+  static final _restorePreparations = <String, Future<void>>{};
+
+  static String _restoreKey(String sourceKey, String comicId) =>
+      '$sourceKey:${_versionKey(comicId)}';
+
+  static bool isCacheReuseRestored(String sourceKey, String comicId) =>
+      _restoredTargets.contains(_restoreKey(sourceKey, comicId));
+
+  static Future<List<ComicVersionLink>> findVersions(
+    ComicDetails comic, {
+    bool force = false,
+  }) async {
+    return force
+        ? _findVersions(comic.sourceKey, comic.id, comic.url ?? comic.id)
+        : _findVersionsCached(
+            comic.sourceKey,
+            comic.id,
+            comic.url ?? comic.id,
+          );
+  }
+
+  static Future<List<ComicVersionLink>> _findVersionsCached(
+    String sourceKey,
+    String comicId,
+    String url,
+  ) async {
+    if (sourceKey != 'ehentai') return const [];
+    final checks = appdata.implicitData['comicVersionCheckedAt'];
+    final checkedAt = checks is Map
+        ? checks['$sourceKey:${_versionKey(comicId)}'] as int?
+        : null;
+    if (checkedAt != null &&
+        DateTime.now().millisecondsSinceEpoch - checkedAt <
+            const Duration(hours: 6).inMilliseconds) {
+      return cachedVersions(sourceKey, comicId);
+    }
+    return _findVersions(sourceKey, comicId, url);
   }
 
   static Future<List<ComicVersionLink>> _findVersions(
@@ -79,6 +115,7 @@ final class ComicVersionMigration {
         return ComicVersionLink(anchor.text.trim(), url, date, index + 1);
       }).where((version) => version.url.contains('/g/')).toList();
       _recordRelations(sourceKey, comicId, versions);
+      _cacheVersions(sourceKey, comicId, versions);
       return versions;
     } catch (error, stack) {
       Log.error('ComicVersion', error, stack);
@@ -86,11 +123,61 @@ final class ComicVersionMigration {
     }
   }
 
+  static List<ComicVersionLink> cachedVersions(
+    String sourceKey,
+    String comicId,
+  ) {
+    final cache = appdata.implicitData['comicVersionLinks'];
+    if (cache is! Map) return const [];
+    final values = cache['$sourceKey:${_versionKey(comicId)}'];
+    if (values is! List) return const [];
+    return values.whereType<Map>().map((value) => ComicVersionLink(
+      value['title'] as String,
+      value['url'] as String,
+      value['date'] as String?,
+      value['generation'] as int,
+    )).toList();
+  }
+
+  static int reverseGeneration(String sourceKey, String comicId) =>
+      cachedVersions(sourceKey, comicId).length + 1;
+
+  static void _cacheVersions(
+    String sourceKey,
+    String comicId,
+    List<ComicVersionLink> versions,
+  ) {
+    if (versions.isEmpty) return;
+    final cache = Map<String, dynamic>.from(
+      appdata.implicitData['comicVersionLinks'] as Map? ?? const {},
+    );
+    cache['$sourceKey:${_versionKey(comicId)}'] = versions.map((version) => {
+      'title': version.title,
+      'url': version.url,
+      'date': version.date,
+      'generation': version.generation,
+    }).toList();
+    while (cache.length > 256) {
+      cache.remove(cache.keys.first);
+    }
+    appdata.implicitData['comicVersionLinks'] = cache;
+    final checks = Map<String, dynamic>.from(
+      appdata.implicitData['comicVersionCheckedAt'] as Map? ?? const {},
+    );
+    checks['$sourceKey:${_versionKey(comicId)}'] =
+        DateTime.now().millisecondsSinceEpoch;
+    while (checks.length > 256) {
+      checks.remove(checks.keys.first);
+    }
+    appdata.implicitData['comicVersionCheckedAt'] = checks;
+    appdata.writeImplicitData();
+  }
+
   static Future<ComicVersionLink?> readerUpdate(
     String sourceKey,
     String comicId,
   ) async {
-    final versions = await _findVersions(sourceKey, comicId, comicId);
+    final versions = await _findVersionsCached(sourceKey, comicId, comicId);
     if (versions.isEmpty) return null;
     final version = versions.last;
     final notice = '$sourceKey:${_versionKey(comicId)}>${_versionKey(version.url)}';
@@ -141,22 +228,36 @@ final class ComicVersionMigration {
         for (final ep in const ['', '0'])
           '$page@$sourceKey@$id@$ep',
     ];
-    final cached = await CacheManager().countExisting(keys);
+    var cached = await CacheManager().countExisting(keys);
+    final aliasKeys = <String>[];
+    for (final page in pages) {
+      for (final ep in const ['', '0']) {
+        final alias = CacheManager().resolveImageAlias(page, sourceKey, id, ep);
+        if (alias != null) {
+          aliasKeys.add(
+            '${alias.imageKey}@${alias.sourceKey}@${alias.cid}@${alias.eid}',
+          );
+        }
+      }
+    }
+    final existingAliases = await CacheManager().findExistingKeys(aliasKeys);
+    cached += aliasKeys.where(existingAliases.contains).length;
     return ComicVersionAssets(id, manual, cached);
   }
 
-  static Future<ComicVersionAssets?> valuablePredecessor(
+  static Future<List<ComicVersionAssets>> predecessors(
     ComicDetails comic,
   ) async {
     final relations = appdata.implicitData['comicVersionRelations'];
-    if (relations is! Map) return null;
+    if (relations is! Map) return const [];
     final predecessors = relations['${comic.sourceKey}:${_versionKey(comic.id)}'];
-    if (predecessors is! List) return null;
-    for (final id in predecessors.whereType<String>()) {
+    if (predecessors is! List) return const [];
+    final result = <ComicVersionAssets>[];
+    for (final id in predecessors.whereType<String>().toList().reversed) {
       final value = await _assets(id, comic.sourceKey, comic.comicType);
-      if (value.hasValue) return value;
+      result.add(value);
     }
-    return null;
+    return result;
   }
 
   static void _recordRelations(
@@ -174,6 +275,7 @@ final class ComicVersionMigration {
       final ids = List<String>.from(relations[key] as List? ?? const []);
       if (!ids.contains(comicId)) {
         ids.add(comicId);
+        _restoredTargets.remove(_restoreKey(sourceKey, version.url));
         changed = true;
       }
       relations[key] = ids;
@@ -225,6 +327,13 @@ final class ComicVersionMigration {
     if (LocalManager().isDownloading(newComic.id, newComic.comicType)) {
       return const Res.error('The new version is already downloading');
     }
+    final oldLocal = LocalManager().find(oldComic.id, oldComic.comicType);
+    final newLocal = LocalManager().find(newComic.id, newComic.comicType);
+    if (oldLocal != null && newLocal != null) {
+      return const Res.error(
+        'Both versions are downloaded; automatic merge is not supported',
+      );
+    }
     if (oldComic.chapters != null || newComic.chapters != null) {
       return const Res.error('Chaptered comic migration is not supported');
     }
@@ -244,7 +353,7 @@ final class ComicVersionMigration {
     if (mode == ComicVersionMigrationMode.incremental) {
       _migrateCache(oldComic, newComic, oldPages, newPages, mapping);
     }
-    final local = LocalManager().find(oldComic.id, oldComic.comicType);
+    final local = oldLocal;
     if (local != null) {
       if (mode == ComicVersionMigrationMode.incremental) {
         await LocalManager().migrateComicVersion(
@@ -283,6 +392,291 @@ final class ComicVersionMigration {
     return Res(ComicVersionMigrationResult(newComic, offset, mapping.length));
   }
 
+  static Future<Res<int>> prepareCacheReuse({
+    required ComicDetails oldComic,
+    required ComicDetails newComic,
+  }) => _prepareCacheReuse(
+    oldComic: oldComic,
+    newComic: newComic,
+    registerAliases: true,
+  );
+
+  static Future<Res<int>> preparePageMatch({
+    required ComicDetails oldComic,
+    required ComicDetails newComic,
+  }) => _prepareCacheReuse(
+    oldComic: oldComic,
+    newComic: newComic,
+    registerAliases: false,
+  );
+
+  static Future<void>? restoreCacheReuse(ComicDetails comic) =>
+      restoreCacheReuseFor(
+        sourceKey: comic.sourceKey,
+        comicId: comic.id,
+        type: comic.comicType,
+      );
+
+  static Future<void>? restoreCacheReuseFor({
+    required String sourceKey,
+    required String comicId,
+    required HistoryType type,
+  }) {
+    final key = _restoreKey(sourceKey, comicId);
+    if (_restoredTargets.contains(key)) return null;
+    final existing = _restorePreparations[key];
+    if (existing != null) return existing;
+    late Future<void> future;
+    future = _restoreCacheReuseFor(
+      sourceKey: sourceKey,
+      comicId: comicId,
+      type: type,
+      restoreKey: key,
+    );
+    _restorePreparations[key] = future;
+    future.then((_) {
+      if (identical(_restorePreparations[key], future)) {
+        _restorePreparations.remove(key);
+      }
+    }, onError: (Object _, StackTrace __) {
+      if (identical(_restorePreparations[key], future)) {
+        _restorePreparations.remove(key);
+      }
+    });
+    return future;
+  }
+
+  static Future<void> _restoreCacheReuseFor({
+    required String sourceKey,
+    required String comicId,
+    required HistoryType type,
+    required String restoreKey,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final relations = appdata.implicitData['comicVersionRelations'];
+    if (relations is! Map) {
+      Log.warning('ComicVersion.Reuse',
+          'restore skipped: no relations new=$comicId');
+      return;
+    }
+    final values = relations['$sourceKey:${_versionKey(comicId)}'];
+    if (values is! List) {
+      Log.warning('ComicVersion.Reuse',
+          'restore skipped: no predecessors new=$comicId');
+      _restoredTargets.add(restoreKey);
+      return;
+    }
+    final newPages = HistoryManager().findReaderPages(
+      comicId,
+      type,
+      null,
+    );
+    if (newPages == null) {
+      Log.warning('ComicVersion.Reuse',
+          'restore skipped: no target pages new=$comicId');
+      return;
+    }
+    final predecessors = values.whereType<String>().toList()
+      ..sort((a, b) => reverseGeneration(sourceKey, a)
+          .compareTo(reverseGeneration(sourceKey, b)));
+    var reused = 0;
+    var matchedVersions = 0;
+    for (final oldId in predecessors) {
+      final oldPages = HistoryManager().findReaderPages(
+        oldId,
+        type,
+        null,
+      );
+      if (oldPages == null) continue;
+      final offset = _cachedPageOffsetById(
+        sourceKey,
+        oldId,
+        comicId,
+        oldPages.length,
+        newPages.length,
+      );
+      if (offset == null) continue;
+      matchedVersions++;
+      reused += await _registerAliases(
+        sourceKey: sourceKey,
+        oldId: oldId,
+        newId: comicId,
+        oldPages: oldPages,
+        newPages: newPages,
+        mapping: {
+          for (var i = 0; i < oldPages.length; i++) i: i + offset,
+        },
+      );
+    }
+    Log.warning(
+      'ComicVersion.Reuse',
+      'restored matches=$matchedVersions sources=${predecessors.length} '
+          'reused=$reused in ${stopwatch.elapsedMilliseconds}ms new=$comicId',
+    );
+    _restoredTargets.add(restoreKey);
+  }
+
+  static Future<Res<int>> _prepareCacheReuse({
+    required ComicDetails oldComic,
+    required ComicDetails newComic,
+    required bool registerAliases,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final source = ComicSource.find(oldComic.sourceKey)!;
+    var oldPages = HistoryManager().findReaderPages(
+      oldComic.id,
+      oldComic.comicType,
+      null,
+    );
+    if (oldPages == null) {
+      final result = await source.loadComicPages!(oldComic.id, null);
+      if (result.error) return Res.error(result.errorMessage!);
+      oldPages = result.data;
+      HistoryManager().cacheReaderPages(
+        oldComic.id,
+        oldComic.comicType,
+        null,
+        oldPages,
+      );
+    }
+    var newPages = HistoryManager().findReaderPages(
+      newComic.id,
+      newComic.comicType,
+      null,
+    );
+    if (newPages == null) {
+      final result = await source.loadComicPages!(newComic.id, null);
+      if (result.error) return Res.error(result.errorMessage!);
+      newPages = result.data;
+      HistoryManager().cacheReaderPages(
+        newComic.id,
+        newComic.comicType,
+        null,
+        newPages,
+      );
+    }
+    final pagesMs = stopwatch.elapsedMilliseconds;
+    final mapping = await _matchPages(
+      source,
+      oldComic,
+      newComic,
+      oldPages,
+      newPages,
+    );
+    if (mapping.isEmpty) {
+      return const Res.error('No unchanged pages could be matched');
+    }
+    final matchInfoMs = stopwatch.elapsedMilliseconds - pagesMs;
+    if (!registerAliases) {
+      Log.warning(
+        'ComicVersion.Reuse',
+        'page match prepared pages=${pagesMs}ms matchInfo=${matchInfoMs}ms '
+            'mapped=${mapping.length}',
+      );
+      return Res(mapping.length);
+    }
+    final reused = await _registerAliases(
+      sourceKey: oldComic.sourceKey,
+      oldId: oldComic.id,
+      newId: newComic.id,
+      oldPages: oldPages,
+      newPages: newPages,
+      mapping: mapping,
+    );
+    _restoredTargets.add(_restoreKey(newComic.sourceKey, newComic.id));
+    Log.warning(
+      'ComicVersion.Reuse',
+      'pages=${pagesMs}ms matchInfo=${matchInfoMs}ms '
+          'files=${stopwatch.elapsedMilliseconds - pagesMs - matchInfoMs}ms '
+          'mapped=${mapping.length} reused=$reused',
+    );
+    return Res(reused);
+  }
+
+  static Future<int> _registerAliases({
+    required String sourceKey,
+    required String oldId,
+    required String newId,
+    required List<String> oldPages,
+    required List<String> newPages,
+    required Map<int, int> mapping,
+  }) async {
+    final candidates = <({
+      String newPage,
+      String oldPage,
+      int newIndex,
+      String ep,
+      String newKey,
+      String oldKey,
+      CacheAliasTarget? newAlias,
+      CacheAliasTarget? oldAlias,
+    })>[];
+    final keys = <String>[];
+    String aliasKey(CacheAliasTarget alias) =>
+        '${alias.imageKey}@${alias.sourceKey}@${alias.cid}@${alias.eid}';
+    for (final entry in mapping.entries) {
+      for (final ep in const ['', '0']) {
+        final oldPage = oldPages[entry.key];
+        final newPage = newPages[entry.value];
+        final oldKey = '$oldPage@$sourceKey@$oldId@$ep';
+        final newKey = '$newPage@$sourceKey@$newId@$ep';
+        final newAlias = CacheManager().resolveImageAlias(
+          newPage, sourceKey, newId, ep,
+        );
+        final oldAlias = CacheManager().resolveImageAlias(
+          oldPage, sourceKey, oldId, ep,
+        );
+        candidates.add((
+          newPage: newPage,
+          oldPage: oldPage,
+          newIndex: entry.value,
+          ep: ep,
+          newKey: newKey,
+          oldKey: oldKey,
+          newAlias: newAlias,
+          oldAlias: oldAlias,
+        ));
+        keys.addAll([
+          newKey,
+          oldKey,
+          if (newAlias != null) aliasKey(newAlias),
+          if (oldAlias != null) aliasKey(oldAlias),
+        ]);
+      }
+    }
+    final existing = await CacheManager().findExistingKeys(keys, touch: true);
+    final reusedIndexes = <int>{};
+    for (final candidate in candidates) {
+      if (existing.contains(candidate.newKey) ||
+          candidate.newAlias != null &&
+              existing.contains(aliasKey(candidate.newAlias!))) {
+        continue;
+      }
+      var target = CacheAliasTarget(
+          candidate.oldPage,
+          sourceKey,
+          oldId,
+          candidate.ep,
+        );
+      if (!existing.contains(candidate.oldKey)) {
+        if (candidate.oldAlias == null ||
+            !existing.contains(aliasKey(candidate.oldAlias!))) {
+          continue;
+        }
+        target = candidate.oldAlias!;
+      }
+      CacheManager().aliasImage(
+        imageKey: candidate.newPage,
+        sourceKey: sourceKey,
+        cid: newId,
+        eid: candidate.ep,
+        target: target,
+      );
+      reusedIndexes.add(candidate.newIndex);
+    }
+    return reusedIndexes.length;
+  }
+
   static Future<Map<int, int>> _matchPages(
     ComicSource source,
     ComicDetails oldComic,
@@ -300,8 +694,24 @@ final class ComicVersionMigration {
     if (resolver == null || oldPages.isEmpty || newPages.length < oldPages.length) {
       return const {};
     }
+    final cachedOffset = _cachedPageOffset(
+      oldComic,
+      newComic,
+      oldPages.length,
+      newPages.length,
+    );
+    if (cachedOffset != null) {
+      Log.warning(
+        'ComicVersion',
+        'page match cache hit old=${oldPages.length} new=${newPages.length} '
+            'offset=$cachedOffset',
+      );
+      return {
+        for (var i = 0; i < oldPages.length; i++) i: i + cachedOffset,
+      };
+    }
     final delta = newPages.length - oldPages.length;
-    final offsets = delta == 0 ? const [0] : [0, delta];
+    final offsets = delta == 0 ? const [0] : [delta, 0];
     final anchors = oldPages.length == 1
         ? const [0]
         : <int>{0, oldPages.length ~/ 2, oldPages.length - 1}.toList();
@@ -323,6 +733,13 @@ final class ComicVersionMigration {
       }
       final required = anchors.length == 1 ? 1 : 2;
       if (matches >= required) {
+        _cachePageOffset(
+          oldComic,
+          newComic,
+          oldPages.length,
+          newPages.length,
+          offset,
+        );
         Log.warning(
           'ComicVersion',
           'page match old=${oldPages.length} new=${newPages.length} '
@@ -338,6 +755,75 @@ final class ComicVersionMigration {
     );
     return const {};
   }
+
+  static int? _cachedPageOffset(
+    ComicDetails oldComic,
+    ComicDetails newComic,
+    int oldPages,
+    int newPages,
+  ) {
+    return _cachedPageOffsetById(
+      oldComic.sourceKey,
+      oldComic.id,
+      newComic.id,
+      oldPages,
+      newPages,
+    );
+  }
+
+  static int? _cachedPageOffsetById(
+    String sourceKey,
+    String oldId,
+    String newId,
+    int oldPages,
+    int newPages,
+  ) {
+    final cache = appdata.implicitData['comicVersionPageOffsets'];
+    if (cache is! Map) return null;
+    final value = cache[_pageOffsetKeyById(sourceKey, oldId, newId)];
+    if (value is! Map ||
+        value['oldPages'] != oldPages ||
+        value['newPages'] != newPages) {
+      return null;
+    }
+    final offset = value['offset'];
+    if (offset is! int || offset < 0 || oldPages + offset > newPages) {
+      return null;
+    }
+    return offset;
+  }
+
+  static void _cachePageOffset(
+    ComicDetails oldComic,
+    ComicDetails newComic,
+    int oldPages,
+    int newPages,
+    int offset,
+  ) {
+    final cache = Map<String, dynamic>.from(
+      appdata.implicitData['comicVersionPageOffsets'] as Map? ?? const {},
+    );
+    cache[_pageOffsetKey(oldComic, newComic)] = {
+      'oldPages': oldPages,
+      'newPages': newPages,
+      'offset': offset,
+    };
+    _restoredTargets.remove(_restoreKey(newComic.sourceKey, newComic.id));
+    while (cache.length > 256) {
+      cache.remove(cache.keys.first);
+    }
+    appdata.implicitData['comicVersionPageOffsets'] = cache;
+    appdata.writeImplicitData();
+  }
+
+  static String _pageOffsetKey(ComicDetails oldComic, ComicDetails newComic) =>
+      _pageOffsetKeyById(oldComic.sourceKey, oldComic.id, newComic.id);
+
+  static String _pageOffsetKeyById(
+    String sourceKey,
+    String oldId,
+    String newId,
+  ) => '$sourceKey:${_versionKey(oldId)}>${_versionKey(newId)}';
 
   static Map<int, int> _matchIdentityLists(
     List<String> oldIdentities,

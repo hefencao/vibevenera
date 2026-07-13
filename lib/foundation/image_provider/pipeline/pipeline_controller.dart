@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_perf.dart';
@@ -112,6 +113,7 @@ class PipelineController {
   DecodedImageCache? _cache;
   late final WebPSessionCoordinator _sessions;
   final Map<String, WebPResourceLease> _policyLeases = {};
+  Map<String, CacheAliasTarget> _sessionAliases = const {};
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -146,6 +148,19 @@ class PipelineController {
     _eid = session.eid;
     _sourceKey = session.sourceKey;
     _cache = session.cache;
+    if (contextChanged) {
+      _sessionAliases = {
+        for (final imageKey in _images)
+          if (CacheManager().resolveImageAlias(
+                imageKey,
+                _sourceKey,
+                _cid,
+                _eid,
+              )
+              case final alias?)
+            imageKey: alias,
+      };
+    }
     if (_preloadCount != session.preloadCount || contextChanged) {
       _currentBufferedFrames = 0;
       _windowRuleIndex = -1;
@@ -325,8 +340,6 @@ class PipelineController {
     }
 
     // Ensure entries exist
-    String fullKey(String k) =>
-        _targetW > 0 || _targetH > 0 ? '$k@${_targetW}x$_targetH' : k;
     for (final key in {
       _currentKey,
       ..._nearKeys,
@@ -337,7 +350,7 @@ class PipelineController {
       if (key.isEmpty) continue;
       resources.ensure(
         imageKey: key,
-        fullKey: fullKey(key),
+        fullKey: _fullKey(key),
         sourceKey: _sourceKey,
         cid: _cid,
         eid: _eid,
@@ -350,7 +363,7 @@ class PipelineController {
     _cache?.setActivePages(
       [_currentKey, ..._nearKeys, ..._prevKeys]
           .where((key) => key.isNotEmpty)
-          .map(fullKey),
+          .map(_fullKey),
     );
   }
 
@@ -382,6 +395,7 @@ class PipelineController {
     // visible or other policy leases still reference them.
     resources.clear();
     _images = const [];
+    _sessionAliases = const {};
     _currentKey = '';
     _nearKeys.clear();
     _prevKeys.clear();
@@ -405,13 +419,14 @@ class PipelineController {
       'visAttach.isCur${imageKey == _currentKey ? 1 : 0}'
       '.sz${targetWidth}x$targetHeight',
     );
-    return _sessions.acquire(
-      downloadIdentity: DownloadIdentity(
-        imageKey: imageKey,
-        sourceKey: sourceKey,
-        cid: cid,
-        eid: eid,
-      ),
+    final downloadIdentity = _downloadIdentity(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    );
+    final lease = _sessions.acquire(
+      downloadIdentity: downloadIdentity,
       decodeIdentity: WebPDecodeIdentity(
         fullKey: fullKey,
         targetWidth: targetWidth,
@@ -438,6 +453,59 @@ class PipelineController {
         decodeTargetFrames: 3,
       ),
     );
+    final logicalKey = '$imageKey@$sourceKey@$cid@$eid';
+    if (logicalKey != downloadIdentity.cacheKey) {
+      Log.warning(
+        'WebP.Reuse',
+        'bind logical=$logicalKey download=${downloadIdentity.cacheKey} '
+            'decode=$fullKey source=${identityHashCode(lease.download.source)} '
+            'epoch=${lease.download.source.epoch} '
+            'cursor=${identityHashCode(lease.decode.cursor)}',
+      );
+    }
+    return lease;
+  }
+
+  DownloadIdentity _downloadIdentity(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    final alias = resolveImageAliasForSession(
+      imageKey,
+      sourceKey,
+      cid,
+      eid,
+    );
+    return DownloadIdentity(
+      imageKey: alias?.imageKey ?? imageKey,
+      sourceKey: alias?.sourceKey ?? sourceKey,
+      cid: alias?.cid ?? cid,
+      eid: alias?.eid ?? eid,
+    );
+  }
+
+  CacheAliasTarget? resolveImageAliasForSession(
+    String imageKey,
+    String? sourceKey,
+    String cid,
+    String eid,
+  ) {
+    if (_images.isNotEmpty &&
+        sourceKey == _sourceKey &&
+        cid == _cid &&
+        eid == _eid) {
+      return _sessionAliases[imageKey];
+    }
+    return CacheManager().resolveImageAlias(imageKey, sourceKey, cid, eid);
+  }
+
+  String _fullKey(String imageKey) {
+    final identity = '$imageKey@$_sourceKey@$_cid@$_eid';
+    return _targetW > 0 || _targetH > 0
+        ? '$identity@${_targetW}x$_targetH'
+        : identity;
   }
 
   void evictUndemandedSessions() => _sessions.evictUndemanded();
@@ -477,11 +545,11 @@ class PipelineController {
         sawCurrentEntry = true;
         if (!demanded) currentUndemanded = true;
       }
-      final downloadIdentity = DownloadIdentity(
-        imageKey: entry.imageKey,
-        sourceKey: entry.sourceKey,
-        cid: entry.cid,
-        eid: entry.eid,
+      final downloadIdentity = _downloadIdentity(
+        entry.imageKey,
+        entry.sourceKey,
+        entry.cid,
+        entry.eid,
       );
       final decodeIdentity = WebPDecodeIdentity(
         fullKey: entry.fullKey,
@@ -620,10 +688,7 @@ class PipelineController {
 
   WebPResourceLease? get _currentPolicyLease {
     if (_currentKey.isEmpty) return null;
-    final fullKey = _targetW > 0 || _targetH > 0
-        ? '$_currentKey@${_targetW}x$_targetH'
-        : _currentKey;
-    return _policyLeases[fullKey];
+    return _policyLeases[_fullKey(_currentKey)];
   }
 
   void _syncCurrentDownloadProgress() {

@@ -167,16 +167,16 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             subtitle: 'Notify only once for each new version'.tl,
             settingKey: 'checkComicVersionInReader',
           ).toSliver(),
-          SelectSetting(
-            title: 'Automatic gallery version migration'.tl,
-            settingKey: 'comicVersionAutoMigration',
-            optionTranslation: {
-              'none': 'Disabled'.tl,
-              'favorites': 'Favorites'.tl,
-              'recentHistory': 'Recent history'.tl,
-              'onDetails': 'When opening details'.tl,
-            },
-            help: 'Automatic migration execution is reserved for a later version'.tl,
+          const _ComicVersionAutoMigrationSetting().toSliver(),
+          _SwitchSetting(
+            title: 'Directly reuse old-version cache'.tl,
+            subtitle: 'Reuse only after unchanged pages are verified'.tl,
+            settingKey: 'reuseOldVersionCache',
+          ).toSliver(),
+          _SwitchSetting(
+            title: 'Enable additional version view'.tl,
+            subtitle: 'Show both newer and older version actions'.tl,
+            settingKey: 'showAdditionalComicVersions',
           ).toSliver(),
           const Divider().toSliver(),
         ],
@@ -460,6 +460,79 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
             useDeviceSettings: useDeviceSpecificSettings,
           ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ComicVersionAutoMigrationSetting extends StatefulWidget {
+  const _ComicVersionAutoMigrationSetting();
+
+  @override
+  State<_ComicVersionAutoMigrationSetting> createState() =>
+      _ComicVersionAutoMigrationSettingState();
+}
+
+class _ComicVersionAutoMigrationSettingState
+    extends State<_ComicVersionAutoMigrationSetting> {
+  List<String> get selected {
+    final value = appdata.settings['comicVersionAutoMigration'];
+    if (value is List) return List<String>.from(value);
+    return value == 'none' ? [] : [value as String];
+  }
+
+  void toggle(String value, bool enabled) {
+    final values = selected;
+    enabled ? values.add(value) : values.remove(value);
+    appdata.settings['comicVersionAutoMigration'] = values.toSet().toList();
+    appdata.saveData();
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final values = selected;
+    final limit = appdata.settings['comicVersionHistoryLimit'] as int;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          title: Text('Automatic gallery version migration'.tl),
+          subtitle: Text(
+            'Automatic migration execution is reserved for a later version'.tl,
+          ),
+        ),
+        CheckboxListTile(
+          title: Text('Favorites'.tl),
+          value: values.contains('favorites'),
+          onChanged: (value) => toggle('favorites', value!),
+        ),
+        CheckboxListTile(
+          title: Text('Recent history'.tl),
+          value: values.contains('recentHistory'),
+          onChanged: (value) => toggle('recentHistory', value!),
+        ),
+        if (values.contains('recentHistory'))
+          ListTile(
+            title: Text('Number of recent comics'.tl),
+            trailing: Text(limit == 16 ? 'All'.tl : '$limit'),
+            subtitle: Slider(
+              value: limit.toDouble(),
+              min: 0,
+              max: 16,
+              divisions: 16,
+              onChanged: (value) {
+                appdata.settings['comicVersionHistoryLimit'] = value.toInt();
+                appdata.saveData();
+                setState(() {});
+              },
+            ),
+          ),
+        CheckboxListTile(
+          title: Text('When opening details'.tl),
+          value: values.contains('onDetails'),
+          onChanged: (value) => toggle('onDetails', value!),
         ),
       ],
     );
