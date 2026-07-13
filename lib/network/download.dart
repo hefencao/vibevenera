@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:isolate';
 
 import 'package:flutter/widgets.dart' show ChangeNotifier;
@@ -7,6 +8,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
@@ -188,6 +190,64 @@ class ImagesDownloadTask extends DownloadTask with _TransferSpeedMixin {
   int _chapter = 0;
 
   var tasks = <int, _ImageDownloadWrapper>{};
+
+  final _existingPages = <String, Future<Map<int, File>>>{};
+  final _pageManifests = <String, Future<Map<int, String>>>{};
+  final _manifestPresent = <String, bool>{};
+  final _manifestStrict = <String, bool>{};
+  Future<void> _manifestWrite = Future.value();
+
+  Future<Map<int, String>> _pageManifest(Directory directory) =>
+      _pageManifests.putIfAbsent(directory.path, () async {
+        final file = directory.joinFile('.venera_pages.json');
+        _manifestPresent[directory.path] = await file.exists();
+        if (_manifestPresent[directory.path] != true) return {};
+        final data = jsonDecode(await file.readAsString()) as Map;
+        _manifestStrict[directory.path] = data['strict'] == true;
+        final pages = data['pages'] is Map ? data['pages'] as Map : data;
+        return pages.map((key, value) => MapEntry(int.parse(key), value as String));
+      });
+
+  Future<File?> findExistingPage(
+    Directory directory,
+    int index,
+    String image,
+  ) async {
+    final manifest = await _pageManifest(directory);
+    final recorded = manifest[index];
+    if (recorded != null && recorded != image) {
+      return null;
+    }
+    if (_manifestStrict[directory.path] == true && recorded == null) {
+      return null;
+    }
+    final files = await _existingPages.putIfAbsent(directory.path, () async {
+      final result = <int, File>{};
+      await for (final entity in directory.list()) {
+        if (entity is! File) continue;
+        final page = int.tryParse(entity.name.split('.').first);
+        if (page != null) result[page] = entity;
+      }
+      return result;
+    });
+    final file = files[index];
+    if (file == null) return null;
+    final validation = await ImageDataValidator.validateFile(file);
+    return validation.valid ? file : null;
+  }
+
+  Future<void> recordPage(Directory directory, int index, String image) async {
+    final manifest = await _pageManifest(directory);
+    manifest[index] = image;
+    _manifestPresent[directory.path] = true;
+    _manifestWrite = _manifestWrite.then((_) => directory
+        .joinFile('.venera_pages.json')
+        .writeAsString(jsonEncode({
+          'strict': _manifestStrict[directory.path] == true,
+          'pages': manifest.map((key, value) => MapEntry('$key', value)),
+        })));
+    await _manifestWrite;
+  }
 
   int get _maxConcurrentTasks =>
       (appdata.settings["downloadThreads"] as num).toInt();
@@ -574,6 +634,16 @@ class _ImageDownloadWrapper {
     while (retry > 0) {
       int lastBytes = 0;
       try {
+        final existing = await task.findExistingPage(saveTo, index, image);
+        if (existing != null) {
+          await task.recordPage(saveTo, index, image);
+          isComplete = true;
+          for (final completer in completers) {
+            completer.complete(this);
+          }
+          completers.clear();
+          return;
+        }
         final cached = await ImageDownloader.findCachedComicImageFile(
           image,
           task.source.key,
@@ -587,6 +657,7 @@ class _ImageDownloadWrapper {
           if (isCancelled) return;
           final file = saveTo.joinFile('$index${fileType.ext}');
           await cached.copy(file.path);
+          await task.recordPage(saveTo, index, image);
           task.onData(await cached.length());
           isComplete = true;
           for (final completer in completers) {
@@ -606,6 +677,7 @@ class _ImageDownloadWrapper {
             var fileType = detectFileType(p.imageBytes!);
             var file = saveTo.joinFile("$index${fileType.ext}");
             await file.writeAsBytes(p.imageBytes!);
+            await task.recordPage(saveTo, index, image);
             isComplete = true;
             for (var c in completers) {
               c.complete(this);
@@ -642,6 +714,7 @@ class _ImageDownloadWrapper {
     completers.add(c);
     return c.future;
   }
+
 }
 
 abstract mixin class _TransferSpeedMixin {

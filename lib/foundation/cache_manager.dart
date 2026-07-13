@@ -27,6 +27,7 @@ class CacheManager {
   int _limitSize = 2 * 1024 * 1024 * 1024;
 
   static Future<int> _scanDir(Set<String> managedPaths, String dir) async {
+    final stopwatch = Stopwatch()..start();
     var res = await Isolate.run(() async {
       int totalSize = 0;
       List<String> unmanagedFiles = [];
@@ -48,6 +49,11 @@ class CacheManager {
         'unmanagedFiles': unmanagedFiles,
       };
     });
+    Log.warning(
+      'Cache.Scan',
+      'filesystem ${stopwatch.elapsedMilliseconds}ms '
+          'unmanaged=${(res['unmanagedFiles'] as List).length}',
+    );
     var totalSize = res['totalSize'] as int;
     var processed = 0;
     for (var filePath in res['unmanagedFiles'] as List<String>) {
@@ -100,6 +106,10 @@ class CacheManager {
       Log.warning('Cache.Trace', 'delete: reason=startup-unmanaged path=${file.path}');
       await file.delete();
     }
+    Log.warning(
+      'Cache.Scan',
+      'complete ${stopwatch.elapsedMilliseconds}ms unmanaged=$processed bytes=$totalSize',
+    );
     return totalSize;
   }
 
@@ -252,6 +262,16 @@ class CacheManager {
       return file;
     }
     return null;
+  }
+
+  bool rekey(String oldKey, String newKey) {
+    if (oldKey == newKey) return true;
+    final oldRows = _db.select('SELECT key FROM cache WHERE key = ?;', [oldKey]);
+    if (oldRows.isEmpty) return false;
+    final newRows = _db.select('SELECT key FROM cache WHERE key = ?;', [newKey]);
+    if (newRows.isNotEmpty) return true;
+    _db.execute('UPDATE cache SET key = ? WHERE key = ?;', [newKey, oldKey]);
+    return true;
   }
 
   bool _isChecking = false;

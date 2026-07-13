@@ -433,6 +433,53 @@ class HistoryManager with ChangeNotifier {
     ''');
   }
 
+  void migrateComicId({
+    required String oldId,
+    required String newId,
+    required HistoryType type,
+    required int pageOffset,
+    required ComicDetails details,
+    required List<String> pages,
+  }) {
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      if (find(oldId, type) != null) {
+        _db.execute('DELETE FROM history WHERE id = ?;', [newId]);
+        _db.execute('''
+          UPDATE history SET id = ?, title = ?, subtitle = ?, cover = ?,
+            page = CASE WHEN page > 0 THEN page + ? ELSE page END,
+            max_page = ? WHERE id = ? AND type = ?;
+        ''', [newId, details.title, details.subTitle ?? '', details.cover,
+          pageOffset, pages.length, oldId, type.value]);
+      }
+      _db.execute(
+        'DELETE FROM reader_metadata WHERE id IN (?, ?) AND type = ?;',
+        [oldId, newId, type.value],
+      );
+      _db.execute(
+        'INSERT INTO reader_metadata VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+        [newId, type.value, details.title, details.subTitle, details.cover,
+          jsonEncode(details.plainTags), jsonEncode(details.chapters?.toJson()),
+          DateTime.now().millisecondsSinceEpoch],
+      );
+      _db.execute(
+        'DELETE FROM reader_pages WHERE id = ? AND type = ?;',
+        [oldId, type.value],
+      );
+      _db.execute(
+        'INSERT OR REPLACE INTO reader_pages VALUES (?, ?, ?, ?, ?);',
+        [newId, type.value, '', jsonEncode(pages),
+          DateTime.now().millisecondsSinceEpoch],
+      );
+      _db.execute('COMMIT;');
+    } catch (_) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+    updateCache();
+    notifyListeners();
+  }
+
   void clearHistory() {
     _db.execute("delete from history;");
     _db.execute("delete from reader_metadata;");

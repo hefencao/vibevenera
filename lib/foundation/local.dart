@@ -371,6 +371,79 @@ class LocalManager with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> migrateComicVersion({
+    required LocalComic comic,
+    required ComicDetails details,
+    required Map<int, int> pageMapping,
+    required List<String> newPages,
+  }) async {
+    if (comic.chapters != null || details.chapters != null) {
+      throw StateError('Chaptered comic migration is not supported');
+    }
+    final directory = Directory(comic.baseDir);
+    final temporary = <File, File>{};
+    await for (final entity in directory.list()) {
+      if (entity is! File) continue;
+      final parts = entity.name.split('.');
+      final index = int.tryParse(parts.first);
+      if (index == null) continue;
+      final targetIndex = pageMapping[index];
+      if (targetIndex == null) {
+        await entity.delete();
+        continue;
+      }
+      final temp = File('${entity.path}.migrating');
+      await entity.rename(temp.path);
+      temporary[temp] = File(FilePath.join(
+        directory.path,
+        '$targetIndex.${parts.last}',
+      ));
+    }
+    for (final entry in temporary.entries) {
+      await entry.key.rename(entry.value.path);
+    }
+    await File(FilePath.join(directory.path, '.venera_pages.json')).writeAsString(
+      jsonEncode({
+        'strict': true,
+        'pages': {
+          for (final page in pageMapping.values) '$page': newPages[page],
+        },
+      }),
+    );
+    final migrated = LocalComic(
+      id: details.id,
+      title: details.title,
+      subtitle: details.subTitle ?? '',
+      tags: details.plainTags,
+      directory: comic.directory,
+      chapters: details.chapters,
+      cover: comic.cover,
+      comicType: comic.comicType,
+      downloadedChapters: comic.downloadedChapters,
+      createdAt: comic.createdAt,
+    );
+    _db.execute('BEGIN TRANSACTION;');
+    try {
+      _db.execute(
+        'DELETE FROM comics WHERE id = ? AND comic_type = ?;',
+        [comic.id, comic.comicType.value],
+      );
+      _db.execute(
+        'INSERT OR REPLACE INTO comics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+        [migrated.id, migrated.title, migrated.subtitle,
+          jsonEncode(migrated.tags), migrated.directory,
+          jsonEncode(migrated.chapters), migrated.cover,
+          migrated.comicType.value, jsonEncode(migrated.downloadedChapters),
+          migrated.createdAt.millisecondsSinceEpoch],
+      );
+      _db.execute('COMMIT;');
+    } catch (_) {
+      _db.execute('ROLLBACK;');
+      rethrow;
+    }
+    notifyListeners();
+  }
+
   List<LocalComic> getComics(LocalSortType sortType) {
     var res = _db.select('''
       SELECT * FROM comics

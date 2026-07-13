@@ -11,12 +11,14 @@ import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
 import 'package:venera/foundation/local.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
 import 'package:venera/network/download.dart';
 import 'package:venera/network/cache.dart';
@@ -78,6 +80,9 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   bool isDownloaded = false;
 
   bool showFAB = false;
+
+  List<ComicVersionLink> newVersions = const [];
+  String? downloadedOldVersion;
 
   @override
   void onReadEnd() {
@@ -191,6 +196,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         controller: scrollController,
         slivers: [
           ...buildTitle(),
+          buildVersionUpdate(),
           buildActions(),
           buildDescription(),
           buildInfo(),
@@ -275,6 +281,207 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     if (comic.chapters == null) {
       isDownloaded = LocalManager().isDownloaded(comic.id, comic.comicType, 0);
     }
+    unawaited(_loadNewVersions());
+  }
+
+  Future<void> _loadNewVersions() async {
+    final versions = await ComicVersionMigration.findVersions(comic);
+    if (!mounted) return;
+    setState(() {
+      newVersions = versions;
+      downloadedOldVersion = ComicVersionMigration.downloadedPredecessor(comic);
+    });
+  }
+
+  Widget buildVersionUpdate() {
+    if (newVersions.isEmpty && downloadedOldVersion == null) {
+      return const SliverToBoxAdapter();
+    }
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      sliver: SliverToBoxAdapter(
+        child: ListTile(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          tileColor: context.colorScheme.secondaryContainer,
+          leading: const Icon(Icons.system_update_alt),
+          title: Text((newVersions.isNotEmpty
+              ? 'New gallery version available'
+              : 'A downloaded older version exists').tl),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: newVersions.isNotEmpty
+              ? _selectVersion
+              : () => context.to(() => ComicPage(
+                    id: downloadedOldVersion!,
+                    sourceKey: comic.sourceKey,
+                  )),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _selectVersion() async {
+    ComicVersionLink? version;
+    if (newVersions.length == 1) {
+      version = newVersions.single;
+    } else {
+      version = await showDialog<ComicVersionLink>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: Text('New gallery version'.tl),
+          children: newVersions.map((item) => SimpleDialogOption(
+            onPressed: () => context.pop(item),
+            child: ListTile(
+              title: Text([
+                'Successor version @version'.tlParams({
+                  'version': item.generation,
+                }),
+                if (item.date?.isNotEmpty == true) item.date!,
+              ].join(' · ')),
+              subtitle: Text(item.title.isEmpty ? item.url : item.title),
+            ),
+          )).toList(),
+        ),
+      );
+    }
+    if (version == null || !mounted) return;
+    final mode = await showDialog<ComicVersionMigrationMode>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Migrate to new version'.tl),
+            const SizedBox(height: 4),
+            Text(
+              [
+                'Successor version @version'.tlParams({
+                  'version': version!.generation,
+                }),
+                if (version.date?.isNotEmpty == true) version.date!,
+              ].join(' · '),
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ],
+        ),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => context.pop(ComicVersionMigrationMode.incremental),
+            child: ListTile(
+              leading: const Icon(Icons.move_down),
+              title: Text('Incremental migration'.tl),
+              subtitle: Text('Reuse matched cache and downloaded pages'.tl),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => context.pop(ComicVersionMigrationMode.redownload),
+            child: ListTile(
+              leading: const Icon(Icons.download_for_offline_outlined),
+              title: Text('Redownload'.tl),
+              subtitle: Text('Discard the old manual download'.tl),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+    final loading = showLoadingDialog(
+      context,
+      barrierDismissible: false,
+      allowCancel: false,
+      message: 'Migrating comic version'.tl,
+    );
+    late Res<ComicVersionMigrationResult> result;
+    try {
+      result = await ComicVersionMigration.migrate(
+        oldComic: comic,
+        newUrl: version.url,
+        mode: mode,
+      );
+    } catch (error, stack) {
+      Log.error('ComicVersion', error, stack);
+      loading.close();
+      if (mounted) context.showMessage(message: error.toString());
+      return;
+    }
+    loading.close();
+    if (!mounted) return;
+    if (result.error &&
+        mode == ComicVersionMigrationMode.incremental &&
+        result.errorMessage == 'No unchanged pages could be matched' &&
+        result.subData is ComicVersionMigrationPlan &&
+        (result.subData as ComicVersionMigrationPlan).newPages.length >=
+            (result.subData as ComicVersionMigrationPlan).oldPages.length) {
+      final plan = result.subData as ComicVersionMigrationPlan;
+      final delta = plan.newPages.length - plan.oldPages.length;
+      final offset = await showDialog<int>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Select the position of added pages'.tl),
+              const SizedBox(height: 4),
+              Text(
+                'Only continue if the old pages are otherwise unchanged'.tl,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+          children: [
+            SimpleDialogOption(
+              onPressed: () => context.pop(delta),
+              child: ListTile(
+                title: Text('Added at the beginning'.tl),
+                subtitle: Text('Old page 0 becomes page @page'.tlParams({
+                  'page': delta,
+                })),
+              ),
+            ),
+            SimpleDialogOption(
+              onPressed: () => context.pop(0),
+              child: ListTile(title: Text('Added at the end'.tl)),
+            ),
+          ],
+        ),
+      );
+      if (offset == null || !mounted) return;
+      final retryLoading = showLoadingDialog(
+        context,
+        barrierDismissible: false,
+        allowCancel: false,
+        message: 'Migrating comic version'.tl,
+      );
+      try {
+        result = await ComicVersionMigration.migrate(
+          oldComic: comic,
+          newUrl: version.url,
+          mode: mode,
+          forcedOffset: offset,
+          preparedPlan: plan,
+        );
+      } catch (error, stack) {
+        Log.error('ComicVersion', error, stack);
+        retryLoading.close();
+        if (mounted) context.showMessage(message: error.toString());
+        return;
+      }
+      retryLoading.close();
+      if (!mounted) return;
+    }
+    if (result.error) {
+      context.showMessage(message: result.errorMessage!);
+      return;
+    }
+    final migrated = result.data;
+    context.showMessage(message: 'Reused @count pages'.tlParams({
+      'count': migrated.reusedPages,
+    }));
+    context.toReplacement(() => ComicPage(
+      id: migrated.comic.id,
+      sourceKey: migrated.comic.sourceKey,
+      cover: migrated.comic.cover,
+      title: migrated.comic.title,
+    ));
   }
 
   Iterable<Widget> buildTitle() sync* {

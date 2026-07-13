@@ -241,6 +241,55 @@ class ImageFavoriteManager with ChangeNotifier {
         ");");
   }
 
+  void migrateComicVersion({
+    required ComicDetails details,
+    required String oldId,
+    required Map<int, int> pageMapping,
+    required List<String> newPages,
+  }) {
+    final old = find(oldId, details.sourceKey);
+    if (old == null) return;
+    final episodes = old.imageFavoritesEp.map((episode) {
+      final images = episode.imageFavorites.map((favorite) {
+        final page = pageMapping[favorite.page - 1];
+        if (page == null) return null;
+        return favorite.copyWith(
+          id: details.id,
+          page: page + 1,
+          imageKey: newPages[page],
+        );
+      }).whereType<ImageFavorite>().toList();
+      return ImageFavoritesEp(
+        episode.eid,
+        episode.ep,
+        images,
+        episode.epName,
+        newPages.length,
+      );
+    }).where((episode) => episode.imageFavorites.isNotEmpty).toList();
+    _db.execute(
+      'DELETE FROM image_favorites WHERE id = ? AND source_key = ?;',
+      [oldId, details.sourceKey],
+    );
+    if (episodes.isEmpty) {
+      notifyListeners();
+      return;
+    }
+    addOrUpdateOrDelete(ImageFavoritesComic(
+      details.id,
+      episodes,
+      details.title,
+      details.sourceKey,
+      details.plainTags,
+      old.translatedTags,
+      old.time,
+      details.findAuthor() ?? '',
+      old.other,
+      details.subTitle ?? '',
+      newPages.length,
+    ));
+  }
+
   // 做排序和去重的操作
   void addOrUpdateOrDelete(ImageFavoritesComic favorite, [bool notify = true]) {
     // 没有章节了就删掉
