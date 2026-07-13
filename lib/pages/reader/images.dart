@@ -32,8 +32,11 @@ class _ReaderImages extends StatefulWidget {
 
 class _ReaderImagesState extends State<_ReaderImages>
     with WidgetsBindingObserver {
+  static final _pageListRefreshes = <String, Future<Res<List<String>>>>{};
+
   String? error;
   bool inProgress = false;
+  bool _refreshedForImageError = false;
   late _ReaderState reader;
 
   @override
@@ -117,6 +120,7 @@ class _ReaderImagesState extends State<_ReaderImages>
       var cp = reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1);
       var cached = HistoryManager().findReaderPages(reader.cid, reader.type, cp);
       if (cached != null) {
+        if (!await _waitForRouteTransition() || !mounted) return;
         Log.info(
           'Reader.Load',
           'page cache hit: ${reader.type.sourceKey}/${reader.cid}/$cp in ${stopwatch.elapsedMilliseconds}ms',
@@ -154,6 +158,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         });
       } else {
         HistoryManager().cacheReaderPages(reader.cid, reader.type, cp, res.data);
+        if (!await _waitForRouteTransition() || !mounted) return;
         setState(() {
           reader.images = res.data;
           reader.isLoading = false;
@@ -175,16 +180,28 @@ class _ReaderImagesState extends State<_ReaderImages>
     context.readerScaffold.update();
   }
 
+  Future<bool> _waitForRouteTransition() async {
+    final animation = ModalRoute.of(context)?.animation;
+    if (animation == null || animation.status == AnimationStatus.completed) {
+      return true;
+    }
+    final completer = Completer<bool>();
+    late AnimationStatusListener listener;
+    listener = (status) {
+      if (status != AnimationStatus.completed &&
+          status != AnimationStatus.dismissed) {
+        return;
+      }
+      animation.removeStatusListener(listener);
+      completer.complete(status == AnimationStatus.completed);
+    };
+    animation.addStatusListener(listener);
+    listener(animation.status);
+    return completer.future;
+  }
+
   Future<void> _refreshReaderPages(String? chapterId) async {
-    final stopwatch = Stopwatch()..start();
-    final res = await reader.type.comicSource!.loadComicPages!(
-      reader.widget.cid,
-      chapterId,
-    );
-    Log.info(
-      'Reader.Load',
-      'refreshComicPages: ${reader.type.sourceKey}/${reader.cid}/$chapterId in ${stopwatch.elapsedMilliseconds}ms',
-    );
+    final res = await _loadFreshReaderPages(chapterId);
     if (!res.error) {
       HistoryManager().cacheReaderPages(
         reader.cid,
@@ -192,7 +209,69 @@ class _ReaderImagesState extends State<_ReaderImages>
         chapterId,
         res.data,
       );
+      if (mounted && !listEquals(reader.images, res.data)) {
+        final oldImages = reader.images!;
+        var changed = (oldImages.length - res.data.length).abs();
+        for (var i = 0; i < math.min(oldImages.length, res.data.length); i++) {
+          if (oldImages[i] != res.data[i]) changed++;
+        }
+        Log.warning(
+          'Reader.Cache',
+          'page urls refreshed: ${reader.type.sourceKey}/${reader.cid}/$chapterId changed=$changed/${res.data.length}',
+        );
+        setState(() {
+          reader.images = res.data;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _attachReaderPipeline(context);
+            _reportReaderPage(reader.page);
+          }
+        });
+      }
     }
+  }
+
+  Future<Res<List<String>>> _loadFreshReaderPages(String? chapterId) {
+    final key = '${reader.type.sourceKey}/${reader.cid}/$chapterId';
+    final pending = _pageListRefreshes[key];
+    if (pending != null) return pending;
+    final stopwatch = Stopwatch()..start();
+    final future = reader.type.comicSource!.loadComicPages!(
+      reader.widget.cid,
+      chapterId,
+    );
+    _pageListRefreshes[key] = future;
+    unawaited(future.then(
+      (res) {
+        _pageListRefreshes.remove(key);
+        Log.info(
+          'Reader.Load',
+          'refreshComicPages: ${reader.type.sourceKey}/${reader.cid}/$chapterId in ${stopwatch.elapsedMilliseconds}ms',
+        );
+      },
+      onError: (Object _, StackTrace __) {
+        _pageListRefreshes.remove(key);
+      },
+    ));
+    return future;
+  }
+
+  void refreshPagesForImageError() {
+    if (reader.type == ComicType.local ||
+        LocalManager().isDownloaded(
+          reader.cid,
+          reader.type,
+          reader.chapter,
+          reader.widget.chapters,
+        )) {
+      return;
+    }
+    if (_refreshedForImageError) return;
+    _refreshedForImageError = true;
+    _refreshReaderPages(
+      reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1),
+    );
   }
 
   @override
@@ -470,11 +549,8 @@ class _GalleryModeState extends State<_GalleryMode>
                       if (mounted) setState(() {});
                     }
                   },
-                  errorBuilder: (_, error, s, retry) {
-                    return NetworkError(
-                      message: error.toString(),
-                      retry: retry,
-                    );
+                  errorBuilder: (errorContext, error, s, retry) {
+                    return _buildReaderImageError(errorContext, error, s, retry);
                   },
                 ),
               );
@@ -563,8 +639,8 @@ class _GalleryModeState extends State<_GalleryMode>
                 : Alignment.centerRight,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
-            errorBuilder: (_, error, s, retry) {
-              return NetworkError(message: error.toString(), retry: retry);
+            errorBuilder: (errorContext, error, s, retry) {
+              return _buildReaderImageError(errorContext, error, s, retry);
             },
           ),
         ),
@@ -579,8 +655,8 @@ class _GalleryModeState extends State<_GalleryMode>
                 : Alignment.centerLeft,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
-            errorBuilder: (_, error, s, retry) {
-              return NetworkError(message: error.toString(), retry: retry);
+            errorBuilder: (errorContext, error, s, retry) {
+              return _buildReaderImageError(errorContext, error, s, retry);
             },
           ),
         ),
@@ -594,8 +670,8 @@ class _GalleryModeState extends State<_GalleryMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
-            errorBuilder: (_, error, s, retry) {
-              return NetworkError(message: error.toString(), retry: retry);
+            errorBuilder: (errorContext, error, s, retry) {
+              return _buildReaderImageError(errorContext, error, s, retry);
             },
           ),
         );
@@ -974,8 +1050,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
-            errorBuilder: (_, error, s, retry) {
-              return NetworkError(message: error.toString(), retry: retry);
+            errorBuilder: (errorContext, error, s, retry) {
+              return _buildReaderImageError(errorContext, error, s, retry);
             },
           ),
         );
@@ -1270,6 +1346,17 @@ class _ContinuousModeState extends State<_ContinuousMode>
     }
     return imageKey;
   }
+}
+
+Widget _buildReaderImageError(
+  BuildContext context,
+  Object error,
+  StackTrace? _,
+  VoidCallback retry,
+) {
+  context.findAncestorStateOfType<_ReaderImagesState>()!
+      .refreshPagesForImageError();
+  return NetworkError(message: error.toString(), retry: retry);
 }
 
 ImageProvider _createImageProviderFromKey(

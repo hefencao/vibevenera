@@ -584,10 +584,12 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                     text: "Read".tl,
                     onClick: () {
                       final c = selectedComics.keys.first as FavoriteItem;
-                      App.mainNavigatorKey!.currentContext!.to(() => ReaderWithLoading(
+                      openReader(
+                        App.mainNavigatorKey!.currentContext!,
+                        () => ReaderWithLoading(
                             id: c.id,
                             sourceKey: c.sourceKey,
-                          )
+                          ),
                       );
                     },
                   ),
@@ -697,11 +699,12 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                   icon: Icons.menu_book_outlined,
                   text: "Read".tl,
                   onClick: () {
-                    App.mainNavigatorKey?.currentContext?.to(
+                    openReader(
+                      App.mainNavigatorKey!.currentContext!,
                       () => ReaderWithLoading(
                         id: c.id,
                         sourceKey: c.sourceKey,
-                      )
+                      ),
                     );
                   },
                 ),
@@ -719,7 +722,8 @@ class _LocalFavoritesPageState extends State<_LocalFavoritesPage> {
                   lastSelectedIndex = comics.indexOf(c);
                 });
               } else {
-                App.mainNavigatorKey?.currentContext?.to(
+                openReader(
+                  App.mainNavigatorKey!.currentContext!,
                   () => ReaderWithLoading(id: c.id, sourceKey: c.sourceKey),
                 );
               }

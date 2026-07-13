@@ -12,6 +12,12 @@ import 'local.dart';
 export "widget_utils.dart";
 export "context.dart";
 
+typedef ComicDetailsBuilder = Widget Function(
+  String id,
+  String sourceKey,
+  String title,
+);
+
 class _App {
   final version = "1.6.3";
 
@@ -56,6 +62,8 @@ class _App {
   final rootNavigatorKey = GlobalKey<NavigatorState>();
 
   GlobalKey<NavigatorState>? mainNavigatorKey;
+
+  late ComicDetailsBuilder comicDetailsBuilder;
 
   BuildContext get rootContext => rootNavigatorKey.currentContext!;
 

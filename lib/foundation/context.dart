@@ -14,9 +14,16 @@ extension Navigation on BuildContext {
     return Navigator.of(this).canPop();
   }
 
-  Future<T?> to<T>(Widget Function() builder,) {
+  Future<T?> to<T>(
+    Widget Function() builder, {
+    Duration? transitionDuration,
+    bool allowSnapshotting = true,
+  }) {
     return Navigator.of(this).push<T>(AppPageRoute(
-        builder: (context) => builder()));
+      builder: (context) => builder(),
+      transitionDurationOverride: transitionDuration,
+      allowSnapshotting: allowSnapshotting,
+    ));
   }
 
   Future<void> toReplacement<T>(Widget Function() builder) {

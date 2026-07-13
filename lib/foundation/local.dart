@@ -137,7 +137,8 @@ class LocalComic with HistoryMixin implements Comic {
         }
       }
     }
-    App.mainNavigatorKey!.currentContext!.to(
+    openReader(
+      App.mainNavigatorKey!.currentContext!,
       () => Reader(
         type: comicType,
         cid: id,
@@ -154,7 +155,7 @@ class LocalComic with HistoryMixin implements Comic {
             ),
         author: subtitle,
         tags: tags,
-      )
+      ),
     );
   }
 

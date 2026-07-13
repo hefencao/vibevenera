@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/pages/auth_page.dart';
+import 'package:venera/pages/comic_details_page/comic_page.dart';
 import 'package:venera/pages/main_page.dart';
 import 'package:venera/utils/io.dart';
 import 'package:window_manager/window_manager.dart';
@@ -27,6 +28,11 @@ void main(List<String> args) {
     runZonedGuarded(() async {
       WidgetsFlutterBinding.ensureInitialized();
       await init();
+      App.comicDetailsBuilder = (id, sourceKey, title) => ComicPage(
+        id: id,
+        sourceKey: sourceKey,
+        title: title,
+      );
       runApp(const MyApp());
       if (App.isDesktop) {
         await windowManager.ensureInitialized();

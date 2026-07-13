@@ -190,31 +190,43 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
                   const BackButton(),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: epName == null
-                        ? Text(
-                            context.reader.widget.name,
-                            style: ts.s18,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          )
-                        : Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: context.reader.type.comicSource == null
+                          ? null
+                          : () => context.to(
+                              () => App.comicDetailsBuilder(
+                                context.reader.cid,
+                                context.reader.type.sourceKey,
                                 context.reader.widget.name,
-                                style: ts.s16,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
                               ),
-                              Text(
-                                epName,
-                                style: ts.s12,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
+                            ),
+                      child: epName == null
+                          ? Text(
+                              context.reader.widget.name,
+                              style: ts.s18,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  context.reader.widget.name,
+                                  style: ts.s16,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                Text(
+                                  epName,
+                                  style: ts.s12,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                    ),
                   ),
                   const SizedBox(width: 8),
                   if (shouldShowChapterComments())

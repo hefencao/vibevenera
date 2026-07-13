@@ -102,8 +102,8 @@ abstract mixin class _ComicPageActions {
   ///
   /// [group] the chapter group number, start from 1
   void read([int? ep, int? page, int? group]) {
-    App.mainNavigatorKey!.currentContext!
-        .to(
+    openReader(
+      App.mainNavigatorKey!.currentContext!,
       () => Reader(
         type: comic.comicType,
         cid: comic.id,
@@ -115,9 +115,8 @@ abstract mixin class _ComicPageActions {
         history: history ?? History.fromModel(model: comic, ep: 0, page: 0),
         author: comic.findAuthor() ?? '',
         tags: comic.plainTags,
-      )
-    )
-        .then((_) {
+      ),
+    ).then((_) {
       onReadEnd();
     });
   }

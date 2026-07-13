@@ -16,6 +16,7 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
     required this.builder,
     super.settings,
     this.maintainState = true,
+    this.transitionDurationOverride,
     super.fullscreenDialog,
     super.allowSnapshotting = true,
     super.barrierDismissible = false,
@@ -27,6 +28,9 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
 
   /// Builds the primary contents of the route.
   final WidgetBuilder builder;
+
+  @override
+  final Duration? transitionDurationOverride;
 
   String? label;
 
@@ -58,8 +62,11 @@ mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
   @protected
   Widget buildContent(BuildContext context);
 
+  Duration? get transitionDurationOverride;
+
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 300);
+  Duration get transitionDuration =>
+      transitionDurationOverride ?? const Duration(milliseconds: 300);
 
   @override
   Color? get barrierColor => null;

@@ -237,13 +237,14 @@ class _ImageFavoritesPhotoViewState extends State<ImageFavoritesPhotoView> {
             var comic = widget.comic;
             var ep = images[currentPage].ep;
             var page = images[currentPage].page;
-            App.rootContext.to(
+            openReader(
+              App.rootContext,
               () => ReaderWithLoading(
                 id: comic.id,
                 sourceKey: comic.sourceKey,
                 initialEp: ep,
                 initialPage: page,
-              )
+              ),
             );
           },
         ),

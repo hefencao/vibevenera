@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/network/webp_download_artifact.dart';
@@ -98,6 +99,12 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         activeWriter,
         checkCancelled: () => _throwIfCancelled(cancelToken),
       );
+      Log.warning(
+        'WebP.Cache',
+        'artifact ${restored.length == 0 ? 'empty' : 'restored'}: '
+            'source=${identity.sourceKey} cid=${identity.cid} eid=${identity.eid} '
+            'bytes=${restored.length} kind=${restored.kind.name} complete=${restored.complete}',
+      );
 
       var ingress = _WebPIngress(
         session: session,
@@ -139,6 +146,18 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       while (await _moveNext(iterator, cancelToken)) {
         _throwIfCancelled(cancelToken);
         final event = iterator.current;
+
+        final cachedFile = event.cachedFile;
+        if (cachedFile != null) {
+          return await _executeCachedFile(
+            cachedFile,
+            session: session,
+            writer: activeWriter,
+            artifact: artifact,
+            cancelToken: cancelToken,
+            onProgress: onProgress,
+          );
+        }
 
         if (event.reset) {
           await artifact.reset();
@@ -338,6 +357,81 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     );
   }
 
+  Future<File> _executeCachedFile(
+    File file, {
+    required DownloadSession session,
+    required DownloadWriterLease writer,
+    required WebPDownloadArtifact artifact,
+    required CancelToken? cancelToken,
+    required void Function(WebPTransportProgress progress)? onProgress,
+  }) async {
+    final length = await file.length();
+    if (length <= 0) {
+      throw StateError('Cached image file is empty: ${identity.imageKey}');
+    }
+    await artifact.reset();
+    var activeWriter = session.resetSource(
+      writer: writer,
+      epoch: session.source.epoch + 1,
+      expectedLength: length,
+    );
+    final reader = await file.open();
+    try {
+      final prefix = Uint8List.fromList(await reader.read(12));
+      final kind = WebPDownloadArtifact.classifyPrefix(
+        prefix,
+        completeLength: length,
+      );
+      if (kind != WebPArtifactContentKind.webp) {
+        session.enterFallbackContent(activeWriter, restoredLength: length);
+        session.updateExpectedLength(length, writer: activeWriter);
+        session.sealFallback(activeWriter, file, finalLength: length);
+      } else {
+        await reader.setPosition(0);
+        var offset = 0;
+        while (offset < length) {
+          _throwIfCancelled(cancelToken);
+          final chunk = await reader.read(
+            length - offset < _localReadSize
+                ? length - offset
+                : _localReadSize,
+          );
+          if (chunk.isEmpty) {
+            throw WebPSourceInvariantError(
+              'cached file ended at $offset/$length',
+            );
+          }
+          session.append(
+            Uint8List.fromList(chunk),
+            offset: offset,
+            writer: activeWriter,
+          );
+          offset += chunk.length;
+          _publishProgress(
+            onProgress,
+            currentBytes: offset,
+            reportedTotal: length,
+            session: session,
+          );
+        }
+        session.seal(activeWriter, file);
+      }
+    } finally {
+      await reader.close();
+    }
+    onProgress?.call(WebPTransportProgress(
+      currentBytes: length,
+      totalBytes: length,
+      done: true,
+    ));
+    Log.warning(
+      'WebP.Cache',
+      'reuse: image=${identity.imageKey} source=${identity.sourceKey} '
+          'cid=${identity.cid} eid=${identity.eid} bytes=$length',
+    );
+    return file;
+  }
+
   Future<File> _completeIngress({
     required DownloadSession session,
     required DownloadWriterLease writer,
@@ -368,6 +462,11 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     }
 
     final file = await artifact.promote(sealedLength: finalLength);
+    Log.warning(
+      'WebP.Cache',
+      'promoted: image=${identity.imageKey} source=${identity.sourceKey} '
+          'cid=${identity.cid} eid=${identity.eid} bytes=$finalLength exists=${await file.exists()}',
+    );
 
     if (ingress.isFallback) {
       session.sealFallback(

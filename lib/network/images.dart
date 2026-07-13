@@ -653,8 +653,8 @@ abstract class ImageDownloader {
       '$imageKey@$sourceKey@$cid@$eid',
     );
     if (cached == null) return null;
-    final validation = ImageDataValidator.validateBytes(
-      await cached.readAsBytes(),
+    final validation = await ImageDataValidator.validateFile(
+      cached,
       allowUnknown: true,
     );
     return validation.valid ? cached : null;
@@ -677,19 +677,35 @@ abstract class ImageDownloader {
     bool streamOnly = false,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
+    final isWebPSession = debugLabel?.startsWith('webp-session:') ?? false;
+    CacheLookupState? cacheState;
     _throwIfCancelled(cancelToken);
 
     // Cache hit → yield immediately
-    final cached = await CacheManager().findCache(cacheKey);
+    final cached = await CacheManager().findCache(
+      cacheKey,
+      onLookup: isWebPSession ? (state) => cacheState = state : null,
+    );
+    if (isWebPSession) {
+      Log.warning(
+        'WebP.Cache',
+        'disk ${cacheState!.name}: source=$sourceKey cid=$cid eid=$eid key=${_shortDownloadKey(cacheKey)}',
+      );
+    }
     _throwIfCancelled(cancelToken);
     if (cached != null) {
-      final data = await cached.readAsBytes();
-      _throwIfCancelled(cancelToken);
-      final validation = ImageDataValidator.validateBytes(
-        data,
+      final validation = await ImageDataValidator.validateFile(
+        cached,
         allowUnknown: true,
       );
+      _throwIfCancelled(cancelToken);
       if (!validation.valid) {
+        if (isWebPSession) {
+          Log.warning(
+            'WebP.Cache',
+            'disk invalid: source=$sourceKey cid=$cid eid=$eid reason=${validation.reason}',
+          );
+        }
         final partial = _PartialImageCache(cacheKey);
         if (validation.format != ImageDataFormat.unknown) {
           await partial.adopt(cached);
@@ -699,6 +715,18 @@ abstract class ImageDownloader {
         await CacheManager().delete(cacheKey);
       } else {
         unawaited(_PartialImageCache(cacheKey).clear());
+        if (streamOnly) {
+          final length = await cached.length();
+          yield ImageDownloadProgress(
+            currentBytes: length,
+            totalBytes: length,
+            cachedFile: cached,
+            done: true,
+          );
+          return;
+        }
+        final data = await cached.readAsBytes();
+        _throwIfCancelled(cancelToken);
         yield ImageDownloadProgress(
           currentBytes: data.length,
           totalBytes: data.length,
@@ -1438,6 +1466,7 @@ class ImageDownloadProgress {
   final int? totalBytes;
   final Uint8List? imageBytes;
   final Uint8List? chunkBytes;
+  final io.File? cachedFile;
   final bool reset;
   final bool done;
 
@@ -1446,6 +1475,7 @@ class ImageDownloadProgress {
     required this.totalBytes,
     this.imageBytes,
     this.chunkBytes,
+    this.cachedFile,
     this.reset = false,
     this.done = false,
   });

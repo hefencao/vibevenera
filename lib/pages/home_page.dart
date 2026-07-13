@@ -317,7 +317,8 @@ class _HistoryState extends State<_History> {
                         heroID: heroID,
                         onTap: () {
                           final item = history[index];
-                          App.mainNavigatorKey!.currentContext!.to(
+                          openReader(
+                            App.mainNavigatorKey!.currentContext!,
                             () => ReaderWithLoading(
                               id: item.id,
                               sourceKey: item.type.sourceKey,

@@ -218,7 +218,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       var history = HistoryManager().find(widget.id, ComicType.local);
       if (isFirst) {
         Future.microtask(() {
-          App.rootContext.to(() {
+          openReader(App.rootContext, () {
             return Reader(
               type: ComicType.local,
               cid: widget.id,

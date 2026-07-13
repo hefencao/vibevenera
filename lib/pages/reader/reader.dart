@@ -64,6 +64,13 @@ part 'chapters.dart';
 
 part 'chapter_comments.dart';
 
+Future<T?> openReader<T>(BuildContext context, Widget Function() builder) =>
+    context.to<T>(
+      builder,
+      transitionDuration: Duration.zero,
+      allowSnapshotting: false,
+    );
+
 extension _ReaderContext on BuildContext {
   _ReaderState get reader => findAncestorStateOfType<_ReaderState>()!;
 
