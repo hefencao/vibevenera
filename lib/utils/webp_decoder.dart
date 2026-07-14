@@ -1159,6 +1159,7 @@ class WorkerPoolScheduler {
   // 为 current 页保留一个 worker：非 current（next/bg）解码最多占用 worker 数-1 个
   // isolate，播放中的当前页续帧始终有一个 worker 可用，不被邻页预取批占满而饿死。
   int _nonCurrentBusy = 0;
+  int _currentBusy = 0;
   int get _workerCount => _workerPorts.length;
 
 
@@ -1173,9 +1174,18 @@ class WorkerPoolScheduler {
 
   bool invalidateDecoder(int decoderAddress) {
     _decoderEpochs[decoderAddress] = decoderEpoch(decoderAddress) + 1;
-    _currentQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
-    _nextQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
-    _bgQueue.removeWhere((j) => j.decoderAddress == decoderAddress);
+    final removed = <DecodeJob>[];
+    bool remove(DecodeJob job) {
+      if (job.decoderAddress != decoderAddress) return false;
+      removed.add(job);
+      return true;
+    }
+    _currentQueue.removeWhere(remove);
+    _nextQueue.removeWhere(remove);
+    _bgQueue.removeWhere(remove);
+    for (final job in removed) {
+      scheduleMicrotask(() => job.onComplete([]));
+    }
     return _activeDecoders.contains(decoderAddress);
   }
 
@@ -1401,7 +1411,9 @@ class WorkerPoolScheduler {
 
       // 为 current 保留一个 worker：非 current 解码已占满 (worker数-1) 时，本轮不
       // 再取 next/bg，让空出的 worker 只服务 current 续帧。current 队列不受此限。
-      final allowNonCurrent = _nonCurrentBusy < _workerCount - 1;
+      final allowNonCurrent = _currentBusy == 0 &&
+          _currentQueue.isEmpty &&
+          _nonCurrentBusy < _workerCount - 1;
 
       for (final w in [0, 1]) {
         if (_workerBusy[w]) continue;
@@ -1462,7 +1474,11 @@ class WorkerPoolScheduler {
         continue;
       }
 
-      if (!pickedIsCurrent) _nonCurrentBusy++;
+      if (pickedIsCurrent) {
+        _currentBusy++;
+      } else {
+        _nonCurrentBusy++;
+      }
       _runJob(job, assignedWorker!, pickedIsCurrent);
     }
   }
@@ -1471,6 +1487,7 @@ class WorkerPoolScheduler {
     final port = _workerPorts[workerIndex];
     if (port == null) {
       _activeDecoders.remove(job.decoderAddress);
+      if (isCurrent && _currentBusy > 0) _currentBusy--;
       if (!isCurrent && _nonCurrentBusy > 0) _nonCurrentBusy--;
       job.onError?.call(StateError('WebP worker port is unavailable'));
       _scheduleNext();
@@ -1527,6 +1544,7 @@ class WorkerPoolScheduler {
     } finally {
       _activeDecoders.remove(job.decoderAddress);
       _workerBusy[workerIndex] = false;
+      if (isCurrent && _currentBusy > 0) _currentBusy--;
       if (!isCurrent && _nonCurrentBusy > 0) _nonCurrentBusy--;
       _scheduleNext();
     }

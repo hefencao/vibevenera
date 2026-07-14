@@ -66,7 +66,8 @@ typedef NaviItemTapListener = void Function(int);
 
 class NaviPaneState extends State<NaviPane>
     with SingleTickerProviderStateMixin {
-  bool _canPop = true;
+  bool _hideNavigationInLandscape = false;
+  bool _hasObservedRoute = false;
 
   late int _currentPage = widget.initialPage;
 
@@ -104,7 +105,17 @@ class NaviPaneState extends State<NaviPane>
       _kBottomBarHeight + MediaQuery.of(context).padding.bottom;
 
   void onNavigatorStateChange() {
-    onRebuild(context);
+    final route = widget.observer.routes.isEmpty
+        ? null
+        : widget.observer.routes.last;
+    final hideNavigation = route is AppPageRoute &&
+        route.hideNavigationInLandscape;
+    if (!_hasObservedRoute) {
+      _hasObservedRoute = true;
+      _hideNavigationInLandscape = hideNavigation;
+      return;
+    }
+    setState(() => _hideNavigationInLandscape = hideNavigation);
   }
 
   void updatePage(int index) {
@@ -175,7 +186,11 @@ class NaviPaneState extends State<NaviPane>
   Widget build(BuildContext context) {
     onRebuild(context);
     final mq = MediaQuery.of(context);
-    final sideInsets = (App.isMobile && mq.orientation == Orientation.landscape)
+    final hideNavigation = _hideNavigationInLandscape &&
+        mq.orientation == Orientation.landscape;
+    final sideInsets = (!hideNavigation &&
+            App.isMobile &&
+            mq.orientation == Orientation.landscape)
         ? EdgeInsets.only(
             left: math.max(mq.viewPadding.left, mq.systemGestureInsets.left),
             right: math.max(mq.viewPadding.right, mq.systemGestureInsets.right),
@@ -196,17 +211,19 @@ class NaviPaneState extends State<NaviPane>
           final value = controller.value;
           Widget content = Stack(
             children: [
-              Positioned(
-                left: _kFoldedSideBarWidth * ((value - 2.0).clamp(-1.0, 0.0)),
-                top: 0,
-                bottom: 0,
-                child: buildLeft(),
-              ),
+              if (!hideNavigation)
+                Positioned(
+                  left: _kFoldedSideBarWidth * ((value - 2.0).clamp(-1.0, 0.0)),
+                  top: 0,
+                  bottom: 0,
+                  child: buildLeft(),
+                ),
               Positioned.fill(
-                left:
-                    _kFoldedSideBarWidth * ((value - 1).clamp(0, 1)) +
-                    (_kSideBarWidth - _kFoldedSideBarWidth) *
-                        ((value - 2).clamp(0, 1)),
+                left: hideNavigation
+                    ? 0
+                    : _kFoldedSideBarWidth * ((value - 1).clamp(0, 1)) +
+                          (_kSideBarWidth - _kFoldedSideBarWidth) *
+                              ((value - 2).clamp(0, 1)),
                 child: buildMainView(),
               ),
             ],
@@ -227,32 +244,20 @@ class NaviPaneState extends State<NaviPane>
     return HeroControllerScope(
       controller: MaterialApp.createMaterialHeroController(),
       child: PopScope(
-        canPop: _canPop,
+        canPop: widget.observer.routes.length <= 1,
         onPopInvokedWithResult: (didPop, result) {
-          if (didPop) {
-            return;
-          }
-          widget.navigatorKey.currentState?.maybePop(result);
+          if (didPop || widget.observer.routes.length <= 1) return;
+          widget.navigatorKey.currentState!.pop(result);
         },
-        child: NotificationListener<NavigationNotification>(
-          onNotification: (NavigationNotification notification) {
-            final bool nextCanPop = !notification.canHandlePop;
-            if (nextCanPop != _canPop) {
-              setState(() {
-                _canPop = nextCanPop;
-              });
-            }
-            return false;
-          },
-          child: Navigator(
-            observers: [widget.observer],
-            key: widget.navigatorKey,
-            onGenerateRoute: (settings) => AppPageRoute(
-              preventRebuild: false,
-              builder: (context) {
-                return _NaviMainView(state: this);
-              },
-            ),
+        child: Navigator(
+          observers: [widget.observer],
+          key: widget.navigatorKey,
+          onGenerateRoute: (settings) => AppPageRoute(
+            preventRebuild: false,
+            managedPredictiveBack: true,
+            builder: (context) {
+              return _NaviMainView(state: this);
+            },
           ),
         ),
       ),

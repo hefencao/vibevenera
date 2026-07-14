@@ -232,6 +232,7 @@ final class WebPDownloadTask extends SchedulerTask {
 
 final class WebPDecodeTask extends SchedulerTask {
   final WebPDecodeSession session;
+  final bool current;
   final int maxBatch;
   final webp.WorkerPoolScheduler _pool = webp.WorkerPoolScheduler.instance;
 
@@ -241,7 +242,8 @@ final class WebPDecodeTask extends SchedulerTask {
     required super.priority,
     required this.session,
     this.maxBatch = 2,
-  }) : super(cancelable: true);
+  }) : current = session.isCurrent,
+       super(cancelable: true);
 
   @override
   SchedulerLane get lane => SchedulerLane.decode;
@@ -254,7 +256,7 @@ final class WebPDecodeTask extends SchedulerTask {
     }
     final claim = session.tryClaimDecode(
       expectedRevision: generation,
-      maxBatch: maxBatch,
+      maxBatch: current ? maxBatch : 1,
     );
     if (claim == null) {
       _state = TaskState.completed;
@@ -267,8 +269,8 @@ final class WebPDecodeTask extends SchedulerTask {
     // 全画布 VP8 熵解码严格串行，libwebp 多线程只并行少量重建，实测在此 workload
     // 上多线程抖动更差（4线程 40-120ms vs 单线程稳定 50ms）。恒单线程，性能靠
     // native 侧解码线程绑大核（webp_decoder.c bind_current_thread_to_big_cores）。
-    cursor.setThreadLimit(session.isCurrent ? 1 : 1);
-    WebPPerf.count(session.isCurrent ? 'decodeDispatch.current' : 'decodeDispatch.near');
+    cursor.setThreadLimit(1);
+    WebPPerf.count(current ? 'decodeDispatch.current' : 'decodeDispatch.near');
     // 诊断：dispatch 时的需求构成，定位「播放页为何 isCurrent=false」。
     WebPPerf.count(
       'dispatchDemand.dc${session.demandCount}.cur${session.isCurrent ? 1 : 0}',
@@ -285,10 +287,17 @@ final class WebPDecodeTask extends SchedulerTask {
         onComplete: (decoded) => _complete(claim, decoded),
         onError: (error) => _fail(claim, error),
       ),
-      session.isCurrent
+      current
           ? webp.DecodePriority.current
           : webp.DecodePriority.next,
     );
+  }
+
+  @override
+  void cancel() {
+    if (isFinished) return;
+    super.cancel();
+    _pool.invalidateDecoder(session.cursor.address);
   }
 
   void _complete(

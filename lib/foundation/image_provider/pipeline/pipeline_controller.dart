@@ -43,6 +43,7 @@ import 'task_scheduler.dart';
 // ═══════════════════════════════════════════════════════════════
 
 final class ReaderPipelineSession {
+  final Object owner;
   final List<String> images;
   final String cid;
   final String eid;
@@ -53,6 +54,7 @@ final class ReaderPipelineSession {
   final int preloadCount;
 
   const ReaderPipelineSession({
+    required this.owner,
     required this.images,
     required this.cid,
     required this.eid,
@@ -114,6 +116,7 @@ class PipelineController {
   late final WebPSessionCoordinator _sessions;
   final Map<String, WebPResourceLease> _policyLeases = {};
   Map<String, CacheAliasTarget> _sessionAliases = const {};
+  Object? _readerOwner;
 
   String _currentKey = '';
   final Set<String> _nearKeys = {};
@@ -130,11 +133,13 @@ class PipelineController {
   void attachReaderSession(ReaderPipelineSession session) {
     _syncNetworkConcurrency();
     if (_isLocalStaticSession(session)) {
-      detachReaderSession();
+      _readerOwner = session.owner;
+      detachReaderSession(session.owner);
       return;
     }
     setTargetSize(session.targetWidth, session.targetHeight);
     final contextChanged =
+        !identical(_readerOwner, session.owner) ||
         !_sameImages(_images, session.images) ||
         _cid != session.cid ||
         _eid != session.eid ||
@@ -143,6 +148,7 @@ class PipelineController {
       _detachPolicyScope();
       _sessionId++;
     }
+    _readerOwner = session.owner;
     if (contextChanged) _images = List<String>.unmodifiable(session.images);
     _cid = session.cid;
     _eid = session.eid;
@@ -173,7 +179,8 @@ class PipelineController {
     }
   }
 
-  void onReaderPageChanged(int currentIdx) {
+  void onReaderPageChanged(Object owner, int currentIdx) {
+    if (!identical(_readerOwner, owner)) return;
     _syncNetworkConcurrency();
     if (_images.isEmpty) return;
     if (_interaction != InteractionState.scroll) {
@@ -381,7 +388,9 @@ class PipelineController {
     resources.dispose();
   }
 
-  void detachReaderSession() {
+  void detachReaderSession(Object owner) {
+    if (!identical(_readerOwner, owner)) return;
+    _readerOwner = null;
     _detachPolicyScope();
     _sessionId++;
     _jumpProtectionTimer?.cancel();
@@ -438,11 +447,11 @@ class PipelineController {
       // demand is a low-priority safety net for standalone/first-build races.
       // It still uses the same DownloadSession and never opens a second stream.
       //
-      // decodeTargetFrames 必须 > 0：这是「正在屏幕上显示」的安全网。水位表
+      // decodeTargetFrames 必须 > 0：这是「正在屏幕上显示」的首帧安全网。水位表
       // (rank) 只覆盖 readDist 0/+1/+2/-1，落在其外但仍在显示的页（翻页边界、
       // 双页第二张、快切后停在窗口边缘）若只靠 policy lease，目标会是 0 →
-      // needsDecode 永远 false → 无限转圈。给可见页保底 3 帧，保证一定能出图并
-      // 播放；真正的 current 页由 policy lease 把目标抬到水位表的 7。
+      // needsDecode 永远 false → 无限转圈。这里只保底 1 帧，持续播放和预解深度
+      // 仍完全由 policy lease 决定，避免可见 lease 绕过“当前页告急时近邻为 0”。
       demand: const WebPResourceDemand(
         downloadPriority: 60,
         decodePriority: 60,
@@ -450,7 +459,7 @@ class PipelineController {
         allowDecode: true,
         allowUpload: true,
         current: false,
-        decodeTargetFrames: 3,
+        decodeTargetFrames: 1,
       ),
     );
     final logicalKey = '$imageKey@$sourceKey@$cid@$eid';

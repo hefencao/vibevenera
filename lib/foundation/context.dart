@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:venera/components/components.dart';
 
+import 'app.dart';
 import 'app_page_route.dart';
 
 extension Navigation on BuildContext {
@@ -17,18 +18,29 @@ extension Navigation on BuildContext {
   Future<T?> to<T>(
     Widget Function() builder, {
     Duration? transitionDuration,
+    Duration? reverseTransitionDuration,
     bool allowSnapshotting = true,
+    bool hideNavigationInLandscape = false,
   }) {
-    return Navigator.of(this).push<T>(AppPageRoute(
+    final navigator = Navigator.of(this);
+    return navigator.push<T>(AppPageRoute(
       builder: (context) => builder(),
       transitionDurationOverride: transitionDuration,
+      reverseTransitionDurationOverride: reverseTransitionDuration,
       allowSnapshotting: allowSnapshotting,
+      managedPredictiveBack:
+          identical(navigator, App.mainNavigatorKey?.currentState),
+      hideNavigationInLandscape: hideNavigationInLandscape,
     ));
   }
 
   Future<void> toReplacement<T>(Widget Function() builder) {
-    return Navigator.of(this).pushReplacement(AppPageRoute(
-        builder: (context) => builder()));
+    final navigator = Navigator.of(this);
+    return navigator.pushReplacement(AppPageRoute(
+      builder: (context) => builder(),
+      managedPredictiveBack:
+          identical(navigator, App.mainNavigatorKey?.currentState),
+    ));
   }
 
   double get width => MediaQuery.of(this).size.width;

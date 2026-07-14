@@ -333,12 +333,17 @@ final class WebPSessionCoordinator {
     if (session.isDisposed) return;
 
     final decodeKey = _decodeTaskKey(session);
-    if (!session.shouldDecode || !session.sourceDecodable) {
+    final hasDecodeTask =
+        scheduler.hasTaskInLane(SchedulerLane.decode, decodeKey);
+    if (hasDecodeTask &&
+        !scheduler.decodeTaskMatchesCurrent(decodeKey, session.isCurrent)) {
+      scheduler.cancelInLane(SchedulerLane.decode, decodeKey);
+    } else if (!session.shouldDecode || !session.sourceDecodable) {
       scheduler.cancelInLane(SchedulerLane.decode, decodeKey);
     } else if (!session.decodeFailed &&
         session.canScheduleDecode &&
         session.holder.needsDecode &&
-        !scheduler.hasTaskInLane(SchedulerLane.decode, decodeKey)) {
+        !hasDecodeTask) {
       scheduler.submit(
         WebPDecodeTask(
           key: decodeKey,
@@ -347,7 +352,7 @@ final class WebPSessionCoordinator {
           session: session,
         ),
       );
-    } else if (scheduler.hasTaskInLane(SchedulerLane.decode, decodeKey)) {
+    } else if (hasDecodeTask) {
       scheduler.updatePriority(
         SchedulerLane.decode,
         decodeKey,

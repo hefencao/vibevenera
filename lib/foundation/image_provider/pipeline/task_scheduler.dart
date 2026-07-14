@@ -382,6 +382,11 @@ class TaskScheduler {
   bool hasTaskInLane(SchedulerLane lane, String key) =>
       _lanes[lane]!.hasTask(key);
 
+  bool decodeTaskMatchesCurrent(String key, bool current) {
+    final task = _lanes[SchedulerLane.decode]!._registry.find(key);
+    return task is WebPDecodeTask && task.current == current;
+  }
+
   void updatePriority(SchedulerLane lane, String key, int priority) =>
       _lanes[lane]!.updatePriority(key, priority);
 

@@ -25,6 +25,18 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
             App.forceRebuild();
           },
         ).toSliver(),
+        _SwitchSetting(
+          title: 'AMOLED black theme'.tl,
+          subtitle: 'Use pure black surfaces in dark mode'.tl,
+          settingKey: 'amoledTheme',
+          onChanged: App.forceRebuild,
+        ).toSliver(),
+        if (App.isAndroid)
+          _SwitchSetting(
+            title: 'Predictive back'.tl,
+            subtitle: 'Preview the previous page during the back gesture'.tl,
+            settingKey: 'enablePredictiveBack',
+          ).toSliver(),
         SelectSetting(
           title: "Theme Color".tl,
           settingKey: "color",

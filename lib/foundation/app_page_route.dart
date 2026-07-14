@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:venera/foundation/app.dart';
+import 'package:venera/foundation/appdata.dart';
 
 const double _kBackGestureWidth = 20.0;
 const int _kMaxDroppedSwipePageForwardAnimationTime = 800;
@@ -17,11 +18,14 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
     super.settings,
     this.maintainState = true,
     this.transitionDurationOverride,
+    this.reverseTransitionDurationOverride,
     super.fullscreenDialog,
     super.allowSnapshotting = true,
     super.barrierDismissible = false,
     this.enableIOSGesture = true,
     this.preventRebuild = true,
+    this.managedPredictiveBack = false,
+    this.hideNavigationInLandscape = false,
   }) {
     assert(opaque);
   }
@@ -31,6 +35,9 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
 
   @override
   final Duration? transitionDurationOverride;
+
+  @override
+  final Duration? reverseTransitionDurationOverride;
 
   String? label;
 
@@ -55,6 +62,22 @@ class AppPageRoute<T> extends PageRoute<T> with _AppRouteTransitionMixin{
 
   @override
   final bool preventRebuild;
+
+  final bool managedPredictiveBack;
+
+  final bool hideNavigationInLandscape;
+
+  @override
+  bool get popGestureEnabled {
+    if (!App.isAndroid) return super.popGestureEnabled;
+    if (!appdata.settings['enablePredictiveBack']) return false;
+    // A root route (for example SideBarRoute) visually covers this nested
+    // Navigator and must exclusively receive the system back gesture.
+    if (managedPredictiveBack && App.rootNavigatorKey.currentState!.canPop()) {
+      return false;
+    }
+    return super.popGestureEnabled;
+  }
 }
 
 mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
@@ -64,9 +87,15 @@ mixin _AppRouteTransitionMixin<T> on PageRoute<T> {
 
   Duration? get transitionDurationOverride;
 
+  Duration? get reverseTransitionDurationOverride;
+
   @override
   Duration get transitionDuration =>
       transitionDurationOverride ?? const Duration(milliseconds: 300);
+
+  @override
+  Duration get reverseTransitionDuration =>
+      reverseTransitionDurationOverride ?? transitionDuration;
 
   @override
   Color? get barrierColor => null;

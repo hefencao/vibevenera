@@ -496,7 +496,12 @@
     "Clear specific reader settings for this device": "清除该设备的特殊阅读设置",
     "Enable device specific settings": "启用此设备特定设置",
     "Ignore Certificate Errors": "忽略证书错误",
-    "Mouse scroll speed": "鼠标滚动速度"
+    "Mouse scroll speed": "鼠标滚动速度",
+    "Show navigation bar in reader landscape mode": "横屏模式下阅读器中显示导航栏",
+    "AMOLED black theme": "A屏不发光主题",
+    "Use pure black surfaces in dark mode": "深色模式下使用纯黑背景",
+    "Predictive back": "预测返回",
+    "Preview the previous page during the back gesture": "返回手势过程中预览上一级页面"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -995,6 +1000,11 @@
     "Clear specific reader settings for this device": "清除該裝置的特殊閱讀設定",
     "Enable device specific settings": "啟用此裝置特定設定",
     "Ignore Certificate Errors": "忽略證書錯誤",
-    "Mouse scroll speed": "滑鼠滾動速度"
+    "Mouse scroll speed": "滑鼠滾動速度",
+    "Show navigation bar in reader landscape mode": "橫向模式下閱讀器中顯示導覽列",
+    "AMOLED black theme": "A屏不發光主題",
+    "Use pure black surfaces in dark mode": "深色模式下使用純黑背景",
+    "Predictive back": "預測返回",
+    "Preview the previous page during the back gesture": "返回手勢過程中預覽上一級頁面"
   }
 }

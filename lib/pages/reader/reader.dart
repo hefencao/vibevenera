@@ -69,8 +69,12 @@ Future<T?> openReader<T>(BuildContext context, Widget Function() builder) =>
     context.to<T>(
       builder,
       transitionDuration: Duration.zero,
+      reverseTransitionDuration: const Duration(milliseconds: 300),
       allowSnapshotting: false,
-    );
+      hideNavigationInLandscape:
+          !appdata.settings['showReaderNavigationBar'],
+    ).whenComplete(() =>
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
 
 extension _ReaderContext on BuildContext {
   _ReaderState get reader => findAncestorStateOfType<_ReaderState>()!;
@@ -237,13 +241,15 @@ class _ReaderState extends State<Reader>
       appdata.settings.getReaderSetting(cid, type.sourceKey, 'readerMode'),
     );
     history = widget.history;
-    if (!appdata.settings.getReaderSetting(
-      cid,
-      type.sourceKey,
-      'showSystemStatusBar',
-    )) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
-    }
+    SystemChrome.setEnabledSystemUIMode(
+      appdata.settings.getReaderSetting(
+        cid,
+        type.sourceKey,
+        'showSystemStatusBar',
+      )
+          ? SystemUiMode.edgeToEdge
+          : SystemUiMode.immersive,
+    );
     if (appdata.settings.getReaderSetting(
       cid,
       type.sourceKey,
@@ -310,7 +316,6 @@ class _ReaderState extends State<Reader>
     }
     autoPageTurningTimer?.cancel();
     focusNode.dispose();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     stopVolumeEvent();
     Future.microtask(() {
       DataSync().onDataChanged();

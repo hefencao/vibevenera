@@ -153,14 +153,96 @@ class SideBarRoute<T> extends PopupRoute<T> {
       Animation<double> secondaryAnimation, Widget child) {
     var offset =
         Tween<Offset>(begin: const Offset(1, 0), end: const Offset(0, 0));
-    return SlideTransition(
-      position: offset.animate(CurvedAnimation(
-        parent: animation,
-        curve: Curves.fastOutSlowIn,
-      )),
-      child: child,
+    return _PredictiveSideBarTransition(
+      route: this,
+      child: SlideTransition(
+        position: offset.animate(CurvedAnimation(
+          parent: animation,
+          curve: Curves.fastOutSlowIn,
+        )),
+        child: child,
+      ),
     );
   }
+}
+
+class _PredictiveSideBarTransition extends StatefulWidget {
+  const _PredictiveSideBarTransition({
+    required this.route,
+    required this.child,
+  });
+
+  final SideBarRoute route;
+  final Widget child;
+
+  @override
+  State<_PredictiveSideBarTransition> createState() =>
+      _PredictiveSideBarTransitionState();
+}
+
+class _PredictiveSideBarTransitionState
+    extends State<_PredictiveSideBarTransition> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    WidgetsBinding.instance.addObserver(this);
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  bool handleStartBackGesture(PredictiveBackEvent backEvent) {
+    final route = widget.route;
+    if (!App.isAndroid ||
+        !appdata.settings['enablePredictiveBack'] ||
+        backEvent.isButtonEvent ||
+        !route.isCurrent ||
+        route.isFirst ||
+        route.willHandlePopInternally ||
+        route.popDisposition == RoutePopDisposition.doNotPop ||
+        route.animation!.status != AnimationStatus.completed ||
+        route.secondaryAnimation!.status != AnimationStatus.dismissed ||
+        route.navigator!.userGestureInProgress) {
+      return false;
+    }
+    route.handleStartBackGesture(progress: 1 - backEvent.progress);
+    return true;
+  }
+
+  @override
+  void handleUpdateBackGestureProgress(PredictiveBackEvent backEvent) {
+    widget.route.handleUpdateBackGestureProgress(
+      progress: 1 - backEvent.progress,
+    );
+  }
+
+  @override
+  void handleCommitBackGesture() {
+    final route = widget.route;
+    final navigator = route.navigator!;
+    final controller = route.controller!;
+    navigator.pop();
+    if (!controller.isAnimating) {
+      navigator.didStopUserGesture();
+      return;
+    }
+    late AnimationStatusListener listener;
+    listener = (_) {
+      controller.removeStatusListener(listener);
+      navigator.didStopUserGesture();
+    };
+    controller.addStatusListener(listener);
+  }
+
+  @override
+  void handleCancelBackGesture() => widget.route.handleCancelBackGesture();
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 Future<void> showSideBar(BuildContext context, Widget widget,

@@ -38,6 +38,7 @@ class _ReaderImagesState extends State<_ReaderImages>
   bool inProgress = false;
   bool _refreshedForImageError = false;
   late _ReaderState reader;
+  bool _routeActive = false;
 
   @override
   void initState() {
@@ -51,7 +52,35 @@ class _ReaderImagesState extends State<_ReaderImages>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     ImageDownloader.cancelAllLoadingImages();
+    PipelineController.instance.detachReaderSession(reader);
     super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final active = TickerMode.valuesOf(context).enabled;
+    final changed = _routeActive != active;
+    _routeActive = active;
+    if (!active) {
+      if (changed) PipelineController.instance.detachReaderSession(reader);
+    } else if (reader.images != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !TickerMode.valuesOf(context).enabled) return;
+        _attachReaderPipeline(context);
+        _reportReaderPage(context, reader.page);
+      });
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (!_routeActive || reader.images == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !TickerMode.valuesOf(context).enabled) return;
+      _attachReaderPipeline(context);
+      _reportReaderPage(context, reader.page);
+    });
   }
 
   @override
@@ -60,7 +89,7 @@ class _ReaderImagesState extends State<_ReaderImages>
     if (state == AppLifecycleState.resumed && reader.images != null) {
       WebPImageProvider.setInteractionState(InteractionState.idle);
       _attachReaderPipeline(context);
-      _reportReaderPage(reader.page);
+      _reportReaderPage(context, reader.page);
     }
   }
 
@@ -122,7 +151,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _attachReaderPipeline(context);
-            _reportReaderPage(reader.page);
+            _reportReaderPage(context, reader.page);
           }
         });
       } catch (e) {
@@ -154,7 +183,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _attachReaderPipeline(context);
-            _reportReaderPage(reader.page);
+            _reportReaderPage(context, reader.page);
           }
         });
         _refreshReaderPages(cp);
@@ -193,7 +222,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _attachReaderPipeline(context);
-            _reportReaderPage(reader.page);
+            _reportReaderPage(context, reader.page);
           }
         });
       }
@@ -246,7 +275,7 @@ class _ReaderImagesState extends State<_ReaderImages>
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
             _attachReaderPipeline(context);
-            _reportReaderPage(reader.page);
+            _reportReaderPage(context, reader.page);
           }
         });
       }
@@ -424,7 +453,7 @@ class _GalleryModeState extends State<_GalleryMode>
     Future.microtask(() {
       if (mounted) {
         _attachReaderPipeline(context);
-        _reportReaderPage(reader.page);
+        _reportReaderPage(context, reader.page);
       }
     });
     super.initState();
@@ -434,7 +463,6 @@ class _GalleryModeState extends State<_GalleryMode>
   void dispose() {
     _settlingTimer?.cancel();
     WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
-    PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
     super.dispose();
@@ -623,7 +651,7 @@ class _GalleryModeState extends State<_GalleryMode>
             }
           } else {
             reader.setPage(i);
-            _reportReaderPage(i);
+            _reportReaderPage(context, i);
             context.readerScaffold.update();
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
@@ -918,7 +946,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     Future.microtask(() {
       if (mounted) {
         _attachReaderPipeline(context);
-        _reportReaderPage(reader.page);
+        _reportReaderPage(context, reader.page);
       }
     });
     super.initState();
@@ -930,23 +958,31 @@ class _ContinuousModeState extends State<_ContinuousMode>
     _delayedScrollingTimer?.cancel();
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
     WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
-    PipelineController.instance.detachReaderSession();
     webpCache.dispose();
     _ComicImageState.clear();
     super.dispose();
   }
 
   void onPositionChanged() {
-    final page = _centerVisiblePage();
+    final page = _visiblePage(_touchViewportPosition);
     if (page == null) return;
     if (page != reader.page) {
       reader.setPage(page);
-      _reportReaderPage(page);
+      _reportReaderPage(context, page);
       context.readerScaffold.update();
     }
   }
 
-  int? _centerVisiblePage() {
+  double? _touchViewportPosition;
+
+  void _updateTouchViewportPosition(Offset position) {
+    _touchViewportPosition = reader.mode == ReaderMode.continuousTopToBottom
+        ? position.dy / reader.size.height
+        : position.dx / reader.size.width;
+    onPositionChanged();
+  }
+
+  int? _visiblePage(double? viewportPosition) {
     final positions = itemPositionsListener.itemPositions.value
         .where(
           (position) => position.index >= 1 && position.index <= reader.maxPage,
@@ -954,22 +990,20 @@ class _ContinuousModeState extends State<_ContinuousMode>
         .toList();
     if (positions.isEmpty) return null;
 
-    const viewportCenter = 0.5;
+    final target = viewportPosition ?? 0.5;
     positions.sort((a, b) {
-      final aContainsCenter =
-          a.itemLeadingEdge <= viewportCenter &&
-          a.itemTrailingEdge >= viewportCenter;
-      final bContainsCenter =
-          b.itemLeadingEdge <= viewportCenter &&
-          b.itemTrailingEdge >= viewportCenter;
-      if (aContainsCenter != bContainsCenter) {
-        return aContainsCenter ? -1 : 1;
+      final aContainsTarget =
+          a.itemLeadingEdge <= target && a.itemTrailingEdge >= target;
+      final bContainsTarget =
+          b.itemLeadingEdge <= target && b.itemTrailingEdge >= target;
+      if (aContainsTarget != bContainsTarget) {
+        return aContainsTarget ? -1 : 1;
       }
 
       final aCenter = (a.itemLeadingEdge + a.itemTrailingEdge) / 2;
       final bCenter = (b.itemLeadingEdge + b.itemTrailingEdge) / 2;
-      return (aCenter - viewportCenter).abs().compareTo(
-        (bCenter - viewportCenter).abs(),
+      return (aCenter - target).abs().compareTo(
+        (bCenter - target).abs(),
       );
     });
     return positions.first.index;
@@ -1093,6 +1127,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     widget = Listener(
       onPointerDown: (event) {
         fingers++;
+        _updateTouchViewportPosition(event.localPosition);
         if (fingers > 1 && !disableScroll) {
           setState(() {
             disableScroll = true;
@@ -1129,6 +1164,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
         if (event.scale == 1.0) smoothTo(0 - event.panDelta.dy);
       },
       onPointerMove: (event) {
+        _updateTouchViewportPosition(event.localPosition);
         Offset value = event.delta;
         if (photoViewController.scale == 1 || fingers != 1) return;
         Offset offset;
@@ -1434,6 +1470,7 @@ ImageProvider _createImageProvider(int page, BuildContext context) {
 }
 
 void _attachReaderPipeline(BuildContext context) {
+  if (!TickerMode.valuesOf(context).enabled) return;
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
@@ -1441,6 +1478,7 @@ void _attachReaderPipeline(BuildContext context) {
     context,
   );
   PipelineController.instance.attachReaderSession(ReaderPipelineSession(
+    owner: reader,
     images: images,
     cid: reader.cid,
     eid: reader.eid,
@@ -1452,8 +1490,8 @@ void _attachReaderPipeline(BuildContext context) {
   ));
 }
 
-void _reportReaderPage(int page) =>
-    PipelineController.instance.onReaderPageChanged(page - 1);
+void _reportReaderPage(BuildContext context, int page) =>
+    PipelineController.instance.onReaderPageChanged(context.reader, page - 1);
 
 class _SwipeChangeChapterProgress extends StatefulWidget {
   const _SwipeChangeChapterProgress({this.controller, required this.isPrev});
