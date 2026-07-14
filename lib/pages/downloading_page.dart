@@ -102,6 +102,7 @@ class _DownloadingPageState extends State<DownloadingPage> {
         return ListView.builder(
           itemCount: downloads.length,
           itemBuilder: (context, index) => _CacheDownloadTaskTile(
+            key: ValueKey(downloads[index].identity),
             download: downloads[index],
           ),
         );
@@ -185,7 +186,7 @@ class _DownloadTaskTile extends StatefulWidget {
 }
 
 class _CacheDownloadTaskTile extends StatelessWidget {
-  const _CacheDownloadTaskTile({required this.download});
+  const _CacheDownloadTaskTile({required this.download, super.key});
 
   final CacheDownloadProgress download;
 
@@ -227,7 +228,10 @@ class _CacheDownloadTaskTile extends StatelessWidget {
                       child: LinearProgressIndicator(value: download.progress),
                     ),
                     const SizedBox(width: 12),
-                    Text(status, style: ts.s12),
+                    Text(
+                      '${"Rank".tl} ${download.rank} · $status',
+                      style: ts.s12,
+                    ),
                   ],
                 ),
               ],

@@ -104,6 +104,59 @@ void main() {
     expect(lease.download.transport, DownloadTransportState.receiving);
     transport.release.complete();
     await transport.completed.future;
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(coordinator.downloads.find(downloadIdentity), isNull);
+    expect(lease.download.isDisposed, isTrue);
+    coordinator.dispose();
+  });
+
+  test('failed transport is evicted after demand is abandoned', () async {
+    final scheduler = TaskScheduler.instance;
+    scheduler.clear();
+    addTearDown(scheduler.clear);
+    final transport = _FailingTransport();
+    final coordinator = WebPSessionCoordinator(
+      scheduler: scheduler,
+      transportFactory: (_) => transport,
+      sourceFactory: (_, _) => _FakeSource(),
+      cursorFactory: (source, _, _) => _FakeCursor(source),
+    );
+    const downloadIdentity = DownloadIdentity(
+      imageKey: 'failed',
+      sourceKey: 'source',
+      cid: 'cid',
+      eid: 'eid',
+    );
+    final lease = coordinator.acquire(
+      downloadIdentity: downloadIdentity,
+      decodeIdentity: const WebPDecodeIdentity(
+        fullKey: 'failed@100x100',
+        targetWidth: 100,
+        targetHeight: 100,
+      ),
+      scopeId: 'reader',
+      demand: const WebPResourceDemand(
+        downloadPriority: 100,
+        decodePriority: 0,
+        allowDownload: true,
+        allowDecode: false,
+        allowUpload: false,
+        current: true,
+      ),
+    );
+    await transport.failed.future;
+    await Future<void>.delayed(Duration.zero);
+    expect(lease.download.transport, DownloadTransportState.failed);
+
+    lease.detach();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(coordinator.downloads.find(downloadIdentity), isNull);
+    expect(lease.download.isDisposed, isTrue);
     coordinator.dispose();
   });
 }
@@ -146,6 +199,21 @@ final class _BlockingTransport implements WebPTransport {
     session.seal();
     completed.complete();
     return file;
+  }
+}
+
+final class _FailingTransport implements WebPTransport {
+  final failed = Completer<void>();
+
+  @override
+  Future<File> execute(
+    DownloadSession session, {
+    CancelToken? cancelToken,
+    void Function(WebPTransportProgress progress)? onProgress,
+  }) async {
+    session.markReceiving();
+    failed.complete();
+    throw StateError('failed');
   }
 }
 

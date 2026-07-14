@@ -600,6 +600,7 @@ final class WebPDecodeSession {
       // terminal because neither length nor index can advance again.
       _decodeError = null;
     }
+    if (!shouldDecode && !shouldUpload) return;
     _schedulePublish();
     _scheduleReconcile();
   }

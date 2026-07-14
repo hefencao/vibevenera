@@ -52,6 +52,9 @@ final class WebPResourceLease {
 
   bool get attached => _attached;
 
+  void updateDownloadPriority(int priority) =>
+      _downloadLease?.updatePriority(priority);
+
   void update(WebPResourceDemand demand) {
     if (!_attached) throw StateError('WebP resource lease is detached');
     if (demand.allowDownload) {
@@ -269,10 +272,8 @@ final class WebPSessionCoordinator {
       // Retain an established transport: several sources do not support HTTP
       // range requests, so cancelling here would discard an unusable prefix
       // and force the next current page to download from zero.
-      if (session.transport != DownloadTransportState.receiving &&
-          session.transport != DownloadTransportState.sealed) {
-        scheduler.cancelInLane(SchedulerLane.network, key);
-      }
+      if (session.transport == DownloadTransportState.receiving) return;
+      _retireUndemandedDownload(session);
       return;
     }
 
@@ -397,6 +398,24 @@ final class WebPSessionCoordinator {
     decodes.evict(identity);
     _pendingDecodeEvictions.remove(identity);
     return true;
+  }
+
+  void _retireUndemandedDownload(DownloadSession download) {
+    _pendingDownloadEvictions.add(download.identity);
+    for (final session
+        in decodes.sessions
+            .where((session) => identical(session.download, download))
+            .toList()) {
+      _pendingDecodeEvictions.add(session.identity);
+      _drainDecodeEviction(session.identity);
+    }
+    for (final session
+        in _retiredDecodes
+            .where((session) => identical(session.download, download))
+            .toList()) {
+      _drainRetiredDecode(session);
+    }
+    _drainDownloadEviction(download.identity);
   }
 
   bool _drainRetiredDecode(WebPDecodeSession session) {

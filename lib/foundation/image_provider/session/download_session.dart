@@ -57,6 +57,7 @@ final class DownloadSessionSnapshot {
   final int committedLength;
   final bool fallbackContent;
   final bool failureRetryable;
+  final bool networkActive;
   final int failureCount;
   final File? artifactFile;
   final Object? error;
@@ -72,6 +73,7 @@ final class DownloadSessionSnapshot {
     this.committedLength = 0,
     this.fallbackContent = false,
     this.failureRetryable = false,
+    required this.networkActive,
     this.failureCount = 0,
     required this.artifactFile,
     required this.error,
@@ -137,6 +139,7 @@ final class DownloadSession {
   File? _artifactFile;
   bool _disposed = false;
   bool _publishScheduled = false;
+  Timer? _bytePublishTimer;
   bool _reconcileScheduled = false;
   int _nextDemandId = 0;
   int _transportRevision = 0;
@@ -144,6 +147,7 @@ final class DownloadSession {
   DownloadWriterLease? _activeWriter;
   int _expectedLength;
   bool _fallbackContent = false;
+  bool _networkActive = false;
   int _fallbackCommittedLength = 0;
   int _dependentDecodeSessions = 0;
 
@@ -205,6 +209,7 @@ final class DownloadSession {
     committedLength: committedLength,
     fallbackContent: _fallbackContent,
     failureRetryable: _failureRetryable,
+    networkActive: _networkActive,
     failureCount: _failureCount,
     artifactFile: _artifactFile,
     error: _error,
@@ -241,6 +246,7 @@ final class DownloadSession {
     _error = null;
     _failureRetryable = false;
     _artifactFile = null;
+    _networkActive = false;
     _setTransport(DownloadTransportState.receiving);
     return writer;
   }
@@ -266,10 +272,20 @@ final class DownloadSession {
     _checkActive();
     final writer = _activeWriter;
     if (writer != null) {
+      beginNetworkTransfer(writer);
       _setTransport(DownloadTransportState.receiving);
       return writer;
     }
-    return beginTransport();
+    final next = beginTransport();
+    beginNetworkTransfer(next);
+    return next;
+  }
+
+  void beginNetworkTransfer(DownloadWriterLease writer) {
+    _requireWriter(writer);
+    if (_networkActive) return;
+    _networkActive = true;
+    _schedulePublish();
   }
 
   void updateExpectedLength(
@@ -348,7 +364,7 @@ final class DownloadSession {
         error,
       );
     }
-    _schedulePublish();
+    _scheduleBytePublish();
   }
 
   DownloadWriterLease resetSource({
@@ -410,6 +426,7 @@ final class DownloadSession {
     _artifactFile = artifactFile;
     _failureRetryable = false;
     _failureCount = 0;
+    _networkActive = false;
     _activeWriterRevision = null;
     _activeWriter = null;
     activeWriter._detach();
@@ -460,7 +477,7 @@ final class DownloadSession {
       );
     }
     _fallbackCommittedLength += length;
-    _schedulePublish();
+    _scheduleBytePublish();
   }
 
   void sealFallback(
@@ -484,6 +501,7 @@ final class DownloadSession {
     _artifactFile = artifactFile;
     _failureRetryable = false;
     _failureCount = 0;
+    _networkActive = false;
     _activeWriterRevision = null;
     _activeWriter = null;
     writer._detach();
@@ -585,6 +603,8 @@ final class DownloadSession {
       );
     }
     _disposed = true;
+    _bytePublishTimer?.cancel();
+    _bytePublishTimer = null;
     source.dispose();
     _states.close();
   }
@@ -653,10 +673,24 @@ final class DownloadSession {
 
   void _schedulePublish() {
     if (_publishScheduled || _states.isClosed) return;
+    _bytePublishTimer?.cancel();
+    _bytePublishTimer = null;
     _publishScheduled = true;
     scheduleMicrotask(() {
       _publishScheduled = false;
       if (!_states.isClosed) _states.add(snapshot);
+    });
+  }
+
+  void _scheduleBytePublish() {
+    if (_publishScheduled || _bytePublishTimer != null || _states.isClosed) {
+      return;
+    }
+    // Raw response chunks may arrive much faster than Flutter frames. Native
+    // input remains lossless; only derived state notifications are coalesced.
+    _bytePublishTimer = Timer(const Duration(milliseconds: 16), () {
+      _bytePublishTimer = null;
+      _schedulePublish();
     });
   }
 

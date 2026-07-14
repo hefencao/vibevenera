@@ -125,17 +125,10 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
           ingress: ingress,
           artifact: artifact,
           cancelToken: cancelToken,
-          onProgress: onProgress,
         );
       }
 
       final resumeOffset = restored.length;
-      _publishProgress(
-        onProgress,
-        currentBytes: ingress.receivedLength,
-        session: session,
-      );
-
       iterator = StreamIterator<ImageDownloadProgress>(
         eventSource(
           resumeOffset: resumeOffset,
@@ -156,9 +149,10 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
             writer: activeWriter,
             artifact: artifact,
             cancelToken: cancelToken,
-            onProgress: onProgress,
           );
         }
+
+        session.beginNetworkTransfer(activeWriter);
 
         if (event.reset) {
           await artifact.reset();
@@ -234,12 +228,14 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
           );
         }
 
-        _publishProgress(
-          onProgress,
-          currentBytes: ingress.receivedLength,
-          reportedTotal: event.totalBytes,
-          session: session,
-        );
+        if (chunk == null) {
+          _publishProgress(
+            onProgress,
+            currentBytes: ingress.receivedLength,
+            reportedTotal: event.totalBytes,
+            session: session,
+          );
+        }
       }
 
       _throwIfCancelled(cancelToken);
@@ -279,7 +275,6 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     required _WebPIngress ingress,
     required WebPDownloadArtifact artifact,
     required CancelToken? cancelToken,
-    required void Function(WebPTransportProgress progress)? onProgress,
   }) async {
     var activeWriter = writer;
     var activeIngress = ingress;
@@ -308,13 +303,6 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       );
     }
 
-    _publishProgress(
-      onProgress,
-      currentBytes: activeIngress.receivedLength,
-      reportedTotal: localLength,
-      session: session,
-    );
-
     final reader = await localFile.open();
     try {
       // Keep the original file:// string untouched. File/IOOverrides resolves
@@ -340,12 +328,6 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         }
 
         await activeIngress.append(chunk);
-        _publishProgress(
-          onProgress,
-          currentBytes: activeIngress.receivedLength,
-          reportedTotal: localLength,
-          session: session,
-        );
       }
     } finally {
       await reader.close();
@@ -357,7 +339,7 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
       ingress: activeIngress,
       artifact: artifact,
       finalLength: localLength,
-      onProgress: onProgress,
+      onProgress: null,
     );
   }
 
@@ -367,7 +349,6 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
     required DownloadWriterLease writer,
     required WebPDownloadArtifact artifact,
     required CancelToken? cancelToken,
-    required void Function(WebPTransportProgress progress)? onProgress,
   }) async {
     final length = await file.length();
     if (length <= 0) {
@@ -412,23 +393,12 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
             writer: activeWriter,
           );
           offset += chunk.length;
-          _publishProgress(
-            onProgress,
-            currentBytes: offset,
-            reportedTotal: length,
-            session: session,
-          );
         }
         session.seal(activeWriter, file);
       }
     } finally {
       await reader.close();
     }
-    onProgress?.call(WebPTransportProgress(
-      currentBytes: length,
-      totalBytes: length,
-      done: true,
-    ));
     Log.info(
       'WebP.Cache',
       'reuse: image=${identity.imageKey} source=${identity.sourceKey} '

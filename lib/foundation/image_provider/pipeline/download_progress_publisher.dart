@@ -81,7 +81,7 @@ class DownloadProgressPublisher {
       return;
     }
 
-    final active = switch (snapshot.transport) {
+    final active = snapshot.networkActive && switch (snapshot.transport) {
       DownloadTransportState.queued ||
       DownloadTransportState.receiving ||
       DownloadTransportState.paused => true,

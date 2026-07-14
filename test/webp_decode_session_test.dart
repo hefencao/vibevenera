@@ -102,16 +102,51 @@ void main() {
     );
     final download = createDownload(source);
     final session = registry.getOrCreate(identity, download);
+    final demand = session.attach(
+      scopeId: 'reader',
+      priority: 10,
+      current: true,
+      decode: true,
+      upload: true,
+    );
     var states = 0;
     final subscription = session.states.listen((_) => states++);
 
     download.append(Uint8List(16), offset: 0);
-    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
     await Future<void>.delayed(Duration.zero);
 
     expect(session.snapshot.cursor.committedLength, 16);
     expect(states, greaterThanOrEqualTo(1));
     expect(reconciles, greaterThanOrEqualTo(1));
+    subscription.cancel();
+    demand.detach();
+    registry.evict(identity);
+  });
+
+  test('download-only commits do not reconcile decode work', () async {
+    final source = _FakeSource();
+    var reconciles = 0;
+    final registry = WebPDecodeSessionRegistry(
+      reconcile: (_) => reconciles++,
+      cursorFactory: (_, _, _) => _FakeCursor(source),
+    );
+    const identity = WebPDecodeIdentity(
+      fullKey: 'download-only@100x100',
+      targetWidth: 100,
+      targetHeight: 100,
+    );
+    final download = createDownload(source);
+    final session = registry.getOrCreate(identity, download);
+    var states = 0;
+    final subscription = session.states.listen((_) => states++);
+
+    download.append(Uint8List(16), offset: 0);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(states, 0);
+    expect(reconciles, 0);
     subscription.cancel();
     registry.evict(identity);
   });

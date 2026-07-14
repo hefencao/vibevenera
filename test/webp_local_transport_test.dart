@@ -111,6 +111,69 @@ void main() {
     expect(source.bytes, bytes);
     expect(session.transport, DownloadTransportState.sealed);
   });
+
+  test('complete cache hit does not publish download progress', () async {
+    final directory = await Directory.systemTemp.createTemp('webp-cache-');
+    addTearDown(() => directory.delete(recursive: true));
+    final input = File('${directory.path}/input.webp');
+    final partial = File('${directory.path}/partial');
+    final bytes = Uint8List.fromList([
+      0x52, 0x49, 0x46, 0x46,
+      0x04, 0x00, 0x00, 0x00,
+      0x57, 0x45, 0x42, 0x50,
+    ]);
+    await input.writeAsBytes(bytes);
+    final source = _FakeSource();
+    const identity = DownloadIdentity(
+      imageKey: 'https://example.invalid/cached.webp',
+      sourceKey: null,
+      cid: 'cid',
+      eid: 'eid',
+    );
+    final session = DownloadSession(
+      identity: identity,
+      source: source,
+      reconcile: (_) {},
+    );
+    session.beginTransport();
+    final networkStates = <bool>[];
+    final subscription = session.watch().listen(
+      (snapshot) => networkStates.add(snapshot.networkActive),
+    );
+    addTearDown(subscription.cancel);
+    final progress = <WebPTransportProgress>[];
+    final transport = ImageDownloaderWebPTransport(
+      identity,
+      artifactFactory: (_) => WebPDownloadArtifact(
+        partial,
+        promote: (source) async => source,
+      ),
+      eventSource: ({
+        required int resumeOffset,
+        required int? expectedLength,
+        cancelToken,
+      }) async* {
+        yield ImageDownloadProgress(
+          currentBytes: bytes.length,
+          totalBytes: bytes.length,
+          cachedFile: input,
+          done: true,
+        );
+      },
+    );
+
+    final result = await transport.execute(
+      session,
+      onProgress: progress.add,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(result.path, input.path);
+    expect(source.bytes, bytes);
+    expect(progress, isEmpty);
+    expect(networkStates, everyElement(isFalse));
+    expect(session.transport, DownloadTransportState.sealed);
+  });
 }
 
 final class _FileUriOverrides extends IOOverrides {

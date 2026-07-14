@@ -20,6 +20,7 @@ import 'download_ranker.dart';
 import 'pipeline_policy_applier.dart';
 import 'pipeline_window.dart';
 import 'preload_policy.dart';
+import 'reading_direction_predictor.dart';
 import 'resource_entry.dart';
 import 'resource_manager.dart';
 import 'task_scheduler.dart';
@@ -100,6 +101,8 @@ class PipelineController {
   int _currentIdx = 0;
   int _stableIdx = 0;
   int _readDirection = 1;
+  final ReadingDirectionPredictor _directionPredictor =
+      ReadingDirectionPredictor();
   bool _hasCurrentIdx = false;
   int _preloadCount = 5;
   int _currentBufferedFrames = 0;
@@ -174,6 +177,10 @@ class PipelineController {
     _preloadCount = session.preloadCount;
     if (contextChanged) {
       _hasCurrentIdx = false;
+      _directionPredictor.reset(
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      _readDirection = _directionPredictor.direction;
       _jumpProtectionTimer?.cancel();
       _provisionalIdx = null;
     }
@@ -194,6 +201,11 @@ class PipelineController {
       _provisionalIdx = null;
     }
     _currentIdx = currentIdx;
+    _readDirection = _directionPredictor.record(
+      0,
+      DateTime.now().millisecondsSinceEpoch,
+      directional: false,
+    );
     _scheduleDragCommit();
   }
 
@@ -276,6 +288,11 @@ class PipelineController {
       _hasCurrentIdx = true;
       _currentIdx = currentIdx;
       _stableIdx = currentIdx;
+      _readDirection = _directionPredictor.record(
+        0,
+        DateTime.now().millisecondsSinceEpoch,
+        directional: false,
+      );
       _provisionalIdx = null;
       _applyWindow();
       return;
@@ -285,6 +302,11 @@ class PipelineController {
     _currentIdx = currentIdx;
     final delta = currentIdx - previousIdx;
     final isJump = delta.abs() > _jumpProtectionDistance;
+    _readDirection = _directionPredictor.record(
+      delta,
+      DateTime.now().millisecondsSinceEpoch,
+      directional: !isJump && _interaction != InteractionState.jumping,
+    );
 
     _jumpProtectionTimer?.cancel();
     if (isJump) {
@@ -292,7 +314,6 @@ class PipelineController {
       _applyWindow(protectJump: true);
       _jumpProtectionTimer = Timer(_jumpProtectionWindow, () {
         if (_provisionalIdx != _currentIdx) return;
-        if (delta != 0) _readDirection = delta > 0 ? 1 : -1;
         _stableIdx = _currentIdx;
         _provisionalIdx = null;
         _applyWindow();
@@ -300,7 +321,6 @@ class PipelineController {
       return;
     }
 
-    if (delta != 0) _readDirection = delta > 0 ? 1 : -1;
     _stableIdx = currentIdx;
     _provisionalIdx = null;
     _applyWindow();
@@ -668,16 +688,25 @@ class PipelineController {
     DownloadIdentity identity,
     WebPTransportProgress progress,
   ) {
-    for (final entry in resources.getAllForImage(identity.imageKey)) {
-      if (entry.sourceKey != identity.sourceKey ||
-          entry.cid != identity.cid ||
-          entry.eid != identity.eid) {
-        continue;
+    resources.forEach((entry) {
+      if (_downloadIdentity(
+            entry.imageKey,
+            entry.sourceKey,
+            entry.cid,
+            entry.eid,
+          ) !=
+          identity) {
+        return;
       }
       entry.download.updateProgress(progress.currentBytes, progress.totalBytes);
       entry.download.inProgress = !progress.done;
       if (progress.done) entry.download.lastError = null;
-    }
+      if (!progress.done && entry.policy.allowDownload) {
+        _policyLeases[entry.fullKey]?.updateDownloadPriority(
+          _downloadRank(entry),
+        );
+      }
+    });
 
     // Old retained sessions may still finish after a chapter/source switch.
     // Publish only when the complete DownloadIdentity matches the page that is
@@ -731,6 +760,7 @@ class PipelineController {
       runningDownloads: _scheduler.runningDownloadCount,
       queuedDownloads: _scheduler.queuedDownloadCount,
       maxConcurrent: _scheduler.maxConcurrent,
+      readDirection: _readDirection,
       offsetFor: (key) => _offsetByKey[key] ?? _offsetFor(key),
     ).rank(entry, priority: priority);
   }
