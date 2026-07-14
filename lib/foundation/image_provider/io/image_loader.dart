@@ -58,7 +58,10 @@ Future<Uint8List?> _tryReadDiskCache(
 ) async {
   final cacheKey = imageCacheKey(imageKey, sourceKey, cid, eid);
   try {
-    final cacheFile = await CacheManager().findCache(cacheKey);
+    final cacheFile = await CacheManager().findCache(
+      cacheKey,
+      cacheClass: CacheClass.readerPage,
+    );
     if (cacheFile != null && await cacheFile.exists()) {
       return _readValidCacheFile(cacheKey, cacheFile);
     }

@@ -510,7 +510,10 @@ abstract class ImageDownloader {
   ]) async* {
     final cacheKey = "$url@$sourceKey${cid != null ? '@$cid' : ''}";
 
-    final cached = await CacheManager().findCache(cacheKey);
+    final cached = await CacheManager().findCache(
+      cacheKey,
+      cacheClass: CacheClass.thumbnail,
+    );
     if (cached != null) {
       final data = await cached.readAsBytes();
       yield ImageDownloadProgress(
@@ -538,7 +541,11 @@ abstract class ImageDownloader {
     }
 
     final config = ImageRequestConfig.fromMap(url, rawConfig);
-    yield* _executeDownload(config: config, cacheKey: cacheKey);
+    yield* _executeDownload(
+      config: config,
+      cacheKey: cacheKey,
+      cacheClass: CacheClass.thumbnail,
+    );
   }
 
   /// Load a comic image (deduplicated across concurrent calls).
@@ -651,6 +658,7 @@ abstract class ImageDownloader {
   ) async {
     final cached = await CacheManager().findCache(
       '$imageKey@$sourceKey@$cid@$eid',
+      cacheClass: CacheClass.readerPage,
     );
     if (cached == null) return null;
     final validation = await ImageDataValidator.validateFile(
@@ -684,6 +692,7 @@ abstract class ImageDownloader {
     // Cache hit → yield immediately
     final cached = await CacheManager().findCache(
       cacheKey,
+      cacheClass: CacheClass.readerPage,
       onLookup: isWebPSession ? (state) => cacheState = state : null,
     );
     if (isWebPSession) {
@@ -861,6 +870,7 @@ abstract class ImageDownloader {
   static Stream<ImageDownloadProgress> _executeDownload({
     required ImageRequestConfig config,
     required String cacheKey,
+    CacheClass cacheClass = CacheClass.readerPage,
     bool enableModifyImage = false,
     CancelToken? cancelToken,
     String? debugLabel,
@@ -992,6 +1002,7 @@ abstract class ImageDownloader {
       cacheKey: cacheKey,
       config: config,
       enableModifyImage: enableModifyImage,
+      cacheClass: cacheClass,
     );
   }
 
@@ -1324,6 +1335,7 @@ abstract class ImageDownloader {
     required String cacheKey,
     required ImageRequestConfig config,
     required bool enableModifyImage,
+    required CacheClass cacheClass,
   }) async* {
     var finalData = data;
 
@@ -1339,7 +1351,7 @@ abstract class ImageDownloader {
             : Uint8List.fromList(result);
         _validateCompleteImageBytes(transformed);
         config.onResponse!.free();
-        _writeCacheInBackground(cacheKey, transformed);
+        _writeCacheInBackground(cacheKey, transformed, cacheClass);
         await _PartialImageCache(cacheKey).clear();
         yield ImageDownloadProgress(
           currentBytes: transformed.length,
@@ -1360,7 +1372,7 @@ abstract class ImageDownloader {
     }
 
     _validateCompleteImageBytes(finalData);
-    _writeCacheInBackground(cacheKey, finalData);
+    _writeCacheInBackground(cacheKey, finalData, cacheClass);
     await _PartialImageCache(cacheKey).clear();
 
     // Yield final complete event with image bytes
@@ -1371,9 +1383,15 @@ abstract class ImageDownloader {
     );
   }
 
-  static void _writeCacheInBackground(String cacheKey, List<int> data) {
+  static void _writeCacheInBackground(
+    String cacheKey,
+    List<int> data,
+    CacheClass cacheClass,
+  ) {
     unawaited(
-      CacheManager().writeCache(cacheKey, data).catchError((e, s) {
+      CacheManager()
+          .writeCache(cacheKey, data, cacheClass: cacheClass)
+          .catchError((e, s) {
         Log.warning('ImageDownloader', 'Cache write failed: $cacheKey; $e');
       }),
     );
