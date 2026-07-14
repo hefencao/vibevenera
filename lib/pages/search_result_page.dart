@@ -3,6 +3,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/content_cache.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/pages/search_page.dart';
 import 'package:venera/utils/ext.dart';
@@ -144,7 +145,14 @@ class _SearchResultPageState extends State<SearchResultPage> {
 
   @override
   Widget build(BuildContext context) {
-    var source = ComicSource.find(sourceKey);
+    var source = ComicSource.find(sourceKey)!;
+    final cacheKey = ContentCache.searchKey(
+      sourceKey,
+      source.version,
+      text,
+      options,
+      source.searchPageData!.loadPage == null,
+    );
     return ComicList(
       key: Key(text + options.toString() + sourceKey),
       errorLeading: AppSearchBar(
@@ -156,7 +164,9 @@ class _SearchResultPageState extends State<SearchResultPage> {
         onChanged: onChanged,
         action: buildAction(),
       ),
-      loadPage: source!.searchPageData!.loadPage == null
+      persistentCacheKey: cacheKey,
+      persistentCacheKeyword: text,
+      loadPage: source.searchPageData!.loadPage == null
           ? null
           : (i) {
               return source.searchPageData!.loadPage!(

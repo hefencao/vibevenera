@@ -4,6 +4,8 @@ import "package:venera/components/components.dart";
 import "package:venera/foundation/app.dart";
 import "package:venera/foundation/appdata.dart";
 import "package:venera/foundation/comic_source/comic_source.dart";
+import "package:venera/foundation/content_cache.dart";
+import "package:venera/foundation/res.dart";
 import "package:venera/pages/search_result_page.dart";
 import "package:venera/utils/translations.dart";
 
@@ -104,32 +106,46 @@ class _SliverSearchResultState extends State<_SliverSearchResult>
     final data = widget.source.searchPageData!;
     var options =
         (data.searchOptions ?? []).map((e) => e.defaultValue).toList();
+    final cacheKey = ContentCache.searchKey(
+      widget.source.key,
+      widget.source.version,
+      widget.keyword,
+      options,
+      data.loadPage == null,
+    );
+    final cached = ContentCache.instance.findSearchPages(cacheKey).firstOrNull;
+    if (cached != null) {
+      comics = cached.comics;
+      isLoading = false;
+    }
+    late Res<List<Comic>> res;
     if (data.loadPage != null) {
-      var res = await data.loadPage!(widget.keyword, 1, options);
-      if (!res.error) {
-        setState(() {
-          comics = res.data;
-          isLoading = false;
-        });
-      } else {
-        setState(() {
-          error = res.errorMessage ?? "Unknown error".tl;
-          isLoading = false;
-        });
-      }
+      res = await data.loadPage!(widget.keyword, 1, options);
     } else if (data.loadNext != null) {
-      var res = await data.loadNext!(widget.keyword, null, options);
-      if (!res.error) {
-        setState(() {
-          comics = res.data;
-          isLoading = false;
-        });
-      } else {
-        setState(() {
-          error = res.errorMessage ?? "Unknown error".tl;
-          isLoading = false;
-        });
-      }
+      res = await data.loadNext!(widget.keyword, null, options);
+    } else {
+      return;
+    }
+    if (!mounted) return;
+    if (res.success) {
+      ContentCache.instance.cacheSearchPage(
+        cacheKey: cacheKey,
+        keyword: widget.keyword,
+        page: 1,
+        inputCursor: null,
+        subData: res.subData,
+        comics: res.data,
+      );
+      setState(() {
+        comics = res.data;
+        error = null;
+        isLoading = false;
+      });
+    } else if (comics == null) {
+      setState(() {
+        error = res.errorMessage ?? "Unknown error".tl;
+        isLoading = false;
+      });
     }
   }
 

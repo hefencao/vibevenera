@@ -12,6 +12,7 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
+import 'package:venera/foundation/content_cache.dart';
 import 'package:venera/foundation/comic_type.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
@@ -94,6 +95,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
   bool showFAB = false;
 
   bool initialComicInfoConsumed = false;
+  Future<Res<ComicDetails>>? _detailsRefresh;
 
   @override
   void onReadEnd() {
@@ -278,9 +280,22 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
     } else {
       request = comicSource.loadComicInfo!(widget.id);
     }
+    final cached = ContentCache.instance.findComicDetails(
+      widget.sourceKey,
+      comicSource.version,
+      widget.id,
+    );
+    if (cached != null) {
+      _detailsRefresh = request;
+      Log.info('ComicPage.Load', 'details cache hit id=${widget.id}');
+      return Res(cached.data);
+    }
     final result = await request;
     Log.info('ComicPage.Load',
         'comic info ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
+    if (result.success) {
+      ContentCache.instance.cacheComicDetails(result.data, comicSource.version);
+    }
     return result;
   }
 
@@ -307,6 +322,21 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
       unawaited(_loadCurrentVersionAssets());
     }
     _warmCacheReuse(newVersions);
+    if (_detailsRefresh != null) unawaited(_applyDetailsRefresh());
+  }
+
+  Future<void> _applyDetailsRefresh() async {
+    final stopwatch = Stopwatch()..start();
+    final result = await _detailsRefresh!;
+    Log.info('ComicPage.Load',
+        'details refresh ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
+    if (result.error) return;
+    ContentCache.instance.cacheComicDetails(result.data, comicSource.version);
+    if (!mounted) return;
+    data = result.data;
+    if (!isLiking) isLiked = result.data.isLiked ?? isLiked;
+    isFavorite = result.data.isFavorite ?? isFavorite;
+    setState(() {});
   }
 
   Future<void> _loadFavoriteFolders() async {

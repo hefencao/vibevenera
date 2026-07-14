@@ -37,6 +37,18 @@ class Comment {
         score = json["score"],
         isLiked = json["isLiked"],
         voteStatus = json["voteStatus"];
+
+  Map<String, dynamic> toJson() => {
+        'userName': userName,
+        'avatar': avatar,
+        'content': content,
+        'time': time,
+        'replyCount': replyCount,
+        'id': id,
+        'score': score,
+        'isLiked': isLiked,
+        'voteStatus': voteStatus,
+      };
 }
 
 class Comic {
@@ -88,6 +100,7 @@ class Comic {
       "maxPage": maxPage,
       "language": language,
       "favoriteId": favoriteId,
+      "stars": stars,
     };
   }
 
@@ -114,6 +127,13 @@ class Comic {
 
   @override
   toString() => "$sourceKey@$id";
+}
+
+extension ComicCacheSerialization on Comic {
+  Map<String, dynamic> toCacheJson() => {
+        ...toJson(),
+        'favoriteId': null,
+      };
 }
 
 class ComicID {
@@ -247,6 +267,25 @@ class ComicDetails with HistoryMixin {
       "url": url,
     };
   }
+
+  Map<String, dynamic> toCacheJson() => {
+        ...toJson(),
+        'subtitle': subTitle,
+        'chapters': chapters?.toJson(),
+        'recommend': recommend?.map((comic) => comic.toCacheJson()).toList(),
+        'isFavorite': null,
+        'isLiked': null,
+        'commentCount': commentCount,
+        'stars': stars,
+        'maxPage': maxPage,
+        'comments': comments
+            ?.map((comment) => {
+                  ...comment.toJson(),
+                  'isLiked': null,
+                  'voteStatus': null,
+                })
+            .toList(),
+      };
 
   @override
   HistoryType get historyType => HistoryType(sourceKey.hashCode);

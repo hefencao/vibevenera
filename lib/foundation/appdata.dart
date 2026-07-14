@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
+import 'package:venera/foundation/content_cache.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -57,18 +58,20 @@ class Appdata with Init {
     }
     searchHistory.insert(0, keyword);
     if (searchHistory.length > 50) {
-      searchHistory.removeLast();
+      ContentCache.instance.removeSearchKeyword(searchHistory.removeLast());
     }
     saveData();
   }
 
   void removeSearchHistory(String keyword) {
     searchHistory.remove(keyword);
+    ContentCache.instance.removeSearchKeyword(keyword);
     saveData();
   }
 
   void clearSearchHistory() {
     searchHistory.clear();
+    ContentCache.instance.clearSearch();
     saveData();
   }
 

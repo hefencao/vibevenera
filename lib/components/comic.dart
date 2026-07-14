@@ -945,6 +945,8 @@ class ComicList extends StatefulWidget {
     this.controller,
     this.refreshHandlerCallback,
     this.enablePageStorage = false,
+    this.persistentCacheKey,
+    this.persistentCacheKeyword,
   });
 
   final Future<Res<List<Comic>>> Function(int page)? loadPage;
@@ -965,6 +967,10 @@ class ComicList extends StatefulWidget {
 
   final bool enablePageStorage;
 
+  final String? persistentCacheKey;
+
+  final String? persistentCacheKeyword;
+
   @override
   State<ComicList> createState() => ComicListState();
 }
@@ -980,9 +986,45 @@ class ComicListState extends State<ComicList> {
 
   final Map<int, bool> _loading = {};
 
+  final Map<int, CachedSearchPage> _cachedPages = {};
+
+  final Set<int> _revalidatedPages = {};
+
   String? _nextUrl;
 
   late bool enablePageStorage = widget.enablePageStorage;
+
+  @override
+  void initState() {
+    _restorePersistentCache();
+    if (_data.isNotEmpty) Future.microtask(_revalidateCachedPages);
+    super.initState();
+  }
+
+  Future<void> _revalidateCachedPages() async {
+    for (final page in _cachedPages.keys) {
+      await _loadPage(page);
+    }
+  }
+
+  void _restorePersistentCache() {
+    final key = widget.persistentCacheKey;
+    if (key == null) return;
+    final pages = ContentCache.instance.findSearchPages(key);
+    var expectedPage = 1;
+    for (final page in pages) {
+      if (page.page != expectedPage) break;
+      _cachedPages[page.page] = page;
+      _data[page.page] = page.comics;
+      if (widget.loadPage != null && page.subData is int) {
+        _maxPage = page.subData;
+      } else if (widget.loadNext != null) {
+        _nextUrl = page.subData as String?;
+        if (page.subData == null) _maxPage = page.page;
+      }
+      expectedPage++;
+    }
+  }
 
   Map<String, dynamic> get state => {
         'maxPage': _maxPage,
@@ -1003,6 +1045,8 @@ class ComicListState extends State<ComicList> {
     _page = state['page'];
     _error = state['error'];
     _loading.clear();
+    _cachedPages.clear();
+    _revalidatedPages.clear();
     _loading.addAll(state['loading']);
     _nextUrl = state['nextUrl'];
   }
@@ -1146,7 +1190,10 @@ class ComicListState extends State<ComicList> {
         setState(() {});
       });
     }
-    if (_data[page] != null || _loading[page] == true) {
+    if (_loading[page] == true ||
+        (_data[page] != null &&
+            (widget.persistentCacheKey == null ||
+                _revalidatedPages.contains(page)))) {
       return;
     }
     _loading[page] = true;
@@ -1155,10 +1202,12 @@ class ComicListState extends State<ComicList> {
         var res = await widget.loadPage!(page);
         if (!mounted) return;
         if (res.success) {
+          _cacheSearchPage(page, null, res);
+          _revalidatedPages.add(page);
           if (res.data.isEmpty) {
             setState(() {
               _data[page] = const [];
-              _maxPage ??= page;
+              _maxPage = res.subData is int ? res.subData : page;
             });
           } else {
             setState(() {
@@ -1168,21 +1217,32 @@ class ComicListState extends State<ComicList> {
               }
             });
           }
-        } else {
+        } else if (_data[page] == null) {
           setState(() {
             _error = res.errorMessage ?? "Unknown error".tl;
           });
         }
       } else {
         try {
-          while (_data[page] == null) {
-            await _fetchNext();
+          final cached = _cachedPages[page];
+          if (cached != null) {
+            final res = await widget.loadNext!(cached.inputCursor);
+            if (res.error) throw Exception(res.errorMessage);
+            _data[page] = res.data;
+            if (page == _data.length) {
+              _nextUrl = res.subData as String?;
+              if (res.subData == null) _maxPage = page;
+            }
+            _cacheSearchPage(page, cached.inputCursor, res);
+            _revalidatedPages.add(page);
+          } else {
+            while (_data[page] == null) {
+              await _fetchNext();
+            }
           }
-          if (mounted) {
-            setState(() {});
-          }
+          if (mounted) setState(() {});
         } catch (e) {
-          if (mounted) {
+          if (mounted && _data[page] == null) {
             setState(() {
               _error = e.toString();
             });
@@ -1196,13 +1256,35 @@ class ComicListState extends State<ComicList> {
   }
 
   Future<void> _fetchNext() async {
-    var res = await widget.loadNext!(_nextUrl);
-    _data[_data.length + 1] = res.data;
+    final inputCursor = _nextUrl;
+    var res = await widget.loadNext!(inputCursor);
+    if (res.error) throw Exception(res.errorMessage);
+    final page = _data.length + 1;
+    _data[page] = res.data;
+    _cacheSearchPage(page, inputCursor, res);
+    _revalidatedPages.add(page);
     if (res.subData == null) {
       _maxPage = _data.length;
     } else {
       _nextUrl = res.subData;
     }
+  }
+
+  void _cacheSearchPage(
+    int page,
+    String? inputCursor,
+    Res<List<Comic>> result,
+  ) {
+    final key = widget.persistentCacheKey;
+    if (key == null) return;
+    ContentCache.instance.cacheSearchPage(
+      cacheKey: key,
+      keyword: widget.persistentCacheKeyword!,
+      page: page,
+      inputCursor: inputCursor,
+      subData: result.subData,
+      comics: result.data,
+    );
   }
 
   @override
@@ -1244,6 +1326,7 @@ class ComicListState extends State<ComicList> {
         ],
       );
     }
+    if (!_revalidatedPages.contains(_page)) _loadPage(_page);
     return SmoothCustomScrollView(
       key: enablePageStorage ? PageStorageKey('scroll$_page') : null,
       controller: widget.controller,

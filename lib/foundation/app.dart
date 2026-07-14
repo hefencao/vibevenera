@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:venera/foundation/history.dart';
 
 import 'appdata.dart';
+import 'content_cache.dart';
 import 'favorites.dart';
 import 'local.dart';
 
@@ -71,6 +72,8 @@ class _App {
 
   final HistoryManager history = HistoryManager();
 
+  final ContentCache contentCache = ContentCache.instance;
+
   final LocalFavoritesManager favorites = LocalFavoritesManager();
 
   final LocalManager local = LocalManager();
@@ -99,6 +102,7 @@ class _App {
   Future<void> initComponents() async {
     await Future.wait([
       data.init(),
+      contentCache.init(dataPath),
       history.init(),
       favorites.init(),
       local.init(),

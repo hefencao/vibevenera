@@ -104,7 +104,9 @@ class _AppSettingsState extends State<AppSettings> {
         ).toSliver(),
         ListTile(
           title: Text("Cache Size".tl),
-          subtitle: Text(bytesToReadableString(CacheManager().currentSize)),
+          subtitle: Text(bytesToReadableString(
+            CacheManager().currentSize + ContentCache.instance.currentSize,
+          )),
         ).toSliver(),
         _CallbackSetting(
           title: "Clear Cache".tl,
@@ -116,6 +118,7 @@ class _AppSettingsState extends State<AppSettings> {
               allowCancel: false,
             );
             await CacheManager().clear();
+            ContentCache.instance.clear();
             loadingDialog.close();
             context.showMessage(message: "Cache cleared".tl);
             setState(() {});
