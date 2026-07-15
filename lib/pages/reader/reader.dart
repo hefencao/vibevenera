@@ -23,6 +23,9 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/comic_translation/models.dart';
+import 'package:venera/foundation/comic_translation/policy.dart';
+import 'package:venera/foundation/comic_translation/session.dart';
 import 'package:venera/foundation/consts.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/global_state.dart';
@@ -66,6 +69,8 @@ part 'image_support.dart';
 part 'gesture.dart';
 
 part 'comic_image.dart';
+
+part 'translation_overlay.dart';
 
 part 'loading.dart';
 
@@ -211,6 +216,9 @@ class _ReaderState extends State<Reader>
   AdaptiveComicClassifier? _adaptiveClassifier;
   AdaptiveComicProfile? _pendingAdaptiveProfile;
   bool _adaptiveProfileSaveScheduled = false;
+  late ComicTranslationSession translationSession;
+  ComicTranslationInteraction _translationInteraction =
+      ComicTranslationInteraction.idle;
 
   @override
   bool isLoading = false;
@@ -282,6 +290,8 @@ class _ReaderState extends State<Reader>
         AnimatedImageRegistry.revision.addListener(_observeKnownAnimations);
       }
     }
+    translationSession = _createTranslationSession();
+    AnimatedImageRegistry.revision.addListener(_onTranslationAnimationLearned);
     // mode = ReaderMode.fromKey(appdata.settings['readerMode']);
     mode = ReaderMode.fromKey(
       appdata.settings.getReaderSetting(cid, type.sourceKey, 'readerMode'),
@@ -485,6 +495,10 @@ class _ReaderState extends State<Reader>
   @override
   void dispose() {
     _stopAdaptiveClassification();
+    AnimatedImageRegistry.revision.removeListener(
+      _onTranslationAnimationLearned,
+    );
+    translationSession.dispose();
     if (isFullscreen) {
       fullscreen();
     }
@@ -497,6 +511,113 @@ class _ReaderState extends State<Reader>
     PaintingBinding.instance.imageCache.maximumSizeBytes = 100 << 20;
     disposeReaderWindow();
     super.dispose();
+  }
+
+  void _onTranslationAnimationLearned() {
+    if (images != null && translationSession.enabled) {
+      reportTranslationPage(page);
+    }
+  }
+
+  ComicTranslationSession _createTranslationSession() {
+    final targetSetting = appdata.settings.getReaderSetting(
+      cid,
+      type.sourceKey,
+      'comicTranslationTargetLanguage',
+    ) as String;
+    final locale = App.locale;
+    final targetLanguage = targetSetting == 'system'
+        ? [locale.languageCode, locale.countryCode]
+            .whereType<String>()
+            .join('-')
+        : targetSetting;
+    return ComicTranslationSession(
+      enabled: appdata.settings.getReaderSetting(
+        cid,
+        type.sourceKey,
+        'enableComicTranslation',
+      ) as bool,
+      sourceLanguage: appdata.settings.getReaderSetting(
+        cid,
+        type.sourceKey,
+        'comicTranslationSourceLanguage',
+      ) as String,
+      targetLanguage: targetLanguage,
+      policy: ComicTranslationPolicy(
+        contextPages: appdata.settings.getReaderSetting(
+          cid,
+          type.sourceKey,
+          'comicTranslationContextPages',
+        ) as int,
+      ),
+    );
+  }
+
+  ComicTranslationPageIdentity translationIdentity(int pageIndex) {
+    final imageKey = images![pageIndex];
+    final animatedKey = AnimatedImageRegistry.key(
+      imageKey: imageKey,
+      sourceKey: type.comicSource?.key,
+      cid: cid,
+      eid: eid,
+    );
+    return ComicTranslationPageIdentity(
+      imageKey: imageKey,
+      sourceKey: type.sourceKey,
+      comicId: cid,
+      chapterId: eid,
+      pageIndex: pageIndex,
+      mediaKind: AnimatedImageRegistry.contains(animatedKey)
+          ? ComicTranslationMediaKind.animatedImage
+          : ComicTranslationMediaKind.staticImage,
+    );
+  }
+
+  List<ComicTranslationPageIdentity> _translationImagesForPage(
+    int logicalPage,
+  ) {
+    final pages = images;
+    if (pages == null || pages.isEmpty || logicalPage < 1) return const [];
+    int start, end;
+    if (mode.isContinuous) {
+      start = logicalPage - 1;
+      end = start + 1;
+    } else if (showSingleImageOnFirstPage()) {
+      if (logicalPage == 1) {
+        start = 0;
+        end = 1;
+      } else {
+        start = (logicalPage - 2) * imagesPerPage + 1;
+        end = math.min(start + imagesPerPage, pages.length);
+      }
+    } else {
+      start = (logicalPage - 1) * imagesPerPage;
+      end = math.min(start + imagesPerPage, pages.length);
+    }
+    if (start < 0 || start >= pages.length) return const [];
+    return [for (var i = start; i < end; i++) translationIdentity(i)];
+  }
+
+  void reportTranslationPage(int logicalPage) {
+    final current = _translationImagesForPage(logicalPage);
+    final next = _translationImagesForPage(logicalPage + 1);
+    translationSession.reportPages(
+      current: current,
+      near: next,
+      interaction: _translationInteraction,
+    );
+  }
+
+  void setTranslationInteraction(ComicTranslationInteraction interaction) {
+    _translationInteraction = interaction;
+    translationSession.setInteraction(interaction);
+  }
+
+  void syncTranslationSettings() {
+    translationSession.dispose();
+    translationSession = _createTranslationSession();
+    reportTranslationPage(page);
+    update();
   }
 
   @override

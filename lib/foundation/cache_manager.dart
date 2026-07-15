@@ -25,6 +25,10 @@ final class CacheAliasTarget {
 class CacheManager {
   static String get cachePath => '${App.cachePath}/cache';
 
+  static final StreamController<String> _changes =
+      StreamController<String>.broadcast(sync: true);
+  static Stream<String> get changes => _changes.stream;
+
   static CacheManager? instance;
 
   late Database _db;
@@ -318,6 +322,7 @@ class CacheManager {
           if (_currentSize != null) {
             _currentSize = _currentSize! + data.length - removed;
           }
+          _changes.add(key);
           checkCacheIfRequired();
         } catch (_) {
           if (await temp.exists()) await temp.delete();
@@ -349,6 +354,7 @@ class CacheManager {
         _aliases.remove(key);
         Log.info('Cache.Trace', 'promote: key=$key path=${promoted.path} size=$size');
         if (_currentSize != null) _currentSize = _currentSize! + size - removed;
+        _changes.add(key);
         checkCacheIfRequired();
         return promoted;
       });
@@ -450,6 +456,7 @@ class CacheManager {
     final newRows = _db.select('SELECT key FROM cache WHERE key = ?;', [newKey]);
     if (newRows.isNotEmpty) return true;
     _db.execute('UPDATE cache SET key = ? WHERE key = ?;', [newKey, oldKey]);
+    _changes.add(newKey);
     return true;
   }
 

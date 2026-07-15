@@ -98,5 +98,8 @@ void _attachReaderPipeline(BuildContext context) {
   ));
 }
 
-void _reportReaderPage(BuildContext context, int page) =>
-    PipelineController.instance.onReaderPageChanged(context.reader, page - 1);
+void _reportReaderPage(BuildContext context, int page) {
+  final reader = context.reader;
+  PipelineController.instance.onReaderPageChanged(reader, page - 1);
+  reader.reportTranslationPage(page);
+}

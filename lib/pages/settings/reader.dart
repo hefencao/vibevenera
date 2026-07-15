@@ -212,6 +212,80 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           const Divider().toSliver(),
         ],
         _SwitchSetting(
+          title: 'Comic translation'.tl,
+          subtitle: 'Recognize and translate text without replacing source images'.tl,
+          settingKey: 'enableComicTranslation',
+          onChanged: () {
+            setState(() {});
+            widget.onChanged?.call('comicTranslation');
+          },
+          comicId: widget.comicId,
+          comicSource: widget.comicSource,
+          useDeviceSettings: useDeviceSpecificSettings,
+        ).toSliver(),
+        SliverAnimatedVisibility(
+          visible: _settingValue('enableComicTranslation') == true,
+          child: SelectSetting(
+            title: 'Source language'.tl,
+            settingKey: 'comicTranslationSourceLanguage',
+            optionTranslation: {
+              'auto': 'Automatic'.tl,
+              'ja': 'Japanese'.tl,
+              'ko': 'Korean'.tl,
+              'zh': 'Chinese'.tl,
+              'en': 'English'.tl,
+            },
+            onChanged: () => widget.onChanged?.call('comicTranslation'),
+            comicId: widget.comicId,
+            comicSource: widget.comicSource,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
+        SliverAnimatedVisibility(
+          visible: _settingValue('enableComicTranslation') == true,
+          child: SelectSetting(
+            title: 'Target language'.tl,
+            settingKey: 'comicTranslationTargetLanguage',
+            optionTranslation: {
+              'system': 'Follow system'.tl,
+              'zh-CN': 'Simplified Chinese'.tl,
+              'zh-TW': 'Traditional Chinese'.tl,
+              'en-US': 'English'.tl,
+              'ja-JP': 'Japanese'.tl,
+              'ko-KR': 'Korean'.tl,
+            },
+            onChanged: () => widget.onChanged?.call('comicTranslation'),
+            comicId: widget.comicId,
+            comicSource: widget.comicSource,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
+        SliverAnimatedVisibility(
+          visible: _settingValue('enableComicTranslation') == true,
+          child: _SliderSetting(
+            title: 'Translation context pages'.tl,
+            settingsIndex: 'comicTranslationContextPages',
+            interval: 1,
+            min: 0,
+            max: 4,
+            onChanged: () => widget.onChanged?.call('comicTranslation'),
+            comicId: widget.comicId,
+            comicSource: widget.comicSource,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
+        const Divider().toSliver(),
+        if (widget.comicId == null)
+          ListTile(
+            leading: const Icon(Icons.translate),
+            title: Text('Translation models and API'.tl),
+            subtitle: Text('Configure OCR models, remote LLM and benchmark'.tl),
+            trailing: const Icon(Icons.arrow_right),
+            onTap: () => context.to(
+              () => const ComicTranslationBackendPage(),
+            ),
+          ).toSliver(),
+        _SwitchSetting(
           title: "Tap to turn Pages".tl,
           settingKey: "enableTapToTurnPages",
           onChanged: () {

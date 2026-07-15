@@ -228,23 +228,26 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
         return ColoredBox(
           color: context.colorScheme.surface,
-          child: ComicImage(
-            filterQuality: FilterQuality.low,
-            image: _createImageProvider(index, context),
-            width: width,
-            height: height,
-            fit: BoxFit.contain,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-            onImageInfo: (w, h) => reader.observeAdaptivePage(
-              reader.images![index - 1],
-              index - 1,
-              w,
-              h,
+          child: _ReaderTranslationLayer(
+            pageIndex: index - 1,
+            child: ComicImage(
+              filterQuality: FilterQuality.low,
+              image: _createImageProvider(index, context),
+              width: width,
+              height: height,
+              fit: BoxFit.contain,
+              onInit: (state) => imageStates.add(state),
+              onDispose: (state) => imageStates.remove(state),
+              onImageInfo: (w, h) => reader.observeAdaptivePage(
+                reader.images![index - 1],
+                index - 1,
+                w,
+                h,
+              ),
+              errorBuilder: (errorContext, error, s, retry) {
+                return _buildReaderImageError(errorContext, error, s, retry);
+              },
             ),
-            errorBuilder: (errorContext, error, s, retry) {
-              return _buildReaderImageError(errorContext, error, s, retry);
-            },
           ),
         );
       },
@@ -327,9 +330,13 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onNotification: (notification) {
         if (notification is ScrollStartNotification) {
           delayedSetIsScrolling(true);
+          reader.setTranslationInteraction(
+            ComicTranslationInteraction.scrolling,
+          );
           StreamingImageProvider.setInteractionState(InteractionState.scroll);
         } else if (notification is ScrollEndNotification) {
           delayedSetIsScrolling(false);
+          reader.setTranslationInteraction(ComicTranslationInteraction.idle);
           StreamingImageProvider.setInteractionState(InteractionState.idle);
         }
 

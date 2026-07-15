@@ -252,6 +252,13 @@ class Settings with ChangeNotifier {
     'adaptiveComicType': false,
     'adaptiveComicProfiles': <String, Map<String, dynamic>>{},
     'adaptiveComicOverrides': <String, bool>{},
+    'enableComicTranslation': false,
+    'comicTranslationSourceLanguage': 'auto',
+    'comicTranslationTargetLanguage': 'system',
+    'comicTranslationContextPages': 2,
+    'comicTranslationBackend': 'none',
+    'comicTranslationRemoteEndpoint': 'https://api.openai.com/v1/chat/completions',
+    'comicTranslationRemoteModel': '',
   };
 
   operator [](String key) {

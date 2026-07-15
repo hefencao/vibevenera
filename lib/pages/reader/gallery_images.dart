@@ -228,6 +228,11 @@ class _GalleryModeState extends State<_GalleryMode>
         if (notification.depth != 0) return false;
         if (notification is ScrollStartNotification) {
           _beginViewportTransition(notification.metrics);
+          reader.setTranslationInteraction(
+            notification.dragDetails == null
+                ? ComicTranslationInteraction.settling
+                : ComicTranslationInteraction.dragging,
+          );
           StreamingImageProvider.setInteractionState(
             notification.dragDetails == null
                 ? InteractionState.settling
@@ -237,6 +242,7 @@ class _GalleryModeState extends State<_GalleryMode>
           _updateViewportTransition(notification.metrics);
         } else if (notification is ScrollEndNotification) {
           _finishViewportTransition();
+          reader.setTranslationInteraction(ComicTranslationInteraction.idle);
         }
         return false;
       },
@@ -294,34 +300,42 @@ class _GalleryModeState extends State<_GalleryMode>
               return PhotoViewGalleryPageOptions.customChild(
                 childSize: cachedSize,
                 controller: photoViewControllers[index],
-                child: ComicImage(
-                  image: imageProvider,
-                  fit: BoxFit.contain,
-                  filterQuality: FilterQuality.low,
-                  onInit: (state) => imageStates.add(state),
-                  onDispose: (state) => imageStates.remove(state),
-                  onImageInfo: (w, h) {
-                    reader.observeAdaptivePage(
-                      pageImages[0],
-                      startIndex,
-                      w,
-                      h,
-                    );
-                    final newSize = Size(w.toDouble(), h.toDouble());
-                    final old = _ComicImageState._getCache(
-                      imageProvider.hashCode,
-                    );
-                    if (old != newSize) {
-                      _ComicImageState._putCache(
-                        imageProvider.hashCode,
-                        newSize,
+                child: _ReaderTranslationLayer(
+                  pageIndex: startIndex,
+                  child: ComicImage(
+                    image: imageProvider,
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.low,
+                    onInit: (state) => imageStates.add(state),
+                    onDispose: (state) => imageStates.remove(state),
+                    onImageInfo: (w, h) {
+                      reader.observeAdaptivePage(
+                        pageImages[0],
+                        startIndex,
+                        w,
+                        h,
                       );
-                      _requestGalleryRebuild();
-                    }
-                  },
-                  errorBuilder: (errorContext, error, s, retry) {
-                    return _buildReaderImageError(errorContext, error, s, retry);
-                  },
+                      final newSize = Size(w.toDouble(), h.toDouble());
+                      final old = _ComicImageState._getCache(
+                        imageProvider.hashCode,
+                      );
+                      if (old != newSize) {
+                        _ComicImageState._putCache(
+                          imageProvider.hashCode,
+                          newSize,
+                        );
+                        _requestGalleryRebuild();
+                      }
+                    },
+                    errorBuilder: (errorContext, error, s, retry) {
+                      return _buildReaderImageError(
+                        errorContext,
+                        error,
+                        s,
+                        retry,
+                      );
+                    },
+                  ),
                 ),
               );
             }
@@ -402,47 +416,59 @@ class _GalleryModeState extends State<_GalleryMode>
     if (images.length == 2) {
       imageWidgets = [
         Expanded(
-          child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
-            image: _createImageProviderFromKey(images[0], context),
-            fit: BoxFit.contain,
+          child: _ReaderTranslationLayer(
+            pageIndex: reader.images!.indexOf(images[0]),
             alignment: axis == Axis.vertical
                 ? Alignment.bottomCenter
                 : Alignment.centerRight,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-            onImageInfo: (w, h) => reader.observeAdaptivePage(
-              images[0],
-              reader.images!.indexOf(images[0]),
-              w,
-              h,
+            child: ComicImage(
+              width: double.infinity,
+              height: double.infinity,
+              image: _createImageProviderFromKey(images[0], context),
+              fit: BoxFit.contain,
+              alignment: axis == Axis.vertical
+                  ? Alignment.bottomCenter
+                  : Alignment.centerRight,
+              onInit: (state) => imageStates.add(state),
+              onDispose: (state) => imageStates.remove(state),
+              onImageInfo: (w, h) => reader.observeAdaptivePage(
+                images[0],
+                reader.images!.indexOf(images[0]),
+                w,
+                h,
+              ),
+              errorBuilder: (errorContext, error, s, retry) {
+                return _buildReaderImageError(errorContext, error, s, retry);
+              },
             ),
-            errorBuilder: (errorContext, error, s, retry) {
-              return _buildReaderImageError(errorContext, error, s, retry);
-            },
           ),
         ),
         Expanded(
-          child: ComicImage(
-            width: double.infinity,
-            height: double.infinity,
-            image: _createImageProviderFromKey(images[1], context),
-            fit: BoxFit.contain,
+          child: _ReaderTranslationLayer(
+            pageIndex: reader.images!.indexOf(images[1]),
             alignment: axis == Axis.vertical
                 ? Alignment.topCenter
                 : Alignment.centerLeft,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-            onImageInfo: (w, h) => reader.observeAdaptivePage(
-              images[1],
-              reader.images!.indexOf(images[1]),
-              w,
-              h,
+            child: ComicImage(
+              width: double.infinity,
+              height: double.infinity,
+              image: _createImageProviderFromKey(images[1], context),
+              fit: BoxFit.contain,
+              alignment: axis == Axis.vertical
+                  ? Alignment.topCenter
+                  : Alignment.centerLeft,
+              onInit: (state) => imageStates.add(state),
+              onDispose: (state) => imageStates.remove(state),
+              onImageInfo: (w, h) => reader.observeAdaptivePage(
+                images[1],
+                reader.images!.indexOf(images[1]),
+                w,
+                h,
+              ),
+              errorBuilder: (errorContext, error, s, retry) {
+                return _buildReaderImageError(errorContext, error, s, retry);
+              },
             ),
-            errorBuilder: (errorContext, error, s, retry) {
-              return _buildReaderImageError(errorContext, error, s, retry);
-            },
           ),
         ),
       ];
@@ -450,20 +476,23 @@ class _GalleryModeState extends State<_GalleryMode>
       imageWidgets = images.map((imageKey) {
         startIndex++;
         return Expanded(
-          child: ComicImage(
-            image: _createImageProviderFromKey(imageKey, context),
-            fit: BoxFit.contain,
-            onInit: (state) => imageStates.add(state),
-            onDispose: (state) => imageStates.remove(state),
-            onImageInfo: (w, h) => reader.observeAdaptivePage(
-              imageKey,
-              reader.images!.indexOf(imageKey),
-              w,
-              h,
+          child: _ReaderTranslationLayer(
+            pageIndex: reader.images!.indexOf(imageKey),
+            child: ComicImage(
+              image: _createImageProviderFromKey(imageKey, context),
+              fit: BoxFit.contain,
+              onInit: (state) => imageStates.add(state),
+              onDispose: (state) => imageStates.remove(state),
+              onImageInfo: (w, h) => reader.observeAdaptivePage(
+                imageKey,
+                reader.images!.indexOf(imageKey),
+                w,
+                h,
+              ),
+              errorBuilder: (errorContext, error, s, retry) {
+                return _buildReaderImageError(errorContext, error, s, retry);
+              },
             ),
-            errorBuilder: (errorContext, error, s, retry) {
-              return _buildReaderImageError(errorContext, error, s, retry);
-            },
           ),
         );
       }).toList();

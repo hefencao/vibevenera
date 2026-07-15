@@ -9,6 +9,10 @@ import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
+import 'package:venera/foundation/comic_translation/benchmark.dart';
+import 'package:venera/foundation/comic_translation/engine.dart';
+import 'package:venera/foundation/comic_translation/models.dart';
+import 'package:venera/foundation/comic_translation/runtime.dart';
 import 'package:venera/foundation/content_cache.dart';
 import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/js_engine.dart';
@@ -23,6 +27,7 @@ import 'package:venera/utils/translations.dart';
 import 'package:yaml/yaml.dart';
 
 part 'reader.dart';
+part 'comic_translation.dart';
 part 'explore_settings.dart';
 part 'setting_components.dart';
 part 'appearance.dart';

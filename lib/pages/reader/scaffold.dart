@@ -578,6 +578,29 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       // 播放速度按钮
       _buildSpeedButton(context),
       Tooltip(
+        message: 'Comic translation'.tl,
+        child: IconButton(
+          color: context.reader.translationSession.enabled
+              ? context.colorScheme.primary
+              : null,
+          icon: const Icon(Icons.translate),
+          onPressed: () {
+            final session = context.reader.translationSession;
+            if (!session.enabled && !session.backendReady) {
+              showToast(
+                message: 'Comic translation model is not installed'.tl,
+                context: context,
+                seconds: 2,
+              );
+              return;
+            }
+            session.setEnabled(!session.enabled);
+            context.reader.reportTranslationPage(context.reader.page);
+            update();
+          },
+        ),
+      ),
+      Tooltip(
         message: "Collect the image".tl,
         child: IconButton(
           icon: Icon(isLiked() ? Icons.favorite : Icons.favorite_border),
@@ -905,6 +928,9 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           if (key == "showChapterComments" ||
               key == "showChapterCommentsAtEnd") {
             update();
+          }
+          if (key == 'comicTranslation') {
+            context.reader.syncTranslationSettings();
           }
           context.reader.update();
         },

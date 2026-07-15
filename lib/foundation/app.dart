@@ -7,6 +7,8 @@ import 'package:venera/foundation/history.dart';
 
 import 'appdata.dart';
 import 'content_cache.dart';
+import 'comic_translation/store.dart';
+import 'comic_translation/runtime.dart';
 import 'favorites.dart';
 import 'local.dart';
 
@@ -74,6 +76,9 @@ class _App {
 
   final ContentCache contentCache = ContentCache.instance;
 
+  final ComicTranslationStore comicTranslationStore =
+      ComicTranslationStore.instance;
+
   final LocalFavoritesManager favorites = LocalFavoritesManager();
 
   final LocalManager local = LocalManager();
@@ -103,10 +108,12 @@ class _App {
     await Future.wait([
       data.init(),
       contentCache.init(dataPath),
+      comicTranslationStore.init(dataPath),
       history.init(),
       favorites.init(),
       local.init(),
     ]);
+    await ComicTranslationRuntime.instance.init(dataPath);
   }
 
   Function? _forceRebuildHandler;
