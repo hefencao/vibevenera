@@ -55,6 +55,12 @@ part 'scaffold.dart';
 
 part 'images.dart';
 
+part 'gallery_images.dart';
+
+part 'continuous_images.dart';
+
+part 'image_support.dart';
+
 part 'gesture.dart';
 
 part 'comic_image.dart';
