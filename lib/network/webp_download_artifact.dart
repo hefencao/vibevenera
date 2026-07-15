@@ -9,7 +9,7 @@ import 'package:venera/foundation/image_provider/session/download_session.dart';
 
 typedef WebPArtifactPromoter = Future<File> Function(File source);
 
-enum WebPArtifactContentKind { empty, unknown, webp, fallback }
+enum WebPArtifactContentKind { empty, unknown, webp, gif, fallback }
 
 final class WebPArtifactRestoreState {
   final WebPArtifactContentKind kind;
@@ -104,8 +104,15 @@ final class WebPDownloadArtifact {
       );
     }
 
-    if (kind == WebPArtifactContentKind.fallback) {
-      session.enterFallbackContent(writer, restoredLength: _length);
+    if (kind == WebPArtifactContentKind.gif ||
+        kind == WebPArtifactContentKind.fallback) {
+      session.enterFallbackContent(
+        writer,
+        restoredLength: _length,
+        contentKind: kind == WebPArtifactContentKind.gif
+            ? DownloadContentKind.gif
+            : DownloadContentKind.fallback,
+      );
       return WebPArtifactRestoreState(
         kind: kind,
         length: _length,
@@ -291,8 +298,16 @@ final class WebPDownloadArtifact {
         prefix[9] == 0x45 &&
         prefix[10] == 0x42 &&
         prefix[11] == 0x50;
-    return isRiff && isWebP
-        ? WebPArtifactContentKind.webp
+    if (isRiff && isWebP) return WebPArtifactContentKind.webp;
+    final isGif =
+        prefix[0] == 0x47 &&
+        prefix[1] == 0x49 &&
+        prefix[2] == 0x46 &&
+        prefix[3] == 0x38 &&
+        (prefix[4] == 0x37 || prefix[4] == 0x39) &&
+        prefix[5] == 0x61;
+    return isGif
+        ? WebPArtifactContentKind.gif
         : WebPArtifactContentKind.fallback;
   }
 }

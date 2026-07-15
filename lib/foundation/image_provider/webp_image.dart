@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math' as math;
 
@@ -6,9 +7,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
+import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/webp_perf.dart';
 
 import 'io/image_data_validator.dart';
+import 'runtime/gif_stream_index.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
 import 'renderer/frame_renderer.dart';
@@ -59,6 +62,9 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
       _calculateWebPTargetSize(context);
 
   static bool isLikelyWebP(String imageKey) => _isLikelyWebP(imageKey);
+
+  static bool isLikelyStreamingAnimation(String imageKey) =>
+      _isLikelyWebP(imageKey) || _isLikelyGif(imageKey);
 
   @override
   Future<WebPImageProvider> obtainKey(ImageConfiguration configuration) =>

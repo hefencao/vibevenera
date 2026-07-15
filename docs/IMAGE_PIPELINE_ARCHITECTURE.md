@@ -241,3 +241,32 @@ The table-driven design is the right intermediate step:
 - easy to inspect in logs
 - easy to tune
 - can be replaced by a model later behind the same `DynamicPreloadPolicy` API
+
+## 8. Streaming GIF Compatibility Path
+
+GIF shares the download session and durable artifact with WebP, but not the
+native WebP source or cursor. The transport identifies `GIF87a/GIF89a`, flushes
+the artifact at most every 64 KiB/50 ms, and publishes only the flushed length.
+`GifStreamIndexer` incrementally parses complete image blocks while retaining
+only the unfinished GIF block.
+
+Flutter's `ui.Codec` has no append API. A playable snapshot is therefore built
+from the artifact through the last complete image block plus a synthetic GIF
+trailer. When more frames arrive, the completer creates a new codec and advances
+it through already displayed frames before swapping. Refresh happens only after
+the current partial frame set is consumed, rather than on every network chunk.
+
+This compatibility implementation exposed three framework boundaries:
+
+1. `ui.Codec` requires an immutable complete byte buffer, so progressive GIF
+   necessarily rereads the prefix and re-decodes old frames. Build and skip time
+   are logged under `GIF.Stream`.
+2. Generic codec frames do not enter `WebPFrameHolder`; without an explicit
+   external-codec state the resource policy sees a permanent zero buffer. The
+   pipeline now treats a ready external codec as healthy for download expansion
+   while forcing non-current native decode targets to zero.
+3. A fallback animation must obey the same current-page playback gate as native
+   WebP. Offscreen GIF codecs retain their position but do not consume frames.
+
+The physical cache remains format-neutral. GIF and WebP differ at the decode
+adapter, not at cache placement or download ranking.

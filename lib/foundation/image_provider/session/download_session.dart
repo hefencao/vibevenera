@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 import 'package:venera/utils/webp_perf.dart';
 
+import '../webp_source_registry.dart';
+
 final class DownloadIdentity {
   final String imageKey;
   final String? sourceKey;
@@ -34,6 +36,8 @@ final class DownloadIdentity {
 
 enum DownloadTransportState { idle, queued, receiving, paused, sealed, failed }
 
+enum DownloadContentKind { unknown, webp, gif, fallback }
+
 final class WebPSourceInvariantError implements Exception {
   final String message;
   final Object? cause;
@@ -56,6 +60,7 @@ final class DownloadSessionSnapshot {
   final int expectedLength;
   final int committedLength;
   final bool fallbackContent;
+  final DownloadContentKind contentKind;
   final bool failureRetryable;
   final bool networkActive;
   final int failureCount;
@@ -72,6 +77,7 @@ final class DownloadSessionSnapshot {
     required this.expectedLength,
     this.committedLength = 0,
     this.fallbackContent = false,
+    this.contentKind = DownloadContentKind.unknown,
     this.failureRetryable = false,
     required this.networkActive,
     this.failureCount = 0,
@@ -147,6 +153,7 @@ final class DownloadSession {
   DownloadWriterLease? _activeWriter;
   int _expectedLength;
   bool _fallbackContent = false;
+  DownloadContentKind _contentKind = DownloadContentKind.unknown;
   bool _networkActive = false;
   int _fallbackCommittedLength = 0;
   int _dependentDecodeSessions = 0;
@@ -190,6 +197,7 @@ final class DownloadSession {
   int get committedLength =>
       _fallbackContent ? _fallbackCommittedLength : sourceCommittedLength;
   bool get fallbackContent => _fallbackContent;
+  DownloadContentKind get contentKind => _contentKind;
   bool get hasDemand => _demands.isNotEmpty;
   bool get isDisposed => _disposed;
   bool get canEvict =>
@@ -208,6 +216,7 @@ final class DownloadSession {
     expectedLength: _expectedLength,
     committedLength: committedLength,
     fallbackContent: _fallbackContent,
+    contentKind: _contentKind,
     failureRetryable: _failureRetryable,
     networkActive: _networkActive,
     failureCount: _failureCount,
@@ -389,6 +398,7 @@ final class DownloadSession {
     }
     activeWriter._replaceEpoch(epoch);
     _fallbackContent = false;
+    _contentKind = DownloadContentKind.unknown;
     _fallbackCommittedLength = 0;
     _expectedLength = expectedLength;
     _expectedLengthAuthoritative = false;
@@ -441,8 +451,13 @@ final class DownloadSession {
   void enterFallbackContent(
     DownloadWriterLease writer, {
     int restoredLength = 0,
+    DownloadContentKind contentKind = DownloadContentKind.fallback,
   }) {
     _requireWriter(writer);
+    if (contentKind != DownloadContentKind.gif &&
+        contentKind != DownloadContentKind.fallback) {
+      throw ArgumentError.value(contentKind, 'contentKind');
+    }
     if (!_fallbackContent && sourceCommittedLength > 0) {
       final nextEpoch = source.epoch + 1;
       try {
@@ -456,9 +471,32 @@ final class DownloadSession {
       writer._replaceEpoch(nextEpoch);
     }
     _fallbackContent = true;
+    _contentKind = contentKind;
+    if (contentKind == DownloadContentKind.gif) {
+      WebPSourceRegistry.markStreaming(identity.sourceKey);
+    }
     _fallbackCommittedLength = restoredLength;
     _expectedLengthAuthoritative = false;
     _decodeSafePublish();
+  }
+
+  void identifyWebPContent(DownloadWriterLease writer) {
+    _requireWriter(writer);
+    if (_fallbackContent) {
+      throw const WebPSourceInvariantError(
+        'cannot identify WebP after entering fallback content mode',
+      );
+    }
+    if (_contentKind == DownloadContentKind.webp) return;
+    _contentKind = DownloadContentKind.webp;
+    _schedulePublish();
+  }
+
+  void bindArtifact(DownloadWriterLease writer, File file) {
+    _requireWriter(writer);
+    if (_artifactFile?.path == file.path) return;
+    _artifactFile = file;
+    _schedulePublish();
   }
 
   /// Advances the persisted generic-content range. The artifact itself owns

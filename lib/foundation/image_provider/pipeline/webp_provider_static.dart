@@ -27,3 +27,5 @@ int _alignWebPDecodeDimension(int value, {int alignment = 8}) {
 }
 
 bool _isLikelyWebP(String imageKey) => imageKey.toLowerCase().contains('.webp');
+
+bool _isLikelyGif(String imageKey) => imageKey.toLowerCase().contains('.gif');

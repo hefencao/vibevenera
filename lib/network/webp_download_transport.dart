@@ -100,6 +100,10 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         activeWriter,
         checkCancelled: () => _throwIfCancelled(cancelToken),
       );
+      session.bindArtifact(activeWriter, artifact.file);
+      if (restored.kind == WebPArtifactContentKind.webp) {
+        session.identifyWebPContent(activeWriter);
+      }
       Log.info(
         'WebP.Cache',
         'artifact ${restored.length == 0 ? 'empty' : 'restored'}: '
@@ -368,7 +372,13 @@ final class ImageDownloaderWebPTransport implements WebPTransport {
         completeLength: length,
       );
       if (kind != WebPArtifactContentKind.webp) {
-        session.enterFallbackContent(activeWriter, restoredLength: length);
+        session.enterFallbackContent(
+          activeWriter,
+          restoredLength: length,
+          contentKind: kind == WebPArtifactContentKind.gif
+              ? DownloadContentKind.gif
+              : DownloadContentKind.fallback,
+        );
         session.updateExpectedLength(length, writer: activeWriter);
         session.sealFallback(activeWriter, file, finalLength: length);
       } else {
@@ -591,6 +601,11 @@ final class _WebPIngress {
   Uint8List _pendingPrefix;
   bool _sourceContainsPrefix;
   int _receivedLength;
+  int _publishedFallbackLength;
+  int _lastGifPublishMs = 0;
+
+  static const int _gifPublishBytes = 64 * 1024;
+  static const int _gifPublishIntervalMs = 50;
 
   _WebPIngress({
     required this.session,
@@ -602,7 +617,8 @@ final class _WebPIngress {
             ? restored.prefix
             : Uint8List(0),
         _sourceContainsPrefix = restored.sourceContainsPrefix,
-        _receivedLength = restored.length;
+        _receivedLength = restored.length,
+        _publishedFallbackLength = restored.length;
 
   _WebPIngress.empty({
     required this.session,
@@ -611,10 +627,13 @@ final class _WebPIngress {
   })  : _kind = WebPArtifactContentKind.empty,
         _pendingPrefix = Uint8List(0),
         _sourceContainsPrefix = false,
-        _receivedLength = 0;
+        _receivedLength = 0,
+        _publishedFallbackLength = 0;
 
   int get receivedLength => _receivedLength;
-  bool get isFallback => _kind == WebPArtifactContentKind.fallback;
+  bool get isFallback =>
+      _kind == WebPArtifactContentKind.gif ||
+      _kind == WebPArtifactContentKind.fallback;
 
   Future<void> append(Uint8List bytes) async {
     if (bytes.isEmpty) return;
@@ -637,6 +656,13 @@ final class _WebPIngress {
     switch (_kind) {
       case WebPArtifactContentKind.webp:
         session.append(bytes, offset: offset, writer: writer);
+        return;
+      case WebPArtifactContentKind.gif:
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (_receivedLength - _publishedFallbackLength >= _gifPublishBytes ||
+            now - _lastGifPublishMs >= _gifPublishIntervalMs) {
+          await _publishGifRange(now);
+        }
         return;
       case WebPArtifactContentKind.fallback:
         session.appendFallbackRange(
@@ -674,7 +700,22 @@ final class _WebPIngress {
       _kind = WebPArtifactContentKind.fallback;
       _pendingPrefix = Uint8List(0);
       _sourceContainsPrefix = false;
+    } else if (_kind == WebPArtifactContentKind.gif) {
+      await _publishGifRange(DateTime.now().millisecondsSinceEpoch);
     }
+  }
+
+  Future<void> _publishGifRange(int now) async {
+    final length = _receivedLength - _publishedFallbackLength;
+    if (length <= 0) return;
+    await artifact.flush();
+    session.appendFallbackRange(
+      writer,
+      offset: _publishedFallbackLength,
+      length: length,
+    );
+    _publishedFallbackLength = _receivedLength;
+    _lastGifPublishMs = now;
   }
 
   Future<void> _classifyAndCommit(
@@ -709,11 +750,18 @@ final class _WebPIngress {
       completeLength: _receivedLength,
     );
 
-    if (classified == WebPArtifactContentKind.fallback) {
+    if (classified == WebPArtifactContentKind.gif ||
+        classified == WebPArtifactContentKind.fallback) {
+      if (classified == WebPArtifactContentKind.gif) await artifact.flush();
       session.enterFallbackContent(
         writer,
         restoredLength: _receivedLength,
+        contentKind: classified == WebPArtifactContentKind.gif
+            ? DownloadContentKind.gif
+            : DownloadContentKind.fallback,
       );
+      _publishedFallbackLength = _receivedLength;
+      _lastGifPublishMs = DateTime.now().millisecondsSinceEpoch;
       _kind = classified;
       _pendingPrefix = Uint8List(0);
       _sourceContainsPrefix = false;
@@ -729,6 +777,7 @@ final class _WebPIngress {
       offset: session.sourceCommittedLength,
       writer: writer,
     );
+    session.identifyWebPContent(writer);
 
     _kind = WebPArtifactContentKind.webp;
     _pendingPrefix = Uint8List(0);

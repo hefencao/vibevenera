@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -172,6 +174,73 @@ void main() {
     expect(source.bytes, bytes);
     expect(progress, isEmpty);
     expect(networkStates, everyElement(isFalse));
+    expect(session.transport, DownloadTransportState.sealed);
+  });
+
+  test('GIF artifact is readable before the transport seals', () async {
+    final directory = await Directory.systemTemp.createTemp('gif-stream-');
+    addTearDown(() => directory.delete(recursive: true));
+    final partial = File('${directory.path}/partial');
+    final cached = File('${directory.path}/cached');
+    final bytes = base64Decode(
+      'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
+    );
+    const identity = DownloadIdentity(
+      imageKey: 'https://example.invalid/image.gif',
+      sourceKey: null,
+      cid: 'cid',
+      eid: 'eid',
+    );
+    final session = DownloadSession(
+      identity: identity,
+      source: _FakeSource(),
+      reconcile: (_) {},
+    );
+    session.beginTransport();
+    final published = Completer<DownloadSessionSnapshot>();
+    final finish = Completer<void>();
+    final subscription = session.watch().listen((snapshot) {
+      if (!published.isCompleted &&
+          snapshot.contentKind == DownloadContentKind.gif &&
+          snapshot.committedLength == bytes.length &&
+          snapshot.artifactFile != null) {
+        published.complete(snapshot);
+      }
+    });
+    addTearDown(subscription.cancel);
+    final transport = ImageDownloaderWebPTransport(
+      identity,
+      artifactFactory: (_) => WebPDownloadArtifact(
+        partial,
+        promote: (source) => source.rename(cached.path),
+      ),
+      eventSource: ({
+        required int resumeOffset,
+        required int? expectedLength,
+        cancelToken,
+      }) async* {
+        yield ImageDownloadProgress(
+          currentBytes: bytes.length,
+          totalBytes: bytes.length,
+          chunkBytes: bytes,
+        );
+        await finish.future;
+        yield ImageDownloadProgress(
+          currentBytes: bytes.length,
+          totalBytes: bytes.length,
+          done: true,
+        );
+      },
+    );
+
+    final resultFuture = transport.execute(session);
+    final receiving = await published.future;
+    expect(receiving.transport, DownloadTransportState.receiving);
+    expect(await receiving.artifactFile!.readAsBytes(), bytes);
+    finish.complete();
+    final result = await resultFuture;
+    expect(result.path, cached.path);
+    expect(session.contentKind, DownloadContentKind.gif);
     expect(session.transport, DownloadTransportState.sealed);
   });
 }

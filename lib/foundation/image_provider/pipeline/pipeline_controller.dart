@@ -106,6 +106,7 @@ class PipelineController {
   bool _hasCurrentIdx = false;
   int _preloadCount = 5;
   int _currentBufferedFrames = 0;
+  bool _currentUsesExternalCodec = false;
   int _windowRuleIndex = -1;
   int _sessionId = 0;
   int? _provisionalIdx;
@@ -172,6 +173,7 @@ class PipelineController {
     }
     if (_preloadCount != session.preloadCount || contextChanged) {
       _currentBufferedFrames = 0;
+      _currentUsesExternalCodec = false;
       _windowRuleIndex = -1;
     }
     _preloadCount = session.preloadCount;
@@ -244,8 +246,11 @@ class PipelineController {
   bool _isLocalStaticSession(ReaderPipelineSession session) =>
       session.images.isNotEmpty &&
       session.images.every((key) => key.startsWith('file://') || !key.contains('://')) &&
-      !session.images.any((key) => key.toLowerCase().contains('.webp')) &&
-      !WebPSourceRegistry.isWebPSource(session.sourceKey);
+      !session.images.any((key) {
+        final lower = key.toLowerCase();
+        return lower.contains('.webp') || lower.contains('.gif');
+      }) &&
+      !WebPSourceRegistry.isStreamingSource(session.sourceKey);
 
   void _syncNetworkConcurrency() {
     final value = appdata.settings['downloadThreads'];
@@ -264,18 +269,42 @@ class PipelineController {
   }
 
   void updateCurrentBufferedFrames(int frames) {
+    final modeChanged = _currentUsesExternalCodec;
+    _currentUsesExternalCodec = false;
+    _updateCurrentBufferedFrames(frames, forcePolicySync: modeChanged);
+  }
+
+  void updateCurrentExternalCodec({required bool ready}) {
+    final modeChanged = !_currentUsesExternalCodec;
+    _currentUsesExternalCodec = true;
+    _updateCurrentBufferedFrames(
+      ready ? 7 : 0,
+      forcePolicySync: modeChanged,
+    );
+  }
+
+  void _updateCurrentBufferedFrames(
+    int frames, {
+    bool forcePolicySync = false,
+  }) {
     if (_images.isEmpty) return;
     _currentBufferedFrames = frames;
     final nextRule = DynamicPreloadPolicy.ruleIndexFor(
       currentBufferedFrames: frames,
       preloadCount: _preloadCount,
     );
-    if (nextRule == _windowRuleIndex) return;
+    if (nextRule == _windowRuleIndex) {
+      if (forcePolicySync) _syncPolicyLeases();
+      return;
+    }
     // 档位向浅(nextRule 更大 = 缓冲下降)时加滞回，避免缓冲在阈值附近呼吸导致档位
     // 抖动。向深(缓冲回升)立即生效，尽快让近邻页恢复较深目标。
     if (_windowRuleIndex >= 0 && nextRule > _windowRuleIndex) {
       final min = waterLevelRules[_windowRuleIndex].minBufferedFrames;
-      if (frames >= (min - 2).clamp(0, min)) return;
+      if (frames >= (min - 2).clamp(0, min)) {
+        if (forcePolicySync) _syncPolicyLeases();
+        return;
+      }
     }
     _windowRuleIndex = nextRule;
     // 页集合固定不变（stableWindow），ruleIndex 只影响每页目标帧深。所以这里只需
@@ -300,6 +329,7 @@ class PipelineController {
 
     final previousIdx = _currentIdx;
     _currentIdx = currentIdx;
+    _currentUsesExternalCodec = false;
     final delta = currentIdx - previousIdx;
     final isJump = delta.abs() > _jumpProtectionDistance;
     _readDirection = _directionPredictor.record(
@@ -424,6 +454,7 @@ class PipelineController {
     // visible or other policy leases still reference them.
     resources.clear();
     _images = const [];
+    _currentUsesExternalCodec = false;
     _sessionAliases = const {};
     _currentKey = '';
     _nearKeys.clear();
@@ -601,7 +632,9 @@ class PipelineController {
       // 后翻对称。current=0 / next=+1 / next+1=+2 / prev=-1，其余距离目标 0。
       final offset = _offsetByKey[entry.imageKey] ?? _offsetFor(entry.imageKey);
       final readDist = offset * _readDirection;
-      final targetFrames = policy.allowDecode
+      final targetFrames = policy.allowDecode &&
+              (!_currentUsesExternalCodec ||
+                  entry.priority == PagePriority.current)
           ? FrameDepthTable.targetFor(
               ruleIndex: _windowRuleIndex < 0 ? 4 : _windowRuleIndex,
               readDist: readDist,

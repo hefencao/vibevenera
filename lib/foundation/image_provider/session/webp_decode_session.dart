@@ -424,7 +424,7 @@ final class WebPDecodeSession {
         // 无 ANMF 帧也解不出）。登记源以便下次会话首页即走流式路由。会话稳定：本次
         // 仅持久化，当前路由不变。
         if (!_hasProducedFrame) {
-          WebPSourceRegistry.mark(download.identity.sourceKey);
+          WebPSourceRegistry.markStreaming(download.identity.sourceKey);
         }
         _decodedFramesSinceRestart += frames.length;
         _hasProducedFrame = true;

@@ -1422,18 +1422,17 @@ ImageProvider _createImageProviderFromKey(
 ) {
   var reader = context.reader;
 
-  // 非 webp（绝大多数漫画页是 jpg/png）走轻量 ReaderImageProvider 快路径：Flutter
-  // 标准 fetch→codec，渐进加载、无 50ms 回退硬等。疑似/已知 webp（可能是动图）才进
-  // WebPImageProvider 的流式/native texture 管线。
+  // 普通静态图走轻量 ReaderImageProvider；明确的 GIF/WebP 动图进入流式管线。
   //
-  // 判据两条：①文件名含 .webp；②WebPSourceRegistry 记得该源上次会话确认过动图 WebP
+  // 判据两条：①文件名含 .webp/.gif；②registry 记得该源确认过动图 WebP
   // ——因为有的源图片 key 是纯数字无扩展名（如 111），只靠文件名会误判为非 webp、被
   // 打回非流式老路（转圈转完才播）。registry 是会话稳定的（只读上次持久化快照），保证
   // 同一源本会话内所有页 provider 类型一致，翻页无 provider 翻转/无 setState churn。
   final sourceKey = reader.type.comicSource?.key;
-  final treatAsWebP = WebPImageProvider.isLikelyWebP(imageKey) ||
-      WebPSourceRegistry.isWebPSource(sourceKey);
-  if (!treatAsWebP) {
+  final useStreamingProvider =
+      WebPImageProvider.isLikelyStreamingAnimation(imageKey) ||
+      WebPSourceRegistry.isStreamingSource(sourceKey);
+  if (!useStreamingProvider) {
     final page = reader.images?.indexOf(imageKey) ?? 0;
     return ReaderImageProvider(
       imageKey,

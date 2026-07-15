@@ -3,6 +3,17 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/webp_image.dart';
 
 void main() {
+  test('GIF URLs use the streaming animation provider', () {
+    expect(
+      WebPImageProvider.isLikelyStreamingAnimation('https://a/1.GIF?x=1'),
+      isTrue,
+    );
+    expect(
+      WebPImageProvider.isLikelyStreamingAnimation('https://a/1.jpg'),
+      isFalse,
+    );
+  });
+
   test('texture identity includes comic and episode', () {
     final first = WebPImageProvider(
       imageKey: '0',
