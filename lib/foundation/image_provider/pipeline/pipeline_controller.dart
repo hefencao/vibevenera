@@ -94,6 +94,8 @@ class PipelineController {
       _progress.notifier;
   ValueListenable<List<CacheDownloadProgress>> get cacheDownloadProgress =>
       _cacheDownloads.notifier;
+  final ValueNotifier<int> _interactionRevision = ValueNotifier<int>(0);
+  ValueListenable<int> get interactionChanges => _interactionRevision;
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
   final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
@@ -232,6 +234,7 @@ class PipelineController {
   void setInteractionState(InteractionState state) {
     if (_interaction == state) return;
     _interaction = state;
+    _interactionRevision.value++;
     if (state != InteractionState.scroll) {
       _dragCommitTimer?.cancel();
       _dragCommitTimer = null;

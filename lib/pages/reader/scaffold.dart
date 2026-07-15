@@ -11,6 +11,7 @@ class _ReaderScaffold extends StatefulWidget {
 
 class _ReaderScaffoldState extends State<_ReaderScaffold> {
   bool _isOpen = false;
+  final ValueNotifier<int> _pageRevision = ValueNotifier<int>(0);
 
   static const kTopBarHeight = 56.0;
 
@@ -99,6 +100,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
 
   @override
   void dispose() {
+    _pageRevision.dispose();
     sliderFocus.dispose();
     super.dispose();
   }
@@ -128,9 +130,10 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     setState(() {});
   }
 
+  void updatePage() => _pageRevision.value++;
+
   @override
   Widget build(BuildContext context) {
-    final isOnChapterCommentsPage = context.reader.isOnChapterCommentsPage;
     return Stack(
       children: [
         Positioned.fill(
@@ -139,10 +142,26 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             child: widget.child,
           ),
         ),
-        if (appdata.settings['showPageNumberInReader'] == true &&
-            !isOnChapterCommentsPage)
-          buildPageInfoText(),
-        if (!isOnChapterCommentsPage) buildStatusInfo(),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: RepaintBoundary(
+              child: ValueListenableBuilder<int>(
+                valueListenable: _pageRevision,
+                builder: (context, _, _) {
+                  final isComments = context.reader.isOnChapterCommentsPage;
+                  return Stack(
+                    children: [
+                      if (appdata.settings['showPageNumberInReader'] == true &&
+                          !isComments)
+                        buildPageInfoText(),
+                      if (!isComments) buildStatusInfo(),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
         AnimatedPositioned(
           duration: const Duration(milliseconds: 180),
           right: 16,

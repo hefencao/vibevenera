@@ -203,6 +203,11 @@ other        -> sealed 后交给普通 Flutter codec fallback
 5. Android 支持时 frame address 直接更新 native texture；其他平台通过 Flutter image
    renderer 显示。
 
+`SurfaceProducer.setSize` 和 `ANativeWindow_setBuffersGeometry` 只在纹理尺寸第一次确定或
+真实变化时执行，不能在每个动画帧重复配置 buffer queue。页面 viewport 正在
+dragging/scroll 时，已显示过首帧的 WebP/GIF 暂停 present，下载和预解码仍继续，待
+viewport idle 后恢复播放。
+
 download、decode、upload 分属 scheduler 的 network/decode/upload lane。native 工作不在
 `onPageChanged` 或 build 中同步执行。
 
@@ -246,6 +251,14 @@ Policy 决定：
 - upload 权限；
 - keep/evict；
 - external codec 模式下是否抑制邻页 native decode。
+
+PageView 的 `onPageChanged` 会在滚动动画越过中点时触发，而不是在动画结束时触发。
+此时立即提升新 current 的下载/解码 policy，让剩余动画时间用于准备帧；WebP/GIF 的
+present 独立冻结到 viewport idle，避免 texture 更新参与页面合成。interaction、holder
+和 decode session 使用 revision wake signal 恢复播放，不使用 32/120ms poll，因此 idle
+后没有额外轮询等待。页码文字使用独立 notifier 局部重建，不因页码变化重建整个
+ReaderScaffold。静态高分辨率页默认使用双线性 low filter，避免首次进入页面时同步生成
+mipmap 造成 raster 峰值。
 
 因此不能向 `onPageChanged` 添加缓存或下载策略参数，也不能由
 `_precacheLocalReaderPages` 一类 UI helper 直接拥有 session 生命周期。

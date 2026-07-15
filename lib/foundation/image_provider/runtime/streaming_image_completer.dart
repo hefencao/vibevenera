@@ -24,6 +24,8 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   bool _fallbackStarted = false;
   bool _fallbackPumping = false;
   int _fallbackFramesEmitted = 0;
+  int _playbackRevision = 0;
+  Completer<void>? _playbackWaiter;
   // 诊断：本 provider 挂载时刻与各里程碑是否已上报，用于拆解「翻页→首帧」延迟
   // 分别落在下载封口 / 首帧解码就绪 / 首帧显示 哪一段。
   int _attachMs = 0;
@@ -61,6 +63,9 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       onUpdated: _onGifUpdated,
       onError: _reportError,
     );
+    PipelineController.instance.interactionChanges.addListener(
+      _signalPlayback,
+    );
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -70,7 +75,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
     _detachTimer?.cancel();
     _detachTimer = null;
     if (_lease == null) _attach();
-    _schedulePump();
+    _signalPlayback();
   }
 
   @override
@@ -82,6 +87,10 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   @override
   void onDisposed() {
     _disposed = true;
+    PipelineController.instance.interactionChanges.removeListener(
+      _signalPlayback,
+    );
+    _signalPlayback();
     WidgetsBinding.instance.removeObserver(this);
     _detachTimer?.cancel();
     _detachTimer = null;
@@ -104,7 +113,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
 
   @override
   void didChangeAppLifecycleState(ui.AppLifecycleState state) {
-    if (state == ui.AppLifecycleState.resumed) _schedulePump();
+    if (state == ui.AppLifecycleState.resumed) _signalPlayback();
   }
 
   /// 首帧到达时上报「挂载→首帧」延迟一次。这是用户感知「翻页卡」的真正指标：
@@ -191,7 +200,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
     if (snapshot.renderedFrames > 0) {
       _milestone('lat.firstRendered',
           () => _firstRenderedReported, () => _firstRenderedReported = true);
-      _schedulePump();
+      _signalPlayback();
     }
   }
 
@@ -231,9 +240,8 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       _milestone('lat.sealed',
           () => _sealedReported, () => _sealedReported = true);
       // 不在封口(final 信号)处启动播放：这是长条进度条重构前的遗留触发。播放已由
-      // 帧到达驱动（_onHolderState / _onDecodeState 的 renderedFrames>0 →
-      // _schedulePump），且 pump 循环 poll-continue 常驻、每 32ms 自取新帧，流式解出
-      // 的首帧一就绪即播，无需等封口。保留封口仅用于 fallback（非 webp/静态兜底）。
+      // 帧到达驱动（_onHolderState / _onDecodeState → revision wake signal），流式
+      // 解出的首帧一就绪即播，无需等封口。保留封口仅用于 fallback（非 webp/静态兜底）。
       if (snapshot.externalContent &&
           snapshot.contentKind != DownloadContentKind.gif) {
         unawaited(_maybeDecodeFallback(snapshot));
@@ -243,6 +251,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
 
   void _onDecodeState(WebPDecodeSessionSnapshot snapshot) {
     if (_disposed) return;
+    _signalPlayback();
     if (snapshot.decodeError != null) {
       // An incomplete ANMF payload may make the current decode pass fail until
       // more source bytes arrive. WebPDecodeSession clears that error when
@@ -266,7 +275,6 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       unawaited(_maybeDecodeFallback(snapshot.download));
       return;
     }
-    if (snapshot.frames.renderedFrames > 0) _schedulePump();
   }
 
   void _schedulePump() {
@@ -279,6 +287,23 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       } else {
         unawaited(_pump());
       }
+    });
+  }
+
+  void _signalPlayback() {
+    _playbackRevision++;
+    final waiter = _playbackWaiter;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+    _schedulePump();
+  }
+
+  Future<void> _waitForPlaybackSignal(int revision) {
+    if (_disposed || revision != _playbackRevision) return Future<void>.value();
+    final waiter = Completer<void>();
+    _playbackWaiter = waiter;
+    if (_disposed || revision != _playbackRevision) waiter.complete();
+    return waiter.future.whenComplete(() {
+      if (identical(_playbackWaiter, waiter)) _playbackWaiter = null;
     });
   }
 
@@ -305,14 +330,17 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         // （current 页 true / 近邻页 false），visible 与策略租约共享同一 decode
         // session，信号可靠。
         //
-        // 关键：循环**不 return 退出**，只 poll 等待再 continue（复刻旧 _run 死循环）。
-        // 上一版把它写成 `return` → pump 一停就得靠事件重新 _schedulePump，翻页瞬间
-        // 若 current 标志尚未同步就永久冻死。poll 续转则天然自恢复：一旦变当前，下一
-        // 轮立即播；缺帧则等解码补上，都无需外部唤醒。
+        // 非当前、viewport 移动或缺帧时挂起到 session/interaction 的下一次状态信号。
+        // revision 消除“状态在建立 waiter 前变化”的丢唤醒竞态，不再用 32/120ms poll。
+        final playbackRevision = _playbackRevision;
         final isCurrentNow = _lease?.decode.isCurrent == true;
+        if (_firstFrameReported && _isViewportMoving) {
+          await _waitForPlaybackSignal(playbackRevision);
+          continue;
+        }
         if (!isCurrentNow && _firstFrameReported) {
           // 非当前页：已present过静态首帧，此后静止——不消费帧、不驱动重解、不抢核。
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await _waitForPlaybackSignal(playbackRevision);
           continue;
         }
 
@@ -321,8 +349,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
           // 播放中途 consumeFrame 拿不到帧 = 缓冲见底（解码没跟上）。这是「播放卡
           // 顿」的直接信号，Flutter jankFrames 抓不到（native texture 原地更新）。
           if (_firstFrameReported && isCurrentNow) ImagePipelinePerf.count('pumpStarved');
-          // 不退出：短 poll 等解码补帧，避免依赖事件链重启导致翻页后不自恢复。
-          await Future<void>.delayed(const Duration(milliseconds: 32));
+          await _waitForPlaybackSignal(playbackRevision);
           continue;
         }
 
@@ -422,17 +449,24 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         state != ui.AppLifecycleState.detached;
   }
 
+  bool get _isViewportMoving {
+    final interaction = PipelineController.instance.interactionState;
+    return interaction == InteractionState.dragging ||
+        interaction == InteractionState.scroll;
+  }
+
   void _queueGifSnapshot(DownloadSessionSnapshot snapshot) {
     _gifRuntime.addSnapshot(snapshot);
   }
 
   Future<void> _onGifUpdated() async {
     if (_disposed) return;
+    _signalPlayback();
     _fallbackStarted = true;
     if (_fallbackCodec == null && _gifRuntime.canBuild) {
       await _replaceGifCodec(skipFrames: 0);
     } else {
-      _schedulePump();
+      _signalPlayback();
     }
   }
 
@@ -456,7 +490,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       _gifCodecFrames = build.frameCount;
       _gifCodecEpoch = build.epoch;
       if (old != null && !identical(old, build.codec)) old.dispose();
-      _schedulePump();
+      _signalPlayback();
       return true;
     } finally {
       _gifCodecReplacing = false;
@@ -508,7 +542,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       _fallbackCodec?.dispose();
       _fallbackCodec = codec;
       _fallbackFramesEmitted = 0;
-      _schedulePump();
+      _signalPlayback();
     } catch (error, stack) {
       _reportError(
         nativeError == null
@@ -535,7 +569,12 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
           hasListeners &&
           _isLifecycleActive &&
           identical(_fallbackCodec, codec)) {
+        final playbackRevision = _playbackRevision;
         final isCurrent = _lease?.decode.isCurrent == true;
+        if (_firstFrameReported && _isViewportMoving) {
+          await _waitForPlaybackSignal(playbackRevision);
+          continue;
+        }
         if (isCurrent) {
           final healthy =
               !_gifRuntime.hasFrames ||
@@ -546,7 +585,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
           );
         }
         if (!isCurrent && _firstFrameReported) {
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await _waitForPlaybackSignal(playbackRevision);
           continue;
         }
         if (_gifRuntime.hasFrames && _fallbackFramesEmitted >= _gifCodecFrames) {
@@ -561,7 +600,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
             return;
           }
           if (!_gifRuntime.isFinal) {
-            await Future<void>.delayed(const Duration(milliseconds: 32));
+            await _waitForPlaybackSignal(playbackRevision);
             continue;
           }
         }

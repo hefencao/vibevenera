@@ -32,7 +32,8 @@ Java_com_github_wgh136_venera_WebPTexturePlugin_nativeBlit(
     jobject surface,
     jlong addr,
     jint width,
-    jint height) {
+    jint height,
+    jboolean configure) {
   (void)thiz;
   if (surface == NULL || addr == 0 || width <= 0 || height <= 0) {
     return JNI_FALSE;
@@ -45,8 +46,11 @@ Java_com_github_wgh136_venera_WebPTexturePlugin_nativeBlit(
   }
 
   jboolean ok = JNI_FALSE;
-  if (ANativeWindow_setBuffersGeometry(win, width, height,
-                                       WINDOW_FORMAT_RGBA_8888) == 0) {
+  int geometry_result = configure
+      ? ANativeWindow_setBuffersGeometry(win, width, height,
+                                         WINDOW_FORMAT_RGBA_8888)
+      : 0;
+  if (geometry_result == 0) {
     ANativeWindow_Buffer buf;
     if (ANativeWindow_lock(win, &buf, NULL) == 0) {
       const uint8_t* src = (const uint8_t*)(intptr_t)addr;

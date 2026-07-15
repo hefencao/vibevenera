@@ -26,7 +26,13 @@ class WebPTexturePlugin(flutterEngine: FlutterEngine) {
         "venera/webp_texture"
     )
 
-    private val entries = HashMap<Long, TextureRegistry.SurfaceProducer>()
+    private class TextureEntry(
+        val producer: TextureRegistry.SurfaceProducer,
+        var width: Int = 0,
+        var height: Int = 0,
+    )
+
+    private val entries = HashMap<Long, TextureEntry>()
 
     /** JNI：从 native 像素地址 memcpy 进 surface。见 webp_texture_blit.c。 */
     private external fun nativeBlit(
@@ -34,6 +40,7 @@ class WebPTexturePlugin(flutterEngine: FlutterEngine) {
         address: Long,
         width: Int,
         height: Int,
+        configure: Boolean,
     ): Boolean
 
     companion object {
@@ -72,26 +79,31 @@ class WebPTexturePlugin(flutterEngine: FlutterEngine) {
 
     private fun create(): Long {
         val producer = textures.createSurfaceProducer()
-        entries[producer.id()] = producer
+        entries[producer.id()] = TextureEntry(producer)
         return producer.id()
     }
 
     private fun update(textureId: Long, width: Int, height: Int, address: Long) {
-        val producer = entries[textureId] ?: return
+        val entry = entries[textureId] ?: return
         if (width <= 0 || height <= 0 || address == 0L) return
 
-        producer.setSize(width, height)
-        val surface = producer.surface
+        val configure = entry.width != width || entry.height != height
+        if (configure) {
+            entry.producer.setSize(width, height)
+            entry.width = width
+            entry.height = height
+        }
+        val surface = entry.producer.surface
         if (surface == null || !surface.isValid) return
-        nativeBlit(surface, address, width, height)
+        nativeBlit(surface, address, width, height, configure)
     }
 
     private fun dispose(textureId: Long) {
-        entries.remove(textureId)?.release()
+        entries.remove(textureId)?.producer?.release()
     }
 
     fun disposeAll() {
-        for (p in entries.values) p.release()
+        for (entry in entries.values) entry.producer.release()
         entries.clear()
         channel.setMethodCallHandler(null)
     }

@@ -19,7 +19,7 @@ class ComicImage extends StatefulWidget {
     this.centerSlice,
     this.matchTextDirection = false,
     this.gaplessPlayback = false,
-    this.filterQuality = FilterQuality.medium,
+    this.filterQuality = FilterQuality.low,
     this.isAntiAlias = false,
     Map<String, String>? headers,
     int? cacheWidth,
@@ -457,6 +457,8 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           matchTextDirection: widget.matchTextDirection,
           invertColors: _invertColors,
           isAntiAlias: widget.isAntiAlias,
+          // medium 会在高分辨率图片首次进入 PageView 时同步生成 mipmap，容易把
+          // animateToPage 中的一帧 raster 拉到数十毫秒；reader 默认使用双线性 low。
           filterQuality: widget.filterQuality,
         );
 

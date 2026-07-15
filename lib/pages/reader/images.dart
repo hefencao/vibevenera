@@ -582,7 +582,7 @@ class _GalleryModeState extends State<_GalleryMode>
                 child: ComicImage(
                   image: imageProvider,
                   fit: BoxFit.contain,
-                  filterQuality: FilterQuality.medium,
+                  filterQuality: FilterQuality.low,
                   onInit: (state) => imageStates.add(state),
                   onDispose: (state) => imageStates.remove(state),
                   onImageInfo: (w, h) {
@@ -652,7 +652,7 @@ class _GalleryModeState extends State<_GalleryMode>
           } else {
             reader.setPage(i);
             _reportReaderPage(context, i);
-            context.readerScaffold.update();
+            context.readerScaffold.updatePage();
             if (isChapterCommentsPage(i) && context.readerScaffold.isOpen) {
               context.readerScaffold.openOrClose();
             }
@@ -969,7 +969,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     if (page != reader.page) {
       reader.setPage(page);
       _reportReaderPage(context, page);
-      context.readerScaffold.update();
+      context.readerScaffold.updatePage();
     }
   }
 
@@ -1098,7 +1098,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
         return ColoredBox(
           color: context.colorScheme.surface,
           child: ComicImage(
-            filterQuality: FilterQuality.medium,
+            filterQuality: FilterQuality.low,
             image: _createImageProvider(index, context),
             width: width,
             height: height,
