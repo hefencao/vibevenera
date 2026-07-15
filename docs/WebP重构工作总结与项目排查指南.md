@@ -1,5 +1,8 @@
 # WebP 流式重构工作总结与项目排查指南
 
+> **已过时**：本文记录 Phase 3–5 的重构过程，文件名和职责边界已继续演进。当前
+> 架构见 [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 **文档目的**：总结本次对话中从问题分析、架构设计、补丁迭代到 Phase 3–5 收口所完成的工作，并将由于缺少完整项目仓库、native 实现、Flutter SDK 和测试环境而可能存在的错误或不一致，整理成可逐项执行的排查清单。
 
 **适用版本**：以 `webp_refactor_complete_v3.patch` / `webp_refactor_complete_v3.zip` 为最终审计对象。

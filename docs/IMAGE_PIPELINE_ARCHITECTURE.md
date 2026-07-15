@@ -1,5 +1,10 @@
 # Image Pipeline Architecture
 
+> **已过时（2026-07-15）**：本文记录的是通用图片管线的早期阶段，未完整反映
+> session 化 WebP 解码、流式 GIF、统一 transport/artifact 和 external codec 策略。
+> 当前实现以 [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)
+> 为准。
+
 > Last updated: 2026-07-07
 
 ## 1. Goals

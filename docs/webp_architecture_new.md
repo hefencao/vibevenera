@@ -1,3 +1,6 @@
+> **已过时**：本文是早期 WebP 渲染方案草案，不代表当前实现。当前架构见
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 Venera WebP 高能效渲染引擎系统规范 (Spec)
 一、 系统架构图与对象关系
 code

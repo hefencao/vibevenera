@@ -1,5 +1,8 @@
 # Image Pipeline Specification
 
+> **已过时**：这是早期资源管线规范。当前实现见
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 > Last updated: 2026-07-07
 
 ## 1. Terminology

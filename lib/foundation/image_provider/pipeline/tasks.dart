@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
-import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/network/streaming_image_transport.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'resource_entry.dart';
@@ -81,15 +81,15 @@ abstract class SchedulerTask {
   }
 }
 
-final class WebPDownloadTask extends SchedulerTask {
+final class StreamingDownloadTask extends SchedulerTask {
   final DownloadSession session;
-  final WebPTransport transport;
-  final void Function(WebPTransportProgress progress)? onProgress;
+  final StreamingImageTransport transport;
+  final void Function(StreamingTransportProgress progress)? onProgress;
   final List<Completer<File>> _waiters = [];
   CancelToken? _cancelToken;
   bool _finished = false;
 
-  WebPDownloadTask({
+  StreamingDownloadTask({
     required super.key,
     required super.generation,
     required super.priority,
@@ -110,7 +110,7 @@ final class WebPDownloadTask extends SchedulerTask {
     return waiter.future;
   }
 
-  void mergeWaitersFrom(WebPDownloadTask incoming) =>
+  void mergeWaitersFrom(StreamingDownloadTask incoming) =>
       _waiters.addAll(incoming._waiters);
 
   @override
@@ -158,7 +158,7 @@ final class WebPDownloadTask extends SchedulerTask {
       _waiters.clear();
       notifyCompleted();
     } catch (error, stack) {
-      final cancelled = isCancelled || error is WebPTransportCancelled;
+      final cancelled = isCancelled || error is StreamingTransportCancelled;
       if (cancelled) {
         if (writer?.active == true) session.pause(writer!);
         _rejectWaiters(error, stack);
@@ -169,7 +169,7 @@ final class WebPDownloadTask extends SchedulerTask {
           session.fail(
             writer!,
             error,
-            retryable: _isRetryableWebPDownloadError(error),
+            retryable: _isRetryableStreamingDownloadError(error),
           );
         }
         _state = TaskState.failed;
@@ -185,15 +185,15 @@ final class WebPDownloadTask extends SchedulerTask {
   @override
   void cancel() {
     if (_finished || isCancelled) return;
-    _cancelToken?.cancel('WebP transport paused');
+    _cancelToken?.cancel('Streaming image transport paused');
     super.cancel();
-    _rejectWaiters(const WebPTransportCancelled('cancelled'));
+    _rejectWaiters(const StreamingTransportCancelled('cancelled'));
     // Do not mark the session paused here. The task remains registered as a
     // running task until transport.execute has unwound and flushed its artifact.
   }
 
-  bool _isRetryableWebPDownloadError(Object error) {
-    if (error is WebPSourceInvariantError) return false;
+  bool _isRetryableStreamingDownloadError(Object error) {
+    if (error is DownloadSourceInvariantError) return false;
     if (error is InvalidImageDataException) {
       // The transport discards the corrupt artifact and advances the source
       // epoch before rethrowing. Allow one clean redownload, then surface a
@@ -270,9 +270,9 @@ final class WebPDecodeTask extends SchedulerTask {
     // 上多线程抖动更差（4线程 40-120ms vs 单线程稳定 50ms）。恒单线程，性能靠
     // native 侧解码线程绑大核（webp_decoder.c bind_current_thread_to_big_cores）。
     cursor.setThreadLimit(1);
-    WebPPerf.count(current ? 'decodeDispatch.current' : 'decodeDispatch.near');
+    ImagePipelinePerf.count(current ? 'decodeDispatch.current' : 'decodeDispatch.near');
     // 诊断：dispatch 时的需求构成，定位「播放页为何 isCurrent=false」。
-    WebPPerf.count(
+    ImagePipelinePerf.count(
       'dispatchDemand.dc${session.demandCount}.cur${session.isCurrent ? 1 : 0}',
     );
     _pool.dispatch(
@@ -306,7 +306,7 @@ final class WebPDecodeTask extends SchedulerTask {
   ) {
     List<NativeFrameHandle> frames = const [];
     try {
-      frames = WebPPerf.sync(
+      frames = ImagePipelinePerf.sync(
         'importDecodedFrames',
         () => session.importDecodedFrames(claim, decoded),
       );

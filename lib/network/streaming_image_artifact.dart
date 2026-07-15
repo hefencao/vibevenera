@@ -7,19 +7,19 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/io/image_data_validator.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 
-typedef WebPArtifactPromoter = Future<File> Function(File source);
+typedef StreamingArtifactPromoter = Future<File> Function(File source);
 
-enum WebPArtifactContentKind { empty, unknown, webp, gif, fallback }
+enum StreamingArtifactContentKind { empty, unknown, webp, gif, fallback }
 
-final class WebPArtifactRestoreState {
-  final WebPArtifactContentKind kind;
+final class StreamingArtifactRestoreState {
+  final StreamingArtifactContentKind kind;
   final int length;
   final Uint8List prefix;
   final bool sourceContainsPrefix;
   final int? declaredLength;
   final bool complete;
 
-  const WebPArtifactRestoreState({
+  const StreamingArtifactRestoreState({
     required this.kind,
     required this.length,
     required this.prefix,
@@ -29,20 +29,20 @@ final class WebPArtifactRestoreState {
   });
 }
 
-final class WebPDownloadArtifact {
+final class StreamingImageArtifact {
   final File file;
-  final WebPArtifactPromoter _promote;
+  final StreamingArtifactPromoter _promote;
   IOSink? _sink;
   int _length = 0;
   bool _initialized = false;
   bool _promoted = false;
 
-  WebPDownloadArtifact(this.file, {required WebPArtifactPromoter promote})
+  StreamingImageArtifact(this.file, {required StreamingArtifactPromoter promote})
     : _promote = promote;
 
-  factory WebPDownloadArtifact.forCacheKey(String cacheKey) {
+  factory StreamingImageArtifact.forCacheKey(String cacheKey) {
     final name = md5.convert(cacheKey.codeUnits).toString();
-    return WebPDownloadArtifact(
+    return StreamingImageArtifact(
       File('${CacheManager.cachePath}_partial/$name'),
       promote: (file) => CacheManager().promoteFile(cacheKey, file),
     );
@@ -55,20 +55,20 @@ final class WebPDownloadArtifact {
   ///
   /// A retained native source at the same offset is not replayed. A process-
   /// local source recreated after restart is rebuilt once from the artifact.
-  Future<WebPArtifactRestoreState> restore(
+  Future<StreamingArtifactRestoreState> restore(
     DownloadSession session,
     DownloadWriterLease writer, {
     void Function()? checkCancelled,
   }) async {
-    if (_initialized) throw StateError('WebP artifact is already initialized');
+    if (_initialized) throw StateError('Streaming image artifact is already initialized');
     checkCancelled?.call();
     _initialized = true;
     _length = await file.exists() ? await file.length() : 0;
     checkCancelled?.call();
 
     if (_length == 0) {
-      return WebPArtifactRestoreState(
-        kind: WebPArtifactContentKind.empty,
+      return StreamingArtifactRestoreState(
+        kind: StreamingArtifactContentKind.empty,
         length: 0,
         prefix: Uint8List(0),
       );
@@ -77,7 +77,7 @@ final class WebPDownloadArtifact {
     final prefix = await _readPrefix();
     checkCancelled?.call();
     final kind = classifyPrefix(prefix, completeLength: _length);
-    final declaredLength = kind == WebPArtifactContentKind.webp
+    final declaredLength = kind == StreamingArtifactContentKind.webp
         ? ImageDataValidator.webPDeclaredLength(prefix)
         : null;
 
@@ -88,11 +88,11 @@ final class WebPDownloadArtifact {
         await reset();
         session.resetSource(
           writer: writer,
-          epoch: session.source.epoch + 1,
+          epoch: session.sourceEpoch + 1,
           expectedLength: 0,
         );
-        return WebPArtifactRestoreState(
-          kind: WebPArtifactContentKind.empty,
+        return StreamingArtifactRestoreState(
+          kind: StreamingArtifactContentKind.empty,
           length: 0,
           prefix: Uint8List(0),
         );
@@ -104,39 +104,39 @@ final class WebPDownloadArtifact {
       );
     }
 
-    if (kind == WebPArtifactContentKind.gif ||
-        kind == WebPArtifactContentKind.fallback) {
-      session.enterFallbackContent(
+    if (kind == StreamingArtifactContentKind.gif ||
+        kind == StreamingArtifactContentKind.fallback) {
+      session.enterExternalContent(
         writer,
         restoredLength: _length,
-        contentKind: kind == WebPArtifactContentKind.gif
+        contentKind: kind == StreamingArtifactContentKind.gif
             ? DownloadContentKind.gif
             : DownloadContentKind.fallback,
       );
-      return WebPArtifactRestoreState(
+      return StreamingArtifactRestoreState(
         kind: kind,
         length: _length,
         prefix: prefix,
       );
     }
 
-    if (kind == WebPArtifactContentKind.unknown) {
+    if (kind == StreamingArtifactContentKind.unknown) {
       final sourceLength = session.sourceCommittedLength;
       final mustReset =
-          session.fallbackContent ||
+          session.externalContent ||
           (sourceLength != 0 && sourceLength != _length);
       if (mustReset) {
         session.resetSource(
           writer: writer,
-          epoch: session.source.epoch + 1,
+          epoch: session.sourceEpoch + 1,
           expectedLength: 0,
         );
       }
       final sourceContainsPrefix =
           !mustReset &&
-          !session.fallbackContent &&
+          !session.externalContent &&
           session.sourceCommittedLength == _length;
-      return WebPArtifactRestoreState(
+      return StreamingArtifactRestoreState(
         kind: kind,
         length: _length,
         prefix: prefix,
@@ -144,10 +144,10 @@ final class WebPDownloadArtifact {
       );
     }
 
-    if (session.fallbackContent || session.sourceCommittedLength > _length) {
+    if (session.externalContent || session.sourceCommittedLength > _length) {
       session.resetSource(
         writer: writer,
-        epoch: session.source.epoch + 1,
+        epoch: session.sourceEpoch + 1,
         expectedLength: declaredLength ?? 0,
       );
       if (declaredLength != null) {
@@ -165,7 +165,7 @@ final class WebPDownloadArtifact {
       await for (final chunk in file.openRead(committed)) {
         checkCancelled?.call();
         if (!writer.active) {
-          throw StateError('WebP writer became stale during artifact restore');
+          throw StateError('Download writer became stale during artifact restore');
         }
         final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
         session.append(bytes, offset: offset, writer: writer);
@@ -180,18 +180,18 @@ final class WebPDownloadArtifact {
         await reset();
         session.resetSource(
           writer: writer,
-          epoch: session.source.epoch + 1,
+          epoch: session.sourceEpoch + 1,
           expectedLength: 0,
         );
-        return WebPArtifactRestoreState(
-          kind: WebPArtifactContentKind.empty,
+        return StreamingArtifactRestoreState(
+          kind: StreamingArtifactContentKind.empty,
           length: 0,
           prefix: Uint8List(0),
         );
       }
     }
 
-    return WebPArtifactRestoreState(
+    return StreamingArtifactRestoreState(
       kind: kind,
       length: _length,
       prefix: prefix,
@@ -202,10 +202,10 @@ final class WebPDownloadArtifact {
   }
 
   Future<void> append(Uint8List bytes, {required int offset}) async {
-    if (!_initialized) throw StateError('WebP artifact is not initialized');
-    if (_promoted) throw StateError('WebP artifact is already promoted');
+    if (!_initialized) throw StateError('Streaming image artifact is not initialized');
+    if (_promoted) throw StateError('Streaming image artifact is already promoted');
     if (offset != _length) {
-      throw StateError('WebP artifact offset mismatch: $offset/$_length');
+      throw StateError('Streaming image artifact offset mismatch: $offset/$_length');
     }
     if (bytes.isEmpty) return;
     await file.parent.create(recursive: true);
@@ -216,7 +216,7 @@ final class WebPDownloadArtifact {
   Future<void> flush() => _sink?.flush() ?? Future<void>.value();
 
   Future<void> reset() async {
-    if (!_initialized) throw StateError('WebP artifact is not initialized');
+    if (!_initialized) throw StateError('Streaming image artifact is not initialized');
     await _closeSink();
     if (await file.exists()) await file.delete();
     _length = 0;
@@ -233,10 +233,10 @@ final class WebPDownloadArtifact {
 
   /// Validates the durable file before it becomes the shared final cache.
   Future<File> promote({required int sealedLength}) async {
-    if (!_initialized) throw StateError('WebP artifact is not initialized');
+    if (!_initialized) throw StateError('Streaming image artifact is not initialized');
     if (_length != sealedLength) {
       throw StateError(
-        'WebP artifact final length mismatch: $_length/$sealedLength',
+        'Streaming image artifact final length mismatch: $_length/$sealedLength',
       );
     }
     await _closeSink();
@@ -282,12 +282,12 @@ final class WebPDownloadArtifact {
     await sink?.close();
   }
 
-  static WebPArtifactContentKind classifyPrefix(
+  static StreamingArtifactContentKind classifyPrefix(
     Uint8List prefix, {
     required int completeLength,
   }) {
-    if (completeLength == 0) return WebPArtifactContentKind.empty;
-    if (prefix.length < 12) return WebPArtifactContentKind.unknown;
+    if (completeLength == 0) return StreamingArtifactContentKind.empty;
+    if (prefix.length < 12) return StreamingArtifactContentKind.unknown;
     final isRiff =
         prefix[0] == 0x52 &&
         prefix[1] == 0x49 &&
@@ -298,7 +298,7 @@ final class WebPDownloadArtifact {
         prefix[9] == 0x45 &&
         prefix[10] == 0x42 &&
         prefix[11] == 0x50;
-    if (isRiff && isWebP) return WebPArtifactContentKind.webp;
+    if (isRiff && isWebP) return StreamingArtifactContentKind.webp;
     final isGif =
         prefix[0] == 0x47 &&
         prefix[1] == 0x49 &&
@@ -307,7 +307,7 @@ final class WebPDownloadArtifact {
         (prefix[4] == 0x37 || prefix[4] == 0x39) &&
         prefix[5] == 0x61;
     return isGif
-        ? WebPArtifactContentKind.gif
-        : WebPArtifactContentKind.fallback;
+        ? StreamingArtifactContentKind.gif
+        : StreamingArtifactContentKind.fallback;
   }
 }

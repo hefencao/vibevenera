@@ -1,5 +1,8 @@
 # WebP Animation Architecture & Evolution
 
+> **已过时**：本文是早期 WebP 架构演进记录。当前实现见
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 ## 1. Architecture Overview & Evolution
 
 ### Layer Diagram

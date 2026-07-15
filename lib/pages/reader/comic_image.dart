@@ -348,13 +348,14 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           );
     }
 
-    // native texture 路径：若底层是 WebPImageProvider 且侧通道已发布纹理，改用
+    // native texture 路径：若流式 provider 已发布 WebP 纹理，改用
     // Texture(textureId) 显示（动图帧由 native 侧原地更新，不经 ImageStream）。
-    final webpProvider = _webpProvider();
-    if (webpProvider != null) {
+    final streamingProvider = _streamingProvider();
+    if (streamingProvider != null) {
       return ValueListenableBuilder<WebPTextureInfo?>(
-        valueListenable:
-            WebPTextureRegistry.instance.listenable(webpProvider.textureFullKey),
+        valueListenable: WebPTextureRegistry.instance.listenable(
+          streamingProvider.textureFullKey,
+        ),
         builder: (context, texInfo, _) =>
             _buildDisplay(context, textureInfo: texInfo),
       );
@@ -362,11 +363,11 @@ class _ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     return _buildDisplay(context, textureInfo: null);
   }
 
-  WebPImageProvider? _webpProvider() {
+  StreamingImageProvider? _streamingProvider() {
     final img = widget.image;
-    if (img is WebPImageProvider) return img;
-    if (img is ResizeImage && img.imageProvider is WebPImageProvider) {
-      return img.imageProvider as WebPImageProvider;
+    if (img is StreamingImageProvider) return img;
+    if (img is ResizeImage && img.imageProvider is StreamingImageProvider) {
+      return img.imageProvider as StreamingImageProvider;
     }
     return null;
   }

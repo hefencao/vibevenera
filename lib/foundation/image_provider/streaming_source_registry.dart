@@ -6,7 +6,7 @@ import 'package:venera/foundation/appdata.dart';
 /// 无扩展名图片在transport确认GIF头，或native游标产出WebP帧后学习该源。
 ///
 /// 新源会立即触发[revision]重建当前provider，并写入implicitData供下次启动复用。
-abstract final class WebPSourceRegistry {
+abstract final class StreamingSourceRegistry {
   static const _key = 'streamingAnimatedSources';
   static const _legacyKey = 'webpAnimatedSources';
 

@@ -3,7 +3,7 @@ import 'dart:ffi';
 import 'dart:ui' as ui;
 
 import 'package:venera/utils/webp_decoder.dart' as webp;
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 
 /// Owns one native RGBA frame returned by the WebP playback cursor.
 ///
@@ -138,7 +138,7 @@ final class FlutterImageRenderer implements FrameRenderer {
         ui.PixelFormat.rgba8888,
         (image) {
           uploadSw.stop();
-          WebPPerf.event(
+          ImagePipelinePerf.event(
             'gpuUpload(${frame.width}x${frame.height})',
             micros: uploadSw.elapsedMicroseconds,
           );

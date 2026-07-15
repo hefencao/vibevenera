@@ -4,7 +4,7 @@ import 'package:venera/foundation/image_provider/pipeline/resource_entry.dart';
 /// 校验 [ResourcePolicy] 交互状态 × 页面优先级的授权表。
 ///
 /// 注意：逐页「解到几帧」的帧目标已不在 ResourcePolicy 上（移到
-/// FrameDepthTable / WebPResourceDemand.decodeTargetFrames），屏外不播放也
+/// FrameDepthTable / StreamingResourceDemand.decodeTargetFrames），屏外不播放也
 /// 不再由 policy 的 allowPlayback 表达，而是在播放泵里按 decode.isCurrent 门控。
 /// 因此本测试只覆盖 policy 真正拥有的授权位与优先级。
 void main() {

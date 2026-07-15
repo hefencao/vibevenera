@@ -1,17 +1,14 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
-import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 
 import 'io/image_data_validator.dart';
-import 'runtime/gif_stream_index.dart';
+import 'runtime/gif_stream_runtime.dart';
 import 'pipeline/pipeline_controller.dart';
 import 'pipeline/resource_entry.dart';
 import 'renderer/frame_renderer.dart';
@@ -20,13 +17,13 @@ import 'renderer/webp_texture_registry.dart';
 import 'session/download_session.dart';
 import 'session/webp_decode_session.dart';
 import 'session/webp_frame_holder.dart';
-import 'session/webp_session_coordinator.dart';
+import 'session/streaming_session_coordinator.dart';
 
-part 'runtime/webp_common.dart';
-part 'pipeline/webp_provider_static.dart';
-part 'runtime/webp_session_completer.dart';
+part 'runtime/streaming_playback.dart';
+part 'pipeline/streaming_provider_support.dart';
+part 'runtime/streaming_image_completer.dart';
 
-class WebPImageProvider extends ImageProvider<WebPImageProvider> {
+class StreamingImageProvider extends ImageProvider<StreamingImageProvider> {
   final String imageKey;
   final String? sourceKey;
   final String cid;
@@ -34,9 +31,8 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   final int targetWidth;
   final int targetHeight;
   final double scale;
-  final DecodedImageCache? cache;
 
-  const WebPImageProvider({
+  const StreamingImageProvider({
     required this.imageKey,
     this.sourceKey,
     required this.cid,
@@ -44,7 +40,6 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
     this.targetWidth = 0,
     this.targetHeight = 0,
     this.scale = 1.0,
-    this.cache,
   });
 
   String get _fullKey {
@@ -59,26 +54,24 @@ class WebPImageProvider extends ImageProvider<WebPImageProvider> {
   String get textureFullKey => _fullKey;
 
   static (int, int) calculateTargetSize(BuildContext context) =>
-      _calculateWebPTargetSize(context);
-
-  static bool isLikelyWebP(String imageKey) => _isLikelyWebP(imageKey);
+      _calculateStreamingTargetSize(context);
 
   static bool isLikelyStreamingAnimation(String imageKey) =>
       _isLikelyWebP(imageKey) || _isLikelyGif(imageKey);
 
   @override
-  Future<WebPImageProvider> obtainKey(ImageConfiguration configuration) =>
-      SynchronousFuture<WebPImageProvider>(this);
+  Future<StreamingImageProvider> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture<StreamingImageProvider>(this);
 
   @override
   ImageStreamCompleter loadImage(
-    WebPImageProvider key,
+    StreamingImageProvider key,
     ImageDecoderCallback decode,
-  ) => _WebPSessionImageStreamCompleter(key);
+  ) => _StreamingImageCompleter(key);
 
   @override
   bool operator ==(Object other) {
-    return other is WebPImageProvider &&
+    return other is StreamingImageProvider &&
         imageKey == other.imageKey &&
         sourceKey == other.sourceKey &&
         cid == other.cid &&

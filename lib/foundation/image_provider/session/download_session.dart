@@ -3,9 +3,9 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:venera/utils/webp_decoder.dart' as webp;
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 
-import '../webp_source_registry.dart';
+import '../streaming_source_registry.dart';
 
 final class DownloadIdentity {
   final String imageKey;
@@ -38,28 +38,29 @@ enum DownloadTransportState { idle, queued, receiving, paused, sealed, failed }
 
 enum DownloadContentKind { unknown, webp, gif, fallback }
 
-final class WebPSourceInvariantError implements Exception {
+final class DownloadSourceInvariantError implements Exception {
   final String message;
   final Object? cause;
 
-  const WebPSourceInvariantError(this.message, [this.cause]);
+  const DownloadSourceInvariantError(this.message, [this.cause]);
 
   @override
   String toString() => cause == null
-      ? 'WebP source invariant failed: $message'
-      : 'WebP source invariant failed: $message ($cause)';
+      ? 'Download source invariant failed: $message'
+      : 'Download source invariant failed: $message ($cause)';
 }
 
 final class DownloadSessionSnapshot {
   final DownloadTransportState transport;
-  final webp.NativeWebPSourceState source;
+  final int sourceEpoch;
+  final int nativeCommittedLength;
   final int desiredPriority;
   final int demandCount;
   final int dependentDecodeSessions;
   final int transportRevision;
   final int expectedLength;
   final int committedLength;
-  final bool fallbackContent;
+  final bool externalContent;
   final DownloadContentKind contentKind;
   final bool failureRetryable;
   final bool networkActive;
@@ -69,14 +70,15 @@ final class DownloadSessionSnapshot {
 
   const DownloadSessionSnapshot({
     required this.transport,
-    required this.source,
+    required this.sourceEpoch,
+    required this.nativeCommittedLength,
     required this.desiredPriority,
     required this.demandCount,
     required this.dependentDecodeSessions,
     required this.transportRevision,
     required this.expectedLength,
     this.committedLength = 0,
-    this.fallbackContent = false,
+    this.externalContent = false,
     this.contentKind = DownloadContentKind.unknown,
     this.failureRetryable = false,
     required this.networkActive,
@@ -152,10 +154,10 @@ final class DownloadSession {
   int? _activeWriterRevision;
   DownloadWriterLease? _activeWriter;
   int _expectedLength;
-  bool _fallbackContent = false;
+  bool _externalContent = false;
   DownloadContentKind _contentKind = DownloadContentKind.unknown;
   bool _networkActive = false;
-  int _fallbackCommittedLength = 0;
+  int _externalCommittedLength = 0;
   int _dependentDecodeSessions = 0;
 
   DownloadSession({
@@ -193,10 +195,11 @@ final class DownloadSession {
   bool get expectedLengthAuthoritative => _expectedLengthAuthoritative;
   bool get failureRetryable => _failureRetryable;
   int get failureCount => _failureCount;
+  int get sourceEpoch => source.epoch;
   int get sourceCommittedLength => source.state.committedLength;
   int get committedLength =>
-      _fallbackContent ? _fallbackCommittedLength : sourceCommittedLength;
-  bool get fallbackContent => _fallbackContent;
+      _externalContent ? _externalCommittedLength : sourceCommittedLength;
+  bool get externalContent => _externalContent;
   DownloadContentKind get contentKind => _contentKind;
   bool get hasDemand => _demands.isNotEmpty;
   bool get isDisposed => _disposed;
@@ -208,14 +211,15 @@ final class DownloadSession {
 
   DownloadSessionSnapshot get snapshot => DownloadSessionSnapshot(
     transport: _transport,
-    source: source.state,
+    sourceEpoch: source.epoch,
+    nativeCommittedLength: sourceCommittedLength,
     desiredPriority: desiredPriority,
     demandCount: demandCount,
     dependentDecodeSessions: _dependentDecodeSessions,
     transportRevision: _transportRevision,
     expectedLength: _expectedLength,
     committedLength: committedLength,
-    fallbackContent: _fallbackContent,
+    externalContent: _externalContent,
     contentKind: _contentKind,
     failureRetryable: _failureRetryable,
     networkActive: _networkActive,
@@ -262,7 +266,7 @@ final class DownloadSession {
 
   /// Returns the writer created by the scheduler-facing download task.
   ///
-  /// `WebPTransport.execute` intentionally keeps its legacy one-positional-
+  /// `StreamingImageTransport.execute` intentionally keeps its legacy one-positional-
   /// argument signature so existing test transports and custom transports do
   /// not all need to change at once. Production transports must obtain this
   /// capability before mutating the source.
@@ -314,7 +318,7 @@ final class DownloadSession {
     if (_expectedLengthAuthoritative) {
       if (!authoritative) return;
       if (value != _expectedLength) {
-        throw WebPSourceInvariantError(
+        throw DownloadSourceInvariantError(
           'conflicting authoritative lengths: $_expectedLength/$value',
         );
       }
@@ -322,7 +326,7 @@ final class DownloadSession {
     }
     if (value < committedLength) {
       if (authoritative) {
-        throw WebPSourceInvariantError(
+        throw DownloadSourceInvariantError(
           'authoritative length $value is smaller than committed '
           '$committedLength',
         );
@@ -350,15 +354,15 @@ final class DownloadSession {
   }) {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
-    if (_fallbackContent) {
-      throw const WebPSourceInvariantError(
-        'cannot append WebP bytes after entering fallback content mode',
+    if (_externalContent) {
+      throw const DownloadSourceInvariantError(
+        'cannot append WebP bytes after entering external content mode',
       );
     }
     if (bytes.isEmpty) return;
     final committed = sourceCommittedLength;
     if (offset != committed) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'gap/overlap: expected offset=$committed, got=$offset, '
         'length=${bytes.length}, epoch=${activeWriter.sourceEpoch}, '
         'writer=${activeWriter.revision}',
@@ -367,7 +371,7 @@ final class DownloadSession {
     try {
       source.append(bytes, offset: offset);
     } catch (error) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'native append rejected epoch=${activeWriter.sourceEpoch}, '
         'offset=$offset, length=${bytes.length}',
         error,
@@ -384,22 +388,22 @@ final class DownloadSession {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
     if (epoch <= source.epoch) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'source epoch must increase: $epoch <= ${source.epoch}',
       );
     }
     try {
       source.reset(epoch: epoch, expectedLength: expectedLength);
     } catch (error) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'native reset rejected epoch=$epoch expected=$expectedLength',
         error,
       );
     }
     activeWriter._replaceEpoch(epoch);
-    _fallbackContent = false;
+    _externalContent = false;
     _contentKind = DownloadContentKind.unknown;
-    _fallbackCommittedLength = 0;
+    _externalCommittedLength = 0;
     _expectedLength = expectedLength;
     _expectedLengthAuthoritative = false;
     _artifactFile = null;
@@ -414,20 +418,20 @@ final class DownloadSession {
   void seal([DownloadWriterLease? writer, File? artifactFile]) {
     final activeWriter = _resolveWriter(writer);
     _requireWriter(activeWriter);
-    if (_fallbackContent) {
-      throw const WebPSourceInvariantError(
-        'fallback content must be finalized with sealFallback',
+    if (_externalContent) {
+      throw const DownloadSourceInvariantError(
+        'fallback content must be finalized with sealExternalContent',
       );
     }
     if (_expectedLength > 0 && sourceCommittedLength != _expectedLength) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'cannot seal incomplete source: $sourceCommittedLength/$_expectedLength',
       );
     }
     try {
       source.seal();
     } catch (error) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'native seal rejected epoch=${activeWriter.sourceEpoch}, '
         'length=$sourceCommittedLength',
         error,
@@ -444,11 +448,11 @@ final class DownloadSession {
     _scheduleReconcile();
   }
 
-  /// Switches this download to the generic non-WebP artifact path.
+  /// Switches this download to the external-codec artifact path.
   ///
   /// At most a small content-sniff prefix exists outside the artifact. No
   /// compressed WebP history is replayed through this path.
-  void enterFallbackContent(
+  void enterExternalContent(
     DownloadWriterLease writer, {
     int restoredLength = 0,
     DownloadContentKind contentKind = DownloadContentKind.fallback,
@@ -458,33 +462,33 @@ final class DownloadSession {
         contentKind != DownloadContentKind.fallback) {
       throw ArgumentError.value(contentKind, 'contentKind');
     }
-    if (!_fallbackContent && sourceCommittedLength > 0) {
+    if (!_externalContent && sourceCommittedLength > 0) {
       final nextEpoch = source.epoch + 1;
       try {
         source.reset(epoch: nextEpoch, expectedLength: 0);
       } catch (error) {
-        throw WebPSourceInvariantError(
-          'failed to reset native source before fallback content',
+        throw DownloadSourceInvariantError(
+          'failed to reset native source before external content',
           error,
         );
       }
       writer._replaceEpoch(nextEpoch);
     }
-    _fallbackContent = true;
+    _externalContent = true;
     _contentKind = contentKind;
     if (contentKind == DownloadContentKind.gif) {
-      WebPSourceRegistry.markStreaming(identity.sourceKey);
+      StreamingSourceRegistry.markStreaming(identity.sourceKey);
     }
-    _fallbackCommittedLength = restoredLength;
+    _externalCommittedLength = restoredLength;
     _expectedLengthAuthoritative = false;
     _decodeSafePublish();
   }
 
   void identifyWebPContent(DownloadWriterLease writer) {
     _requireWriter(writer);
-    if (_fallbackContent) {
-      throw const WebPSourceInvariantError(
-        'cannot identify WebP after entering fallback content mode',
+    if (_externalContent) {
+      throw const DownloadSourceInvariantError(
+        'cannot identify WebP after entering external content mode',
       );
     }
     if (_contentKind == DownloadContentKind.webp) return;
@@ -501,37 +505,37 @@ final class DownloadSession {
 
   /// Advances the persisted generic-content range. The artifact itself owns
   /// the bytes; the session owns only its contiguous length and lifecycle.
-  void appendFallbackRange(
+  void appendExternalRange(
     DownloadWriterLease writer, {
     required int offset,
     required int length,
   }) {
     _requireWriter(writer);
-    if (!_fallbackContent) enterFallbackContent(writer);
-    if (length < 0 || offset != _fallbackCommittedLength) {
-      throw WebPSourceInvariantError(
-        'fallback range discontinuity: committed=$_fallbackCommittedLength, '
+    if (!_externalContent) enterExternalContent(writer);
+    if (length < 0 || offset != _externalCommittedLength) {
+      throw DownloadSourceInvariantError(
+        'external range discontinuity: committed=$_externalCommittedLength, '
         'offset=$offset, length=$length',
       );
     }
-    _fallbackCommittedLength += length;
+    _externalCommittedLength += length;
     _scheduleBytePublish();
   }
 
-  void sealFallback(
+  void sealExternalContent(
     DownloadWriterLease writer,
     File artifactFile, {
     required int finalLength,
   }) {
     _requireWriter(writer);
-    if (!_fallbackContent || _fallbackCommittedLength != finalLength) {
-      throw WebPSourceInvariantError(
-        'invalid fallback seal: mode=$_fallbackContent, '
-        'committed=$_fallbackCommittedLength, final=$finalLength',
+    if (!_externalContent || _externalCommittedLength != finalLength) {
+      throw DownloadSourceInvariantError(
+        'invalid external-content seal: mode=$_externalContent, '
+        'committed=$_externalCommittedLength, final=$finalLength',
       );
     }
     if (_expectedLength > 0 && finalLength != _expectedLength) {
-      throw WebPSourceInvariantError(
+      throw DownloadSourceInvariantError(
         'fallback final length $finalLength does not match expected '
         '$_expectedLength',
       );
@@ -770,7 +774,7 @@ final class DownloadSessionRegistry {
     int epoch = 1,
   }) => _sessions.putIfAbsent(
     identity,
-    () => WebPPerf.sync(
+    () => ImagePipelinePerf.sync(
       'downloadSession.create',
       () => DownloadSession(
         identity: identity,

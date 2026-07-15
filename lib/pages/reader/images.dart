@@ -87,7 +87,7 @@ class _ReaderImagesState extends State<_ReaderImages>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
     if (state == AppLifecycleState.resumed && reader.images != null) {
-      WebPImageProvider.setInteractionState(InteractionState.idle);
+      StreamingImageProvider.setInteractionState(InteractionState.idle);
       _attachReaderPipeline(context);
       _reportReaderPage(context, reader.page);
     }
@@ -432,12 +432,12 @@ class _GalleryModeState extends State<_GalleryMode>
 
   /// WebP 三级缓存（生命周期绑定本 State）
   @override
-  final DecodedImageCache webpCache = DecodedImageCache();
+  final DecodedImageCache streamingCache = DecodedImageCache();
 
-  // 某源被确认为动图 WebP 时重建：当前页 provider 从 ReaderImageProvider 翻成
-  // WebPImageProvider（挂到管道正在解码的 session）→ 首次浏览即流式。仅首张动图页
-  // 触发一次，之后同源页 build 时已在 registry → 直接 WebP、不再翻转。
-  void _onWebPSourceLearned() {
+  // 某源被确认为流式动图时重建：当前页 provider 从 ReaderImageProvider 翻成
+  // StreamingImageProvider（挂到管道正在解码的 session）→ 首次浏览即流式。仅首张动图页
+  // 触发一次，之后同源页 build 时已在 registry → 直接使用流式 provider、不再翻转。
+  void _onStreamingSourceLearned() {
     if (mounted) setState(() {});
   }
 
@@ -446,7 +446,7 @@ class _GalleryModeState extends State<_GalleryMode>
     reader = context.reader;
     controller = PageController(initialPage: reader.page);
     reader._imageViewController = this;
-    WebPSourceRegistry.revision.addListener(_onWebPSourceLearned);
+    StreamingSourceRegistry.revision.addListener(_onStreamingSourceLearned);
     Future.microtask(() {
       context.readerScaffold.setFloatingButton(0);
     });
@@ -462,8 +462,8 @@ class _GalleryModeState extends State<_GalleryMode>
   @override
   void dispose() {
     _settlingTimer?.cancel();
-    WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
-    webpCache.dispose();
+    StreamingSourceRegistry.revision.removeListener(_onStreamingSourceLearned);
+    streamingCache.dispose();
     _ComicImageState.clear();
     super.dispose();
   }
@@ -519,9 +519,9 @@ class _GalleryModeState extends State<_GalleryMode>
       onNotification: (notification) {
         if (notification.depth != 0) return false;
         if (notification is ScrollStartNotification) {
-          WebPImageProvider.setInteractionState(InteractionState.dragging);
+          StreamingImageProvider.setInteractionState(InteractionState.dragging);
         } else if (notification is ScrollEndNotification) {
-          WebPImageProvider.setInteractionState(InteractionState.idle);
+          StreamingImageProvider.setInteractionState(InteractionState.idle);
         }
         return false;
       },
@@ -860,7 +860,7 @@ class _GalleryModeState extends State<_GalleryMode>
         String? imageKey;
         if (provider is ReaderImageProvider) {
           imageKey = provider.imageKey;
-        } else if (provider is WebPImageProvider) {
+        } else if (provider is StreamingImageProvider) {
           imageKey = provider.imageKey;
         }
         if (imageKey != null) {
@@ -914,7 +914,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
   Timer? _settlingTimer;
 
   @override
-  final DecodedImageCache webpCache = DecodedImageCache();
+  final DecodedImageCache streamingCache = DecodedImageCache();
 
   /// Delayed scrolling state timer. Always cancel before replacing it.
   Timer? _delayedScrollingTimer;
@@ -932,8 +932,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
   bool isZoomedIn = false;
   bool isLongPressing = false;
 
-  // 见 _GalleryModeState._onWebPSourceLearned。
-  void _onWebPSourceLearned() {
+  // 见 _GalleryModeState._onStreamingSourceLearned。
+  void _onStreamingSourceLearned() {
     if (mounted) setState(() {});
   }
 
@@ -942,7 +942,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
     reader = context.reader;
     reader._imageViewController = this;
     itemPositionsListener.itemPositions.addListener(onPositionChanged);
-    WebPSourceRegistry.revision.addListener(_onWebPSourceLearned);
+    StreamingSourceRegistry.revision.addListener(_onStreamingSourceLearned);
     Future.microtask(() {
       if (mounted) {
         _attachReaderPipeline(context);
@@ -957,8 +957,8 @@ class _ContinuousModeState extends State<_ContinuousMode>
     _settlingTimer?.cancel();
     _delayedScrollingTimer?.cancel();
     itemPositionsListener.itemPositions.removeListener(onPositionChanged);
-    WebPSourceRegistry.revision.removeListener(_onWebPSourceLearned);
-    webpCache.dispose();
+    StreamingSourceRegistry.revision.removeListener(_onStreamingSourceLearned);
+    streamingCache.dispose();
     _ComicImageState.clear();
     super.dispose();
   }
@@ -1190,10 +1190,10 @@ class _ContinuousModeState extends State<_ContinuousMode>
       onNotification: (notification) {
         if (notification is ScrollStartNotification) {
           delayedSetIsScrolling(true);
-          WebPImageProvider.setInteractionState(InteractionState.scroll);
+          StreamingImageProvider.setInteractionState(InteractionState.scroll);
         } else if (notification is ScrollEndNotification) {
           delayedSetIsScrolling(false);
-          WebPImageProvider.setInteractionState(InteractionState.idle);
+          StreamingImageProvider.setInteractionState(InteractionState.idle);
         }
 
         var scale = photoViewController.scale ?? 1.0;
@@ -1396,7 +1396,7 @@ class _ContinuousModeState extends State<_ContinuousMode>
         var provider = imageState.widget.image;
         if (provider is ReaderImageProvider) {
           imageKey = provider.imageKey;
-        } else if (provider is WebPImageProvider) {
+        } else if (provider is StreamingImageProvider) {
           imageKey = provider.imageKey;
         }
       }
@@ -1424,14 +1424,14 @@ ImageProvider _createImageProviderFromKey(
 
   // 普通静态图走轻量 ReaderImageProvider；明确的 GIF/WebP 动图进入流式管线。
   //
-  // 判据两条：①文件名含 .webp/.gif；②registry 记得该源确认过动图 WebP
+  // 判据两条：①文件名含 .webp/.gif；②registry 记得该源确认过流式动图
   // ——因为有的源图片 key 是纯数字无扩展名（如 111），只靠文件名会误判为非 webp、被
   // 打回非流式老路（转圈转完才播）。registry 是会话稳定的（只读上次持久化快照），保证
   // 同一源本会话内所有页 provider 类型一致，翻页无 provider 翻转/无 setState churn。
   final sourceKey = reader.type.comicSource?.key;
   final useStreamingProvider =
-      WebPImageProvider.isLikelyStreamingAnimation(imageKey) ||
-      WebPSourceRegistry.isStreamingSource(sourceKey);
+      StreamingImageProvider.isLikelyStreamingAnimation(imageKey) ||
+      StreamingSourceRegistry.isStreamingSource(sourceKey);
   if (!useStreamingProvider) {
     final page = reader.images?.indexOf(imageKey) ?? 0;
     return ReaderImageProvider(
@@ -1443,14 +1443,11 @@ ImageProvider _createImageProviderFromKey(
     );
   }
 
-  final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
-    context,
-  );
+  final (targetWidth, targetHeight) =
+      StreamingImageProvider.calculateTargetSize(context);
   final double dpr = MediaQuery.of(context).devicePixelRatio;
-  var imageCtrl = reader._imageViewController;
-  final cache = imageCtrl?.webpCache;
 
-  return WebPImageProvider(
+  return StreamingImageProvider(
     imageKey: imageKey,
     sourceKey: sourceKey,
     cid: reader.cid,
@@ -1458,7 +1455,6 @@ ImageProvider _createImageProviderFromKey(
     targetWidth: targetWidth,
     targetHeight: targetHeight,
     scale: 1.0 / dpr,
-    cache: cache,
   );
 }
 
@@ -1473,16 +1469,15 @@ void _attachReaderPipeline(BuildContext context) {
   final reader = context.reader;
   final images = reader.images;
   if (images == null) return;
-  final (targetWidth, targetHeight) = WebPImageProvider.calculateTargetSize(
-    context,
-  );
+  final (targetWidth, targetHeight) =
+      StreamingImageProvider.calculateTargetSize(context);
   PipelineController.instance.attachReaderSession(ReaderPipelineSession(
     owner: reader,
     images: images,
     cid: reader.cid,
     eid: reader.eid,
     sourceKey: reader.type.comicSource?.key,
-    cache: reader._imageViewController?.webpCache,
+    cache: reader._imageViewController?.streamingCache,
     targetWidth: targetWidth,
     targetHeight: targetHeight,
     preloadCount: appdata.settings["preloadImageCount"] ?? 5,

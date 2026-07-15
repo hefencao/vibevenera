@@ -319,7 +319,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         ((s - speedMin) / (speedMax - speedMin)).clamp(0.0, 1.0);
     double denormalizeSpeed(double v) {
       final s = speedMin + v * (speedMax - speedMin);
-      for (final p in webpSpeedPresets) {
+      for (final p in animatedSpeedPresets) {
         if ((s - p).abs() < 0.03) return p;
       }
       return (s * 100).round() / 100;
@@ -330,14 +330,14 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       onTap: _showSpeedSlider
           ? null
           : () {
-              final idx = webpSpeedPresets.indexOf(webpPlaybackSpeed);
+              final idx = animatedSpeedPresets.indexOf(animatedPlaybackSpeed);
               final next =
-                  webpSpeedPresets[(idx + 1) % webpSpeedPresets.length];
-              setState(() => webpPlaybackSpeed = next);
+                  animatedSpeedPresets[(idx + 1) % animatedSpeedPresets.length];
+              setState(() => animatedPlaybackSpeed = next);
             },
       onLongPressStart: (details) {
         _dragStartY = details.globalPosition.dy;
-        _dragStartSpeed = webpPlaybackSpeed;
+        _dragStartSpeed = animatedPlaybackSpeed;
         setState(() => _showSpeedSlider = true);
       },
       onLongPressMoveUpdate: (details) {
@@ -347,7 +347,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           speedMax,
         );
         setState(
-          () => webpPlaybackSpeed = denormalizeSpeed(normalizeSpeed(speed)),
+          () => animatedPlaybackSpeed = denormalizeSpeed(normalizeSpeed(speed)),
         );
       },
       onLongPressEnd: (_) => setState(() => _showSpeedSlider = false),
@@ -369,15 +369,15 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
                 child: Column(
                   children: [
                     Text(
-                      '${webpPlaybackSpeed}x',
+                      '${animatedPlaybackSpeed}x',
                       style: const TextStyle(fontSize: 11),
                     ),
                     const SizedBox(height: 8),
                     Expanded(
                       child: CustomPaint(
                         painter: _SpeedSliderPainter(
-                          value: normalizeSpeed(webpPlaybackSpeed),
-                          presets: webpSpeedPresets,
+                          value: normalizeSpeed(animatedPlaybackSpeed),
+                          presets: animatedSpeedPresets,
                           min: speedMin,
                           max: speedMax,
                           color: Theme.of(context).colorScheme.primary,
@@ -397,7 +397,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
             ),
             child: Center(
               child: Text(
-                '${webpPlaybackSpeed}x',
+                '${animatedPlaybackSpeed}x',
                 style: const TextStyle(fontSize: 13),
               ),
             ),
@@ -747,7 +747,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       reversed: isReversed,
       divisions: (context.reader.maxPage - 1).clamp(2, 1 << 16),
       onChangeStart: () {
-        WebPImageProvider.setInteractionState(InteractionState.scroll);
+        StreamingImageProvider.setInteractionState(InteractionState.scroll);
       },
       onChanged: (i) {
         final page = i.toInt();
@@ -759,7 +759,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
       onChangeEnd: () {
         final page = context.reader.page.clamp(1, context.reader.maxPage);
         context.reader.update();
-        WebPImageProvider.setInteractionState(InteractionState.idle);
+        StreamingImageProvider.setInteractionState(InteractionState.idle);
         _reportReaderPage(context, page);
       },
     );

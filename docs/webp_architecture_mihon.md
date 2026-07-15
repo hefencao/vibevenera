@@ -1,5 +1,8 @@
 # Mihon WebP 图片处理架构参考
 
+> **参考资料，非当前实现**：Venera 当前架构见
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 > 本文档分析 [Mihon](https://github.com/mihonapp/mihon) 项目中 WebP 图片的完整处理流程，
 > 包括格式检测、解码、缓存和画廊渲染，作为 Venera 项目功耗优化的架构参考。
 >

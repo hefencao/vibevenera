@@ -1,21 +1,20 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:venera/foundation/cache_manager.dart';
-import 'package:venera/foundation/image_provider/webp_image.dart';
+import 'package:venera/foundation/image_provider/streaming_image.dart';
 
 void main() {
   test('GIF URLs use the streaming animation provider', () {
     expect(
-      WebPImageProvider.isLikelyStreamingAnimation('https://a/1.GIF?x=1'),
+      StreamingImageProvider.isLikelyStreamingAnimation('https://a/1.GIF?x=1'),
       isTrue,
     );
     expect(
-      WebPImageProvider.isLikelyStreamingAnimation('https://a/1.jpg'),
+      StreamingImageProvider.isLikelyStreamingAnimation('https://a/1.jpg'),
       isFalse,
     );
   });
 
   test('texture identity includes comic and episode', () {
-    final first = WebPImageProvider(
+    final first = StreamingImageProvider(
       imageKey: '0',
       sourceKey: 'ehentai',
       cid: 'old',
@@ -23,7 +22,7 @@ void main() {
       targetWidth: 720,
       targetHeight: 1280,
     );
-    final second = WebPImageProvider(
+    final second = StreamingImageProvider(
       imageKey: '0',
       sourceKey: 'ehentai',
       cid: 'new',
@@ -35,20 +34,8 @@ void main() {
     expect(first.textureFullKey, isNot(second.textureFullKey));
   });
 
-  test('cache alias keeps an independent playback identity', () {
-    CacheManager().aliasImage(
-      imageKey: 'new-index',
-      sourceKey: 'ehentai',
-      cid: 'new-version',
-      eid: '0',
-      target: const CacheAliasTarget(
-        'old-index',
-        'ehentai',
-        'old-version',
-        '0',
-      ),
-    );
-    final oldPage = WebPImageProvider(
+  test('logical version pages keep independent playback identity', () {
+    final oldPage = StreamingImageProvider(
       imageKey: 'old-index',
       sourceKey: 'ehentai',
       cid: 'old-version',
@@ -56,7 +43,7 @@ void main() {
       targetWidth: 720,
       targetHeight: 1280,
     );
-    final newPage = WebPImageProvider(
+    final newPage = StreamingImageProvider(
       imageKey: 'new-index',
       sourceKey: 'ehentai',
       cid: 'new-version',

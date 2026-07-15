@@ -6,7 +6,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:venera/utils/trace_log.dart';
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 
 /// WebP 图片格式信息
 class WebPImageInfo {
@@ -1507,7 +1507,7 @@ class WorkerPoolScheduler {
       // 诊断：单批解码往返耗时（含 isolate 通信）。除以 framesToDecode 得每帧解码
       // 时长，与帧显示间隔比较即可判定「解码是否追得上播放」。
       decodeSw.stop();
-      WebPPerf.event(
+      ImagePipelinePerf.event(
         isCurrent ? 'decodeMs.cur' : 'decodeMs.near',
         micros: decodeSw.elapsedMicroseconds,
       );

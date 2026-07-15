@@ -6,9 +6,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/image_provider/pipeline/task_scheduler.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
-import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
+import 'package:venera/foundation/image_provider/session/streaming_session_coordinator.dart';
 import 'package:venera/network/app_dio.dart';
-import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/network/streaming_image_transport.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 void main() {
@@ -17,7 +17,7 @@ void main() {
     scheduler.clear();
     addTearDown(scheduler.clear);
     var transportStarted = false;
-    final coordinator = WebPSessionCoordinator(
+    final coordinator = StreamingSessionCoordinator(
       scheduler: scheduler,
       transportFactory: (_) => _NeverStartedTransport(
         onExecute: () => transportStarted = true,
@@ -38,7 +38,7 @@ void main() {
         targetHeight: 100,
       ),
       scopeId: 'display',
-      demand: const WebPResourceDemand(
+      demand: const StreamingResourceDemand(
         downloadPriority: 0,
         decodePriority: 60,
         allowDownload: false,
@@ -59,14 +59,14 @@ void main() {
   test('logical detach does not cancel a receiving transport', () async {
     final scheduler = TaskScheduler.instance;
     scheduler.clear();
-    final file = File('${Directory.systemTemp.path}/webp-session-test');
+    final file = File('${Directory.systemTemp.path}/streaming-session-test');
     await file.writeAsBytes(const [1]);
     addTearDown(() async {
       scheduler.clear();
       if (await file.exists()) await file.delete();
     });
     final transport = _BlockingTransport(file);
-    final coordinator = WebPSessionCoordinator(
+    final coordinator = StreamingSessionCoordinator(
       scheduler: scheduler,
       transportFactory: (_) => transport,
       sourceFactory: (_, _) => _FakeSource(),
@@ -87,7 +87,7 @@ void main() {
       downloadIdentity: downloadIdentity,
       decodeIdentity: decodeIdentity,
       scopeId: 'reader',
-      demand: const WebPResourceDemand(
+      demand: const StreamingResourceDemand(
         downloadPriority: 100,
         decodePriority: 0,
         allowDownload: true,
@@ -117,7 +117,7 @@ void main() {
     scheduler.clear();
     addTearDown(scheduler.clear);
     final transport = _FailingTransport();
-    final coordinator = WebPSessionCoordinator(
+    final coordinator = StreamingSessionCoordinator(
       scheduler: scheduler,
       transportFactory: (_) => transport,
       sourceFactory: (_, _) => _FakeSource(),
@@ -137,7 +137,7 @@ void main() {
         targetHeight: 100,
       ),
       scopeId: 'reader',
-      demand: const WebPResourceDemand(
+      demand: const StreamingResourceDemand(
         downloadPriority: 100,
         decodePriority: 0,
         allowDownload: true,
@@ -161,7 +161,7 @@ void main() {
   });
 }
 
-final class _NeverStartedTransport implements WebPTransport {
+final class _NeverStartedTransport implements StreamingImageTransport {
   final void Function() onExecute;
 
   _NeverStartedTransport({required this.onExecute});
@@ -170,14 +170,14 @@ final class _NeverStartedTransport implements WebPTransport {
   Future<File> execute(
     DownloadSession session, {
     CancelToken? cancelToken,
-    void Function(WebPTransportProgress progress)? onProgress,
+    void Function(StreamingTransportProgress progress)? onProgress,
   }) {
     onExecute();
     throw StateError('Display demand must not execute transport');
   }
 }
 
-final class _BlockingTransport implements WebPTransport {
+final class _BlockingTransport implements StreamingImageTransport {
   final File file;
   final Completer<void> started = Completer<void>();
   final Completer<void> release = Completer<void>();
@@ -190,7 +190,7 @@ final class _BlockingTransport implements WebPTransport {
   Future<File> execute(
     DownloadSession session, {
     CancelToken? cancelToken,
-    void Function(WebPTransportProgress progress)? onProgress,
+    void Function(StreamingTransportProgress progress)? onProgress,
   }) async {
     this.cancelToken = cancelToken;
     session.markReceiving();
@@ -202,14 +202,14 @@ final class _BlockingTransport implements WebPTransport {
   }
 }
 
-final class _FailingTransport implements WebPTransport {
+final class _FailingTransport implements StreamingImageTransport {
   final failed = Completer<void>();
 
   @override
   Future<File> execute(
     DownloadSession session, {
     CancelToken? cancelToken,
-    void Function(WebPTransportProgress progress)? onProgress,
+    void Function(StreamingTransportProgress progress)? onProgress,
   }) async {
     session.markReceiving();
     failed.complete();

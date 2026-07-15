@@ -1,6 +1,6 @@
-part of '../webp_image.dart';
+part of '../streaming_image.dart';
 
-(int, int) _calculateWebPTargetSize(BuildContext context) {
+(int, int) _calculateStreamingTargetSize(BuildContext context) {
   // 解码目标尺寸必须只有一个「稳定」的来源。此前用 MediaQuery.of(context).size *
   // dpr：该值在冷启动时随系统栏/安全区 insets 落定而变化（首帧 1080x2400 → 落定
   // 1080x2336）。provider 在 gallery item builder（insets 未定）建立、pipeline 的
@@ -15,12 +15,12 @@ part of '../webp_image.dart';
   // 可视区的解码结果缩放显示，视觉无差异。
   final view = View.of(context);
   final size = view.physicalSize;
-  final width = _alignWebPDecodeDimension(size.width.round());
-  final height = _alignWebPDecodeDimension(size.height.round());
+  final width = _alignStreamingDecodeDimension(size.width.round());
+  final height = _alignStreamingDecodeDimension(size.height.round());
   return (width, height);
 }
 
-int _alignWebPDecodeDimension(int value, {int alignment = 8}) {
+int _alignStreamingDecodeDimension(int value, {int alignment = 8}) {
   if (value <= alignment) return math.max(1, value);
   final aligned = value - (value % alignment);
   return math.max(alignment, aligned);

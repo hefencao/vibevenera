@@ -685,7 +685,8 @@ abstract class ImageDownloader {
     bool streamOnly = false,
   }) async* {
     final cacheKey = "$imageKey@$sourceKey@$cid@$eid";
-    final isWebPSession = debugLabel?.startsWith('webp-session:') ?? false;
+    final isStreamingSession =
+        debugLabel?.startsWith('streaming-image:') ?? false;
     CacheLookupState? cacheState;
     _throwIfCancelled(cancelToken);
 
@@ -693,11 +694,11 @@ abstract class ImageDownloader {
     final cached = await CacheManager().findCache(
       cacheKey,
       cacheClass: CacheClass.readerPage,
-      onLookup: isWebPSession ? (state) => cacheState = state : null,
+      onLookup: isStreamingSession ? (state) => cacheState = state : null,
     );
-    if (isWebPSession) {
+    if (isStreamingSession) {
       Log.info(
-        'WebP.Cache',
+        'Streaming.Cache',
         'disk ${cacheState!.name}: source=$sourceKey cid=$cid eid=$eid key=${_shortDownloadKey(cacheKey)}',
       );
     }
@@ -709,9 +710,9 @@ abstract class ImageDownloader {
       );
       _throwIfCancelled(cancelToken);
       if (!validation.valid) {
-        if (isWebPSession) {
+        if (isStreamingSession) {
           Log.warning(
-            'WebP.Cache',
+            'Streaming.Cache',
             'disk invalid: source=$sourceKey cid=$cid eid=$eid reason=${validation.reason}',
           );
         }

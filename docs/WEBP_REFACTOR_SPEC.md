@@ -1,5 +1,8 @@
 # WebP Streaming Refactor Spec
 
+> **已过时**：这是仅针对 WebP 的阶段性重构规范。当前实现见
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)。
+
 ## Required behavior
 
 1. Current page has highest network, decode, upload and playback priority.

@@ -44,7 +44,7 @@ void main() {
     );
   });
 
-  testWidgets('Flutter codec accepts a synthesized partial trailer', (_) async {
+  test('Flutter codec accepts a synthesized partial trailer', () async {
     final animated = _twoFrameGif(single);
     final partial = Uint8List.fromList([
       ...animated.sublist(0, animated.length - 1),

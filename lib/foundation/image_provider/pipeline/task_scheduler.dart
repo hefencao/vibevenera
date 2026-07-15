@@ -11,7 +11,7 @@ import 'tasks.dart';
 //                                                              │
 //                                              ┌───────────────┼───────────────┐
 //                                              ▼               ▼               ▼
-//                                      WebPDownloadTask  WebPDecodeTask   (future)
+//                                      StreamingDownloadTask  WebPDecodeTask   (future)
 //
 //   TaskScheduler — pure dispatcher (priority queue + concurrency)
 //   TaskRegistry  — key→task lookup + dedup
@@ -241,7 +241,8 @@ class _TaskLaneScheduler {
   void _sortQueue() => _queue.sort((a, b) => b.priority.compareTo(a.priority));
 
   void _mergeWaiters(SchedulerTask existing, SchedulerTask incoming) {
-    if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
+    if (existing is StreamingDownloadTask &&
+        incoming is StreamingDownloadTask) {
       existing.mergeWaitersFrom(incoming);
     }
   }
@@ -254,7 +255,8 @@ class _TaskLaneScheduler {
     // Same-key work represents the same session. Promotion updates the task in
     // place; it must never cancel/recreate a running transport.
     if (_registry.isRunning(existing.key)) return false;
-    if (existing is WebPDownloadTask && incoming is WebPDownloadTask) {
+    if (existing is StreamingDownloadTask &&
+        incoming is StreamingDownloadTask) {
       return false;
     }
     return existing.cancelable &&

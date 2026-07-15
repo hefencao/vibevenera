@@ -3,13 +3,13 @@ import 'dart:async';
 import 'package:venera/foundation/image_provider/pipeline/task_scheduler.dart';
 import 'package:venera/foundation/image_provider/pipeline/tasks.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
-import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/network/streaming_image_transport.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
 import 'download_session.dart';
 import 'webp_decode_session.dart';
 
-final class WebPResourceDemand {
+final class StreamingResourceDemand {
   final int downloadPriority;
   final int decodePriority;
   final bool allowDownload;
@@ -20,7 +20,7 @@ final class WebPResourceDemand {
   /// 本页目标缓冲帧深（rank 水位表算出）。透传到 holder 决定解到几帧。
   final int decodeTargetFrames;
 
-  const WebPResourceDemand({
+  const StreamingResourceDemand({
     required this.downloadPriority,
     required this.decodePriority,
     required this.allowDownload,
@@ -31,8 +31,8 @@ final class WebPResourceDemand {
   });
 }
 
-final class WebPResourceLease {
-  final WebPSessionCoordinator _coordinator;
+final class StreamingResourceLease {
+  final StreamingSessionCoordinator _coordinator;
   final String scopeId;
   final DownloadSession download;
   final WebPDecodeSession decode;
@@ -40,12 +40,12 @@ final class WebPResourceLease {
   WebPDecodeDemandLease? _decodeLease;
   bool _attached = true;
 
-  WebPResourceLease._(
+  StreamingResourceLease._(
     this._coordinator,
     this.scopeId,
     this.download,
     this.decode,
-    WebPResourceDemand demand,
+    StreamingResourceDemand demand,
   ) {
     update(demand);
   }
@@ -55,8 +55,8 @@ final class WebPResourceLease {
   void updateDownloadPriority(int priority) =>
       _downloadLease?.updatePriority(priority);
 
-  void update(WebPResourceDemand demand) {
-    if (!_attached) throw StateError('WebP resource lease is detached');
+  void update(StreamingResourceDemand demand) {
+    if (!_attached) throw StateError('Streaming resource lease is detached');
     if (demand.allowDownload) {
       final lease = _downloadLease;
       if (lease == null) {
@@ -109,26 +109,26 @@ final class WebPResourceLease {
   }
 }
 
-final class WebPSessionCoordinator {
+final class StreamingSessionCoordinator {
   final TaskScheduler scheduler;
-  final WebPTransport Function(DownloadIdentity identity) transportFactory;
+  final StreamingImageTransport Function(DownloadIdentity identity) transportFactory;
   final FrameRenderer renderer;
   final void Function(
     DownloadIdentity identity,
-    WebPTransportProgress progress,
+    StreamingTransportProgress progress,
   )?
   onProgress;
   final void Function(DownloadSession session)? onDownloadSession;
 
   late final DownloadSessionRegistry downloads;
   late final WebPDecodeSessionRegistry decodes;
-  final Set<WebPResourceLease> _leases = {};
+  final Set<StreamingResourceLease> _leases = {};
   final Set<WebPDecodeIdentity> _pendingDecodeEvictions = {};
   final Set<DownloadIdentity> _pendingDownloadEvictions = {};
   final Set<WebPDecodeSession> _retiredDecodes = {};
   final Map<DownloadIdentity, Timer> _retryTimers = {};
 
-  WebPSessionCoordinator({
+  StreamingSessionCoordinator({
     required this.scheduler,
     required this.transportFactory,
     this.renderer = const FlutterImageRenderer(),
@@ -152,17 +152,17 @@ final class WebPSessionCoordinator {
     );
   }
 
-  WebPResourceLease acquire({
+  StreamingResourceLease acquire({
     required DownloadIdentity downloadIdentity,
     required WebPDecodeIdentity decodeIdentity,
     required String scopeId,
-    required WebPResourceDemand demand,
+    required StreamingResourceDemand demand,
   }) {
     final download = downloads.getOrCreate(downloadIdentity);
     onDownloadSession?.call(download);
     _replaceDecodeBindingIfNeeded(decodeIdentity, download);
     final decode = decodes.getOrCreate(decodeIdentity, download);
-    final lease = WebPResourceLease._(this, scopeId, download, decode, demand);
+    final lease = StreamingResourceLease._(this, scopeId, download, decode, demand);
     _leases.add(lease);
     return lease;
   }
@@ -301,7 +301,7 @@ final class WebPSessionCoordinator {
 
     _cancelRetry(session.identity);
     scheduler.submit(
-      WebPDownloadTask(
+      StreamingDownloadTask(
         key: key,
         generation: session.transportRevision + 1,
         priority: session.desiredPriority,
@@ -468,7 +468,7 @@ final class WebPSessionCoordinator {
   }
 
   static String _downloadTaskKey(DownloadIdentity identity) =>
-      'webp-network:${identity.imageKey}@${identity.sourceKey}@'
+      'streaming-network:${identity.imageKey}@${identity.sourceKey}@'
       '${identity.cid}@${identity.eid}';
 
   static String _decodeTaskKey(WebPDecodeSession session) {

@@ -32,8 +32,8 @@ import 'package:venera/foundation/image_provider/pipeline/pipeline_controller.da
 import 'package:venera/foundation/image_provider/reader_image.dart';
 import 'package:venera/foundation/image_provider/pipeline/resource_entry.dart';
 import 'package:venera/foundation/image_provider/renderer/webp_texture_registry.dart';
-import 'package:venera/foundation/image_provider/webp_image.dart';
-import 'package:venera/foundation/image_provider/webp_source_registry.dart';
+import 'package:venera/foundation/image_provider/streaming_image.dart';
+import 'package:venera/foundation/image_provider/streaming_source_registry.dart';
 import 'package:venera/foundation/local.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/foundation/res.dart';
@@ -854,5 +854,5 @@ abstract interface class _ImageViewController {
 
   /// WebP 三级缓存（生命周期绑定到具体的视图模式 State）。
   /// [FIX-ARCH-2] 提升到接口，消除 `is _GalleryModeState` / `is _ContinuousModeState` 类型检查。
-  DecodedImageCache get webpCache;
+  DecodedImageCache get streamingCache;
 }

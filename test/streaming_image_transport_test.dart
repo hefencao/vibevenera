@@ -5,8 +5,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
-import 'package:venera/network/webp_download_artifact.dart';
-import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/network/streaming_image_artifact.dart';
+import 'package:venera/network/streaming_image_transport.dart';
 import 'package:venera/network/images.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
 
@@ -34,9 +34,9 @@ void main() {
       reconcile: (_) {},
     );
     session.beginTransport();
-    final transport = ImageDownloaderWebPTransport(
+    final transport = ImageDownloaderStreamingTransport(
       identity,
-      artifactFactory: (_) => WebPDownloadArtifact(
+      artifactFactory: (_) => StreamingImageArtifact(
         partial,
         promote: (source) => source.rename(cached.path),
       ),
@@ -96,9 +96,9 @@ void main() {
       reconcile: (_) {},
     );
     session.beginTransport();
-    final transport = ImageDownloaderWebPTransport(
+    final transport = ImageDownloaderStreamingTransport(
       identity,
-      artifactFactory: (_) => WebPDownloadArtifact(
+      artifactFactory: (_) => StreamingImageArtifact(
         partial,
         promote: (source) => source.rename(cached.path),
       ),
@@ -143,10 +143,10 @@ void main() {
       (snapshot) => networkStates.add(snapshot.networkActive),
     );
     addTearDown(subscription.cancel);
-    final progress = <WebPTransportProgress>[];
-    final transport = ImageDownloaderWebPTransport(
+    final progress = <StreamingTransportProgress>[];
+    final transport = ImageDownloaderStreamingTransport(
       identity,
-      artifactFactory: (_) => WebPDownloadArtifact(
+      artifactFactory: (_) => StreamingImageArtifact(
         partial,
         promote: (source) async => source,
       ),
@@ -208,9 +208,9 @@ void main() {
       }
     });
     addTearDown(subscription.cancel);
-    final transport = ImageDownloaderWebPTransport(
+    final transport = ImageDownloaderStreamingTransport(
       identity,
-      artifactFactory: (_) => WebPDownloadArtifact(
+      artifactFactory: (_) => StreamingImageArtifact(
         partial,
         promote: (source) => source.rename(cached.path),
       ),

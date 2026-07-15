@@ -1,5 +1,11 @@
 # WebP Streaming Architecture
 
+> **已过时（2026-07-15）**：本文是 WebP session 重构阶段的设计记录。其核心的
+> lease/session/epoch 约束仍有效，但下载与显示层已经扩展为 WebP/GIF 共用的流媒体
+> 图片管线。当前实现以
+> [STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md](STREAMING_IMAGE_PIPELINE_ARCHITECTURE.md)
+> 为准。
+
 ## Goal
 
 Build a high-performance streaming WebP pipeline with one authoritative byte source, stable sessions, independent scheduling stages, and no visible/pipeline ownership races. The architecture must support slow downloads, partial looping, range resume, source switching, reader detach/re-entry, rapid page changes, and future native texture rendering without replacing its public session interfaces.

@@ -5,7 +5,7 @@ import 'package:flutter/scheduler.dart';
 
 import 'package:venera/foundation/log.dart';
 
-/// Lightweight, strippable instrumentation for the WebP reader pipeline.
+/// Lightweight, strippable instrumentation for the streaming image pipeline.
 ///
 /// Goal: find where a page switch spends UI-isolate time and where jank frames
 /// come from, without a profiler build. Every measurement is grouped into a
@@ -15,8 +15,8 @@ import 'package:venera/foundation/log.dart';
 /// To disable ALL overhead, set [enabled] to false — every hook becomes a
 /// no-op (the `sync`/`slice` bodies still run, but no timing/logging happens),
 /// and the whole file can be deleted once diagnosis is done.
-class WebPPerf {
-  WebPPerf._();
+class ImagePipelinePerf {
+  ImagePipelinePerf._();
 
   /// Master switch. Flip to false to make every probe a no-op.
   ///
@@ -59,7 +59,7 @@ class WebPPerf {
     _maxFrameMs = 0;
     _epochStartMs = DateTime.now().millisecondsSinceEpoch;
     if (timeline) {
-      developer.Timeline.instantSync('WebP.swipe', arguments: {'to': label});
+      developer.Timeline.instantSync('ImagePipeline.swipe', arguments: {'to': label});
     }
   }
 
@@ -136,7 +136,7 @@ class WebPPerf {
     // Use warning level so the line reaches logcat/console in profile & release
     // builds too (info is debug-only per Log.addLog). This is diagnostic output,
     // not a real warning.
-    Log.warning('WebP.Perf', buf.toString());
+    Log.warning('ImagePipeline.Perf', buf.toString());
   }
 }
 

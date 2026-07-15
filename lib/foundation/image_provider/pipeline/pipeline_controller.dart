@@ -5,14 +5,14 @@ import 'package:venera/foundation/appdata.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/log.dart';
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/renderer/webp_texture_channel.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
-import 'package:venera/foundation/image_provider/session/webp_session_coordinator.dart';
-import 'package:venera/foundation/image_provider/webp_source_registry.dart';
-import 'package:venera/network/webp_download_transport.dart';
+import 'package:venera/foundation/image_provider/session/streaming_session_coordinator.dart';
+import 'package:venera/foundation/image_provider/streaming_source_registry.dart';
+import 'package:venera/network/streaming_image_transport.dart';
 
 import 'download_progress_publisher.dart';
 import 'cache_download_progress_publisher.dart';
@@ -70,9 +70,10 @@ final class ReaderPipelineSession {
 class PipelineController {
   static final PipelineController instance = PipelineController._();
   PipelineController._() {
-    _sessions = WebPSessionCoordinator(
+    _sessions = StreamingSessionCoordinator(
       scheduler: _scheduler,
-      transportFactory: (identity) => ImageDownloaderWebPTransport(identity),
+      transportFactory: (identity) =>
+          ImageDownloaderStreamingTransport(identity),
       onProgress: _onSessionProgress,
       onDownloadSession: _cacheDownloads.observe,
       // Android 用 native texture 渲染动图帧：解码产出的 native RGBA 帧不转
@@ -117,8 +118,8 @@ class PipelineController {
   String _cid = '';
   String _eid = '';
   DecodedImageCache? _cache;
-  late final WebPSessionCoordinator _sessions;
-  final Map<String, WebPResourceLease> _policyLeases = {};
+  late final StreamingSessionCoordinator _sessions;
+  final Map<String, StreamingResourceLease> _policyLeases = {};
   Map<String, CacheAliasTarget> _sessionAliases = const {};
   Object? _readerOwner;
 
@@ -250,7 +251,7 @@ class PipelineController {
         final lower = key.toLowerCase();
         return lower.contains('.webp') || lower.contains('.gif');
       }) &&
-      !WebPSourceRegistry.isStreamingSource(session.sourceKey);
+      !StreamingSourceRegistry.isStreamingSource(session.sourceKey);
 
   void _syncNetworkConcurrency() {
     final value = appdata.settings['downloadThreads'];
@@ -357,7 +358,10 @@ class PipelineController {
   }
 
   void _applyWindow({bool protectJump = false}) =>
-      WebPPerf.sync('applyWindow', () => _applyWindowImpl(protectJump: protectJump));
+      ImagePipelinePerf.sync(
+        'applyWindow',
+        () => _applyWindowImpl(protectJump: protectJump),
+      );
 
   void _applyWindowImpl({bool protectJump = false}) {
     final previousCurrent = _currentKey;
@@ -391,7 +395,7 @@ class PipelineController {
       ..addAll(plan.offsetByKey);
     if (_currentKey != previousCurrent) {
       Log.info(
-        'WebP.Pipeline.Flow',
+        'Streaming.Pipeline.Flow',
         'CURRENT ${_flowKey(previousCurrent)} -> ${_flowKey(_currentKey)}',
       );
     }
@@ -464,7 +468,7 @@ class PipelineController {
     _offsetByKey.clear();
   }
 
-  WebPResourceLease acquireVisibleWebP({
+  StreamingResourceLease acquireVisibleStreaming({
     required String imageKey,
     required String? sourceKey,
     required String cid,
@@ -475,7 +479,7 @@ class PipelineController {
     required String scopeId,
   }) {
     // 诊断：无条件打出显示 lease 挂载事件，isCur 位表示这页此刻是否被认为是当前页。
-    WebPPerf.count(
+    ImagePipelinePerf.count(
       'visAttach.isCur${imageKey == _currentKey ? 1 : 0}'
       '.sz${targetWidth}x$targetHeight',
     );
@@ -503,7 +507,7 @@ class PipelineController {
       // 双页第二张、快切后停在窗口边缘）若只靠 policy lease，目标会是 0 →
       // needsDecode 永远 false → 无限转圈。这里只保底 1 帧，持续播放和预解深度
       // 仍完全由 policy lease 决定，避免可见 lease 绕过“当前页告急时近邻为 0”。
-      demand: const WebPResourceDemand(
+      demand: const StreamingResourceDemand(
         downloadPriority: 60,
         decodePriority: 60,
         allowDownload: true,
@@ -516,10 +520,10 @@ class PipelineController {
     final logicalKey = '$imageKey@$sourceKey@$cid@$eid';
     if (logicalKey != downloadIdentity.cacheKey) {
       Log.info(
-        'WebP.Reuse',
+        'Streaming.Reuse',
         'bind logical=$logicalKey download=${downloadIdentity.cacheKey} '
             'decode=$fullKey source=${identityHashCode(lease.download.source)} '
-            'epoch=${lease.download.source.epoch} '
+            'epoch=${lease.download.sourceEpoch} '
             'cursor=${identityHashCode(lease.decode.cursor)}',
       );
     }
@@ -590,7 +594,7 @@ class PipelineController {
   String get _policyScopeId => 'reader:$_sessionId';
 
   void _syncPolicyLeases() =>
-      WebPPerf.sync('syncPolicyLeases', _syncPolicyLeasesImpl);
+      ImagePipelinePerf.sync('syncPolicyLeases', _syncPolicyLeasesImpl);
 
   void _syncPolicyLeasesImpl() {
     // 诊断：本次 sync 时 _currentKey 是否为空、resources 里是否存在等于它的 entry。
@@ -652,7 +656,7 @@ class PipelineController {
             .clamp(1, policy.decodePriority);
       }
 
-      final demand = WebPResourceDemand(
+      final demand = StreamingResourceDemand(
         downloadPriority: policy.allowDownload ? _downloadRank(entry) : 0,
         decodePriority: decodePriority,
         allowDownload: policy.allowDownload,
@@ -664,7 +668,7 @@ class PipelineController {
       // 诊断：无条件打出每个被建 lease 的 entry 的 priority/current/目标帧，
       // 以及它 imageKey 是否等于 _currentKey（isCur 位）。定位「播放页为何不是
       // current」——标记失败还是 identity 错位还是 _currentKey 本身不对。
-      WebPPerf.count(
+      ImagePipelinePerf.count(
         'polLease.pri${entry.priority.index}'
         '.cur${demand.current ? 1 : 0}'
         '.tf$targetFrames'
@@ -701,7 +705,7 @@ class PipelineController {
     }
     // 诊断：一次 sync 的结论。ck 空 / 未见当前 entry / 当前 entry 无需求，任一
     // 都会让当前页拿不到解码 lease → 无图 / 走 near。
-    WebPPerf.count(
+    ImagePipelinePerf.count(
       'syncCur.ckEmpty${_currentKey.isEmpty ? 1 : 0}'
       '.saw${sawCurrentEntry ? 1 : 0}'
       '.undemanded${currentUndemanded ? 1 : 0}'
@@ -719,7 +723,7 @@ class PipelineController {
 
   void _onSessionProgress(
     DownloadIdentity identity,
-    WebPTransportProgress progress,
+    StreamingTransportProgress progress,
   ) {
     resources.forEach((entry) {
       if (_downloadIdentity(
@@ -757,7 +761,7 @@ class PipelineController {
     );
   }
 
-  WebPResourceLease? get _currentPolicyLease {
+  StreamingResourceLease? get _currentPolicyLease {
     if (_currentKey.isEmpty) return null;
     return _policyLeases[_fullKey(_currentKey)];
   }

@@ -2,9 +2,9 @@ import 'dart:async';
 
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
-import 'package:venera/foundation/image_provider/webp_source_registry.dart';
+import 'package:venera/foundation/image_provider/streaming_source_registry.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
-import 'package:venera/utils/webp_perf.dart';
+import 'package:venera/utils/image_pipeline_perf.dart';
 
 import 'webp_frame_holder.dart';
 
@@ -165,7 +165,7 @@ final class WebPDecodeSession {
     required this.cursor,
     required void Function(WebPDecodeSession session) reconcile,
   }) : _reconcile = reconcile,
-       _observedSourceEpoch = download.source.epoch,
+       _observedSourceEpoch = download.sourceEpoch,
        _observedCommittedLength = download.sourceCommittedLength,
        _observedTransport = download.transport {
     download.retainDecodeSession();
@@ -202,7 +202,7 @@ final class WebPDecodeSession {
       _demands.values.where((demand) => demand.upload).length;
   bool get shouldDecode => decodeDemandCount > 0;
   bool get shouldUpload => uploadDemandCount > 0;
-  bool get sourceDecodable => !download.fallbackContent;
+  bool get sourceDecodable => !download.externalContent;
   bool get hasProducedFrame => _hasProducedFrame;
   bool get canScheduleDecode {
     if (!shouldDecode || !sourceDecodable) return false;
@@ -322,7 +322,7 @@ final class WebPDecodeSession {
     if (reserved <= 0) return null;
     return WebPDecodeClaim._(
       decodeRevision: _decodeRevision,
-      sourceEpoch: download.source.epoch,
+      sourceEpoch: download.sourceEpoch,
       sourceCommittedLength: committed,
       reservedFrames: reserved,
     );
@@ -424,7 +424,7 @@ final class WebPDecodeSession {
         // 无 ANMF 帧也解不出）。登记源以便下次会话首页即走流式路由。会话稳定：本次
         // 仅持久化，当前路由不变。
         if (!_hasProducedFrame) {
-          WebPSourceRegistry.markStreaming(download.identity.sourceKey);
+          StreamingSourceRegistry.markStreaming(download.identity.sourceKey);
         }
         _decodedFramesSinceRestart += frames.length;
         _hasProducedFrame = true;
@@ -587,7 +587,7 @@ final class WebPDecodeSession {
   void _onDownloadState(DownloadSessionSnapshot snapshot) {
     if (_disposed) return;
     _syncSourceEpoch();
-    final committed = snapshot.source.committedLength;
+    final committed = snapshot.nativeCommittedLength;
     final becameSealed =
         snapshot.transport == DownloadTransportState.sealed &&
         _observedTransport != DownloadTransportState.sealed;
@@ -606,7 +606,7 @@ final class WebPDecodeSession {
   }
 
   void _syncSourceEpoch() {
-    final epoch = download.source.epoch;
+    final epoch = download.sourceEpoch;
     if (epoch == _observedSourceEpoch) return;
     _observedSourceEpoch = epoch;
     _observedCommittedLength = download.sourceCommittedLength;
@@ -625,7 +625,7 @@ final class WebPDecodeSession {
   bool _isDecodeClaimCurrent(WebPDecodeClaim claim) =>
       !_disposed &&
       claim.decodeRevision == _decodeRevision &&
-      claim.sourceEpoch == download.source.epoch &&
+      claim.sourceEpoch == download.sourceEpoch &&
       shouldDecode;
 
   void _schedulePublish() {
@@ -686,12 +686,12 @@ final class WebPDecodeSessionRegistry {
       }
       return existing;
     }
-    final session = WebPPerf.sync(
+    final session = ImagePipelinePerf.sync(
       'decodeSession.create',
       () => WebPDecodeSession(
         identity: identity,
         download: download,
-        cursor: WebPPerf.sync(
+        cursor: ImagePipelinePerf.sync(
           'nativeCursor.create',
           () => cursorFactory(
             download.source,
