@@ -90,7 +90,11 @@ void _attachReaderPipeline(BuildContext context) {
     cache: reader._imageViewController?.streamingCache,
     targetWidth: targetWidth,
     targetHeight: targetHeight,
-    preloadCount: appdata.settings["preloadImageCount"] ?? 5,
+    preloadCount: appdata.settings.getReaderSetting(
+      reader.cid,
+      reader.type.sourceKey,
+      'preloadImageCount',
+    ),
   ));
 }
 

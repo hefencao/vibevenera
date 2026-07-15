@@ -18,6 +18,7 @@ import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/components/window_frame.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/adaptive_comic.dart';
 import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
@@ -27,6 +28,7 @@ import 'package:venera/foundation/favorites.dart';
 import 'package:venera/foundation/global_state.dart';
 import 'package:venera/foundation/history.dart';
 import 'package:venera/foundation/image_provider/cached_image.dart';
+import 'package:venera/foundation/image_provider/animated_image_registry.dart';
 import 'package:venera/foundation/image_provider/cache/decoded_image_cache.dart';
 import 'package:venera/foundation/image_provider/pipeline/pipeline_controller.dart';
 import 'package:venera/foundation/image_provider/reader_image.dart';
@@ -206,6 +208,9 @@ class _ReaderState extends State<Reader>
       MediaQuery.of(context).orientation == Orientation.portrait;
 
   History? history;
+  AdaptiveComicClassifier? _adaptiveClassifier;
+  AdaptiveComicProfile? _pendingAdaptiveProfile;
+  bool _adaptiveProfileSaveScheduled = false;
 
   @override
   bool isLoading = false;
@@ -242,6 +247,41 @@ class _ReaderState extends State<Reader>
         page = 1;
       }
     }
+    if (appdata.settings.needsAdaptiveComicClassification(
+      cid,
+      type.sourceKey,
+    )) {
+      final source = type.comicSource;
+      _adaptiveClassifier = AdaptiveComicClassifier(
+        sourceKey: type.sourceKey,
+        comicId: cid,
+        title: widget.name,
+        author: widget.author,
+        tags: widget.tags,
+        sourceName: source?.name ?? '',
+        sourceUrl: source?.url ?? '',
+        sourceType: source?.adaptiveComicType,
+      );
+      final classifier = _adaptiveClassifier!;
+      final metadataProfile = appdata.settings.hasEvaluatedAdaptiveMetadata(
+        cid,
+        type.sourceKey,
+        classifier.metadataFingerprint,
+      ) ? null : classifier.classifyMetadata();
+      if (metadataProfile != null &&
+          appdata.settings.shouldStoreAdaptiveComicProfile(
+            cid,
+            type.sourceKey,
+            metadataProfile,
+          )) {
+        _storeAdaptiveProfile(metadataProfile);
+      }
+      if (metadataProfile?.isTerminal == true) {
+        _stopAdaptiveClassification();
+      } else {
+        AnimatedImageRegistry.revision.addListener(_observeKnownAnimations);
+      }
+    }
     // mode = ReaderMode.fromKey(appdata.settings['readerMode']);
     mode = ReaderMode.fromKey(
       appdata.settings.getReaderSetting(cid, type.sourceKey, 'readerMode'),
@@ -271,6 +311,133 @@ class _ReaderState extends State<Reader>
     if (appdata.settings['checkComicVersionInReader'] == true) {
       unawaited(_checkVersionUpdate());
     }
+  }
+
+  void observeAdaptivePage(
+    String imageKey,
+    int pageIndex,
+    int width,
+    int height,
+  ) {
+    final classifier = _adaptiveClassifier;
+    final totalPages = images?.length;
+    if (classifier == null || totalPages == null) return;
+    _observeKnownAnimations();
+    if (_adaptiveClassifier != classifier) return;
+    final profile = classifier.observe(
+      imageKey: imageKey,
+      pageIndex: pageIndex,
+      totalPages: totalPages,
+      width: width,
+      height: height,
+    );
+    if (profile == null) return;
+    _saveAdaptiveProfile(profile);
+  }
+
+  void _observeKnownAnimations() {
+    final classifier = _adaptiveClassifier;
+    final pages = images;
+    if (classifier == null || pages == null) return;
+    for (var i = 0; i < pages.length; i++) {
+      final imageKey = pages[i];
+      final key = AnimatedImageRegistry.key(
+        imageKey: imageKey,
+        sourceKey: type.comicSource?.key,
+        cid: cid,
+        eid: eid,
+      );
+      if (!AnimatedImageRegistry.contains(key)) continue;
+      final profile = classifier.observeAnimated(
+        imageKey: imageKey,
+        pageIndex: i,
+        totalPages: pages.length,
+      );
+      if (profile == null) continue;
+      _saveAdaptiveProfile(profile);
+      return;
+    }
+  }
+
+  void _saveAdaptiveProfile(AdaptiveComicProfile profile) {
+    final pending = _pendingAdaptiveProfile;
+    if (pending != null && pending.confidence >= profile.confidence) return;
+    if (pending == null &&
+        !appdata.settings.shouldStoreAdaptiveComicProfile(
+          cid,
+          type.sourceKey,
+          profile,
+        )) {
+      return;
+    }
+    _pendingAdaptiveProfile = profile;
+    if (profile.isTerminal) _stopAdaptiveClassification();
+    if (_adaptiveProfileSaveScheduled) return;
+    _adaptiveProfileSaveScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _adaptiveProfileSaveScheduled = false;
+      final profile = _pendingAdaptiveProfile;
+      _pendingAdaptiveProfile = null;
+      if (profile == null ||
+          !appdata.settings.shouldStoreAdaptiveComicProfile(
+            cid,
+            type.sourceKey,
+            profile,
+          )) {
+        return;
+      }
+      if (!mounted) {
+        _storeAdaptiveProfile(profile);
+        return;
+      }
+      final previousMode = mode;
+      final previousPreload = appdata.settings.getReaderSetting(
+        cid,
+        type.sourceKey,
+        'preloadImageCount',
+      );
+      _storeAdaptiveProfile(profile);
+      syncEffectiveReaderMode();
+      final modeChanged = mode != previousMode;
+      final preloadChanged = previousPreload !=
+          appdata.settings.getReaderSetting(
+            cid,
+            type.sourceKey,
+            'preloadImageCount',
+          );
+      if (modeChanged) update();
+      if (modeChanged || preloadChanged) {
+        _attachReaderPipeline(context);
+        _reportReaderPage(context, page);
+      }
+    });
+  }
+
+  void _storeAdaptiveProfile(AdaptiveComicProfile profile) {
+    Log.info(
+      'AdaptiveComic',
+      'recognized ${type.sourceKey}/$cid type=${profile.type.name} '
+          'confidence=${profile.confidence.toStringAsFixed(3)} '
+          'samples=${profile.samples} basis=${profile.basis} '
+          'inference=${profile.inferenceMicros}us',
+    );
+    appdata.settings.setAdaptiveComicProfile(
+      cid,
+      type.sourceKey,
+      profile.toJson(),
+    );
+    unawaited(appdata.saveData(false));
+  }
+
+  void _stopAdaptiveClassification() {
+    _adaptiveClassifier = null;
+    AnimatedImageRegistry.revision.removeListener(_observeKnownAnimations);
+  }
+
+  void syncEffectiveReaderMode() {
+    mode = ReaderMode.fromKey(
+      appdata.settings.getReaderSetting(cid, type.sourceKey, 'readerMode'),
+    );
   }
 
   Future<void> _checkVersionUpdate() async {
@@ -317,6 +484,7 @@ class _ReaderState extends State<Reader>
 
   @override
   void dispose() {
+    _stopAdaptiveClassification();
     if (isFullscreen) {
       fullscreen();
     }

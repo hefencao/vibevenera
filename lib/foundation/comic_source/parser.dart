@@ -165,6 +165,7 @@ class ComicSourceParser {
       _getValue("comic.enableTagsTranslate") ?? false,
       _parseStarRatingFunc(),
       _parseArchiveDownloader(),
+      _getValue("comic.adaptiveType"),
     );
 
     await source.loadData();

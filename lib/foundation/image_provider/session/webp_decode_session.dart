@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:venera/foundation/image_provider/renderer/frame_renderer.dart';
+import 'package:venera/foundation/image_provider/animated_image_registry.dart';
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/streaming_source_registry.dart';
 import 'package:venera/utils/webp_decoder.dart' as webp;
@@ -427,6 +428,9 @@ final class WebPDecodeSession {
           StreamingSourceRegistry.markStreaming(download.identity.sourceKey);
         }
         _decodedFramesSinceRestart += frames.length;
+        if (_decodedFramesSinceRestart >= 2) {
+          AnimatedImageRegistry.mark(download.identity.cacheKey);
+        }
         _hasProducedFrame = true;
         _decodeBlockedAtCommittedLength = null;
       }

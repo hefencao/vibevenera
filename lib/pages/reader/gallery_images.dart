@@ -11,7 +11,11 @@ class _GalleryModeState extends State<_GalleryMode>
     with _ImageViewControllerMixin
     implements _ImageViewController {
   late PageController controller;
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  int get preCacheCount => appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'preloadImageCount',
+  );
   final Map<int, PhotoViewController> photoViewControllers = {};
   late _ReaderState reader;
 
@@ -297,6 +301,12 @@ class _GalleryModeState extends State<_GalleryMode>
                   onInit: (state) => imageStates.add(state),
                   onDispose: (state) => imageStates.remove(state),
                   onImageInfo: (w, h) {
+                    reader.observeAdaptivePage(
+                      pageImages[0],
+                      startIndex,
+                      w,
+                      h,
+                    );
                     final newSize = Size(w.toDouble(), h.toDouble());
                     final old = _ComicImageState._getCache(
                       imageProvider.hashCode,
@@ -402,6 +412,12 @@ class _GalleryModeState extends State<_GalleryMode>
                 : Alignment.centerRight,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            onImageInfo: (w, h) => reader.observeAdaptivePage(
+              images[0],
+              reader.images!.indexOf(images[0]),
+              w,
+              h,
+            ),
             errorBuilder: (errorContext, error, s, retry) {
               return _buildReaderImageError(errorContext, error, s, retry);
             },
@@ -418,6 +434,12 @@ class _GalleryModeState extends State<_GalleryMode>
                 : Alignment.centerLeft,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            onImageInfo: (w, h) => reader.observeAdaptivePage(
+              images[1],
+              reader.images!.indexOf(images[1]),
+              w,
+              h,
+            ),
             errorBuilder: (errorContext, error, s, retry) {
               return _buildReaderImageError(errorContext, error, s, retry);
             },
@@ -433,6 +455,12 @@ class _GalleryModeState extends State<_GalleryMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            onImageInfo: (w, h) => reader.observeAdaptivePage(
+              imageKey,
+              reader.images!.indexOf(imageKey),
+              w,
+              h,
+            ),
             errorBuilder: (errorContext, error, s, retry) {
               return _buildReaderImageError(errorContext, error, s, retry);
             },
@@ -477,7 +505,14 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   void handleLongPressDown(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || fingers != 1) return;
+    if (!appdata.settings.getReaderSetting(
+          reader.cid,
+          reader.type.sourceKey,
+          'enableLongPressToZoom',
+        ) ||
+        fingers != 1) {
+      return;
+    }
     var photoViewController = photoViewControllers[reader.page];
     if (photoViewController == null) return;
     double target = photoViewController.getInitialScale!.call()! * 1.75;
@@ -491,7 +526,14 @@ class _GalleryModeState extends State<_GalleryMode>
 
   @override
   void handleLongPressUp(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || !isLongPressing) return;
+    if (!appdata.settings.getReaderSetting(
+          reader.cid,
+          reader.type.sourceKey,
+          'enableLongPressToZoom',
+        ) ||
+        !isLongPressing) {
+      return;
+    }
     var photoViewController = photoViewControllers[reader.page];
     if (photoViewController == null) return;
     double target = photoViewController.getInitialScale!.call()!;
@@ -587,4 +629,3 @@ class _GalleryModeState extends State<_GalleryMode>
     return reader.images![startIndex];
   }
 }
-

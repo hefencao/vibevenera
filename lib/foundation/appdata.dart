@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:venera/foundation/content_cache.dart';
+import 'package:venera/foundation/adaptive_comic.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/log.dart';
 import 'package:venera/utils/data_sync.dart';
@@ -248,6 +249,9 @@ class Settings with ChangeNotifier {
     'comicVersionHistoryLimit': 5,
     'reuseOldVersionCache': false,
     'showAdditionalComicVersions': false,
+    'adaptiveComicType': false,
+    'adaptiveComicProfiles': <String, Map<String, dynamic>>{},
+    'adaptiveComicOverrides': <String, bool>{},
   };
 
   operator [](String key) {
@@ -285,7 +289,113 @@ class Settings with ChangeNotifier {
         return comicValue;
       }
     }
-    return getDeviceReaderSetting(key);
+    final base = getDeviceReaderSetting(key);
+    if (_data['adaptiveComicType'] != true ||
+        !isAdaptiveComicEnabled(comicId, sourceKey)) {
+      return base;
+    }
+    final profile = adaptiveComicProfile(comicId, sourceKey);
+    if (profile == null ||
+        profile['modelVersion'] != AdaptiveComicProfile.modelVersion ||
+        (profile['confidence'] as num? ?? 0) <
+            AdaptiveComicProfile.applyConfidence) {
+      return base;
+    }
+    return _adaptiveReaderSetting(profile['type'] as String?, key, base);
+  }
+
+  dynamic _adaptiveReaderSetting(String? type, String key, dynamic base) {
+    if (key == 'readerMode') {
+      if (type == 'vertical') return 'continuousTopToBottom';
+      if (type == 'paged' || type == 'animated') {
+        final value = base as String;
+        if (value.endsWith('RightToLeft')) return 'galleryRightToLeft';
+        if (value.endsWith('TopToBottom')) return 'galleryTopToBottom';
+        return 'galleryLeftToRight';
+      }
+    }
+    if (key == 'enableLongPressToZoom') {
+      if (type == 'vertical') return false;
+      if (type == 'paged' || type == 'animated') return true;
+    }
+    if (key == 'preloadImageCount' && type == 'animated') {
+      return (base as int).clamp(1, 4);
+    }
+    return base;
+  }
+
+  Map<String, dynamic>? adaptiveComicProfile(
+    String comicId,
+    String sourceKey,
+  ) {
+    final value = (_data['adaptiveComicProfiles'] as Map)['$comicId@$sourceKey'];
+    return value is Map ? Map<String, dynamic>.from(value) : null;
+  }
+
+  bool isAdaptiveComicEnabled(String comicId, String sourceKey) =>
+      (_data['adaptiveComicOverrides'] as Map)['$comicId@$sourceKey'] != false;
+
+  bool needsAdaptiveComicClassification(String comicId, String sourceKey) =>
+      _data['adaptiveComicType'] == true &&
+      isAdaptiveComicEnabled(comicId, sourceKey) &&
+      _adaptiveProfileNeedsEvaluation(adaptiveComicProfile(comicId, sourceKey));
+
+  bool _adaptiveProfileNeedsEvaluation(Map<String, dynamic>? profile) =>
+      profile?['modelVersion'] != AdaptiveComicProfile.modelVersion ||
+      (profile?['confidence'] as num? ?? 0) <
+          AdaptiveComicProfile.stopConfidence;
+
+  bool shouldStoreAdaptiveComicProfile(
+    String comicId,
+    String sourceKey,
+    AdaptiveComicProfile profile,
+  ) {
+    final current = adaptiveComicProfile(comicId, sourceKey);
+    if (current?['modelVersion'] != AdaptiveComicProfile.modelVersion) {
+      return true;
+    }
+    final confidence = current?['confidence'] as num? ?? 0;
+    return profile.confidence > confidence ||
+        (profile.confidence == confidence &&
+            profile.type.name == current?['type'] &&
+            profile.metadataFingerprint != current?['metadataFingerprint']);
+  }
+
+  bool hasEvaluatedAdaptiveMetadata(
+    String comicId,
+    String sourceKey,
+    int fingerprint,
+  ) {
+    final profile = adaptiveComicProfile(comicId, sourceKey);
+    return profile?['modelVersion'] == AdaptiveComicProfile.modelVersion &&
+        profile?['metadataFingerprint'] == fingerprint;
+  }
+
+  void setAdaptiveComicEnabled(
+    String comicId,
+    String sourceKey,
+    bool enabled,
+  ) {
+    final overrides = _data['adaptiveComicOverrides'] as Map;
+    if (enabled) {
+      overrides.remove('$comicId@$sourceKey');
+    } else {
+      overrides['$comicId@$sourceKey'] = false;
+    }
+    notifyListeners();
+  }
+
+  void setAdaptiveComicProfile(
+    String comicId,
+    String sourceKey,
+    Map<String, dynamic> profile,
+  ) {
+    final profiles = _data['adaptiveComicProfiles'] as Map;
+    final key = '$comicId@$sourceKey';
+    profiles.remove(key);
+    profiles[key] = profile;
+    if (profiles.length > 256) profiles.remove(profiles.keys.first);
+    notifyListeners();
   }
 
   void setReaderSetting(

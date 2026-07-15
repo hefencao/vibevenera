@@ -199,6 +199,9 @@ class ComicSource {
 
   final bool enableTagsTranslate;
 
+  /// Optional high-confidence reader layout hint: paged, vertical or animated.
+  final String? adaptiveComicType;
+
   final StarRatingFunc? starRatingFunc;
 
   final ArchiveDownloader? archiveDownloader;
@@ -309,6 +312,7 @@ class ComicSource {
     this.enableTagsTranslate,
     this.starRatingFunc,
     this.archiveDownloader,
+    this.adaptiveComicType,
   );
 }
 

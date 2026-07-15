@@ -575,6 +575,14 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       _fallbackFramesEmitted = skipFrames;
       _gifCodecFrames = build.frameCount;
       _gifCodecEpoch = build.epoch;
+      if (build.frameCount >= 2) {
+        AnimatedImageRegistry.mark(AnimatedImageRegistry.key(
+          imageKey: _provider.imageKey,
+          sourceKey: _provider.sourceKey,
+          cid: _provider.cid,
+          eid: _provider.eid,
+        ));
+      }
       if (old != null && !identical(old, build.codec)) old.dispose();
       _signalPlayback();
       return true;

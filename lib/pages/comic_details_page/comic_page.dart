@@ -10,6 +10,7 @@ import 'package:venera/components/components.dart';
 import 'package:venera/components/rich_comment_content.dart';
 import 'package:venera/foundation/app.dart';
 import 'package:venera/foundation/appdata.dart';
+import 'package:venera/foundation/adaptive_comic.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/content_cache.dart';
@@ -301,6 +302,7 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
 
   @override
   void onDataLoaded() {
+    _classifyAdaptiveMetadata(comic);
     isLiked = comic.isLiked ?? false;
     isFavorite = comic.isFavorite ?? false;
     newVersions = ComicVersionMigration.cachedVersions(
@@ -332,11 +334,59 @@ class _ComicPageState extends LoadingState<ComicPage, ComicDetails>
         'details refresh ${stopwatch.elapsedMilliseconds}ms id=${widget.id}');
     if (result.error) return;
     ContentCache.instance.cacheComicDetails(result.data, comicSource.version);
+    _classifyAdaptiveMetadata(result.data);
     if (!mounted) return;
     data = result.data;
     if (!isLiking) isLiked = result.data.isLiked ?? isLiked;
     isFavorite = result.data.isFavorite ?? isFavorite;
     setState(() {});
+  }
+
+  void _classifyAdaptiveMetadata(ComicDetails details) {
+    if (!appdata.settings.needsAdaptiveComicClassification(
+      details.id,
+      details.sourceKey,
+    )) {
+      return;
+    }
+    final source = ComicSource.find(details.sourceKey);
+    final classifier = AdaptiveComicClassifier(
+      sourceKey: details.sourceKey,
+      comicId: details.id,
+      title: details.title,
+      author: details.findAuthor() ?? '',
+      tags: details.plainTags,
+      sourceName: source?.name ?? '',
+      sourceUrl: source?.url ?? '',
+      sourceType: source?.adaptiveComicType,
+    );
+    if (appdata.settings.hasEvaluatedAdaptiveMetadata(
+      details.id,
+      details.sourceKey,
+      classifier.metadataFingerprint,
+    )) {
+      return;
+    }
+    final profile = classifier.classifyMetadata();
+    if (profile == null ||
+        !appdata.settings.shouldStoreAdaptiveComicProfile(
+          details.id,
+          details.sourceKey,
+          profile,
+        )) {
+      return;
+    }
+    Log.info(
+      'AdaptiveComic',
+      'recognized ${details.sourceKey}/${details.id} '
+          'type=${profile.type.name} basis=${profile.basis}',
+    );
+    appdata.settings.setAdaptiveComicProfile(
+      details.id,
+      details.sourceKey,
+      profile.toJson(),
+    );
+    unawaited(appdata.saveData(false));
   }
 
   Future<void> _loadFavoriteFolders() async {

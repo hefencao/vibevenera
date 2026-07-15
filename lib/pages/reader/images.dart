@@ -226,9 +226,30 @@ class _ReaderImagesState extends State<_ReaderImages>
     return completer.future;
   }
 
-  Future<void> _refreshReaderPages(String? chapterId) async {
+  Future<void> _refreshReaderPages(
+    String? chapterId, {
+    bool replaceAuthorityChanges = false,
+  }) async {
+    final currentImages = List<String>.of(reader.images!);
     final res = await _loadFreshReaderPages(chapterId);
     if (!res.error) {
+      final sameContent = _samePagesIgnoringAuthority(currentImages, res.data);
+      if (!replaceAuthorityChanges && sameContent) {
+        HistoryManager().cacheReaderPages(
+          reader.cid,
+          reader.type,
+          chapterId,
+          currentImages,
+        );
+        if (!listEquals(currentImages, res.data)) {
+          Log.info(
+            'Reader.Cache',
+            'page authority changes ignored: '
+                '${reader.type.sourceKey}/${reader.cid}/$chapterId',
+          );
+        }
+        return;
+      }
       HistoryManager().cacheReaderPages(
         reader.cid,
         reader.type,
@@ -297,6 +318,7 @@ class _ReaderImagesState extends State<_ReaderImages>
     _refreshedForImageError = true;
     _refreshReaderPages(
       reader.widget.chapters?.ids.elementAtOrNull(reader.chapter - 1),
+      replaceAuthorityChanges: true,
     );
   }
 
@@ -348,4 +370,23 @@ class _ReaderImagesState extends State<_ReaderImages>
       }
     }
   }
+}
+
+bool _samePagesIgnoringAuthority(List<String> a, List<String> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!_sameImageIgnoringAuthority(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+bool _sameImageIgnoringAuthority(String a, String b) {
+  if (a == b) return true;
+  final oldUri = Uri.parse(a), newUri = Uri.parse(b);
+  if (!oldUri.hasAuthority || !newUri.hasAuthority) return false;
+  if (!oldUri.isScheme('http') && !oldUri.isScheme('https')) return false;
+  if (!newUri.isScheme('http') && !newUri.isScheme('https')) return false;
+  return oldUri.path == newUri.path &&
+      oldUri.query == newUri.query &&
+      oldUri.fragment == newUri.fragment;
 }

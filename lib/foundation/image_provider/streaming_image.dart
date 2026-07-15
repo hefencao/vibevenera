@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'package:venera/utils/image_pipeline_perf.dart';
+import 'package:venera/foundation/image_provider/animated_image_registry.dart';
 
 import 'io/image_data_validator.dart';
 import 'runtime/gif_stream_runtime.dart';

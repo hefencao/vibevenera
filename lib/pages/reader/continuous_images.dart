@@ -33,7 +33,11 @@ class _ContinuousModeState extends State<_ContinuousMode>
   var fingers = 0;
   bool disableScroll = false;
 
-  int get preCacheCount => appdata.settings["preloadImageCount"];
+  int get preCacheCount => appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'preloadImageCount',
+  );
   bool delayedIsScrolling = false;
   var imageStates = <State<ComicImage>>{};
 
@@ -232,6 +236,12 @@ class _ContinuousModeState extends State<_ContinuousMode>
             fit: BoxFit.contain,
             onInit: (state) => imageStates.add(state),
             onDispose: (state) => imageStates.remove(state),
+            onImageInfo: (w, h) => reader.observeAdaptivePage(
+              reader.images![index - 1],
+              index - 1,
+              w,
+              h,
+            ),
             errorBuilder: (errorContext, error, s, retry) {
               return _buildReaderImageError(errorContext, error, s, retry);
             },
@@ -436,7 +446,12 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void handleLongPressDown(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom'] || delayedIsScrolling) {
+    if (!appdata.settings.getReaderSetting(
+          reader.cid,
+          reader.type.sourceKey,
+          'enableLongPressToZoom',
+        ) ||
+        delayedIsScrolling) {
       return;
     }
     double target = photoViewController.getInitialScale!.call()! * 1.75;
@@ -451,7 +466,13 @@ class _ContinuousModeState extends State<_ContinuousMode>
 
   @override
   void handleLongPressUp(Offset location) {
-    if (!appdata.settings['enableLongPressToZoom']) return;
+    if (!appdata.settings.getReaderSetting(
+      reader.cid,
+      reader.type.sourceKey,
+      'enableLongPressToZoom',
+    )) {
+      return;
+    }
     double target = photoViewController.getInitialScale!.call()!;
     photoViewController.animateScale?.call(target);
     onScaleUpdate(target);

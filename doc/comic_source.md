@@ -654,6 +654,8 @@ If `load` function is implemented, `loadNext` function will be ignored.
         },
         // enable tags translate
         enableTagsTranslate: false,
+        // optional high-confidence adaptive reader layout: paged, vertical or animated
+        adaptiveType: null,
     }
 
 ```

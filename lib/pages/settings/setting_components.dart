@@ -51,7 +51,11 @@ class _SwitchSettingState extends State<_SwitchSetting> {
         value: value,
         onChanged: (value) {
           setState(() {
-            if (widget.comicId != null) {
+            if (widget.comicId != null &&
+                appdata.settings.isComicSpecificSettingsEnabled(
+                  widget.comicId,
+                  widget.comicSource,
+                )) {
               appdata.settings.setReaderSetting(
                 widget.comicId!,
                 widget.comicSource!,
@@ -243,7 +247,11 @@ class _DoubleLineSelectSettingsState extends State<_DoubleLineSelectSettings> {
         ).then((value) {
           if (value != null) {
             setState(() {
-              if (widget.comicId != null) {
+              if (widget.comicId != null &&
+                  appdata.settings.isComicSpecificSettingsEnabled(
+                    widget.comicId,
+                    widget.comicSource,
+                  )) {
                 appdata.settings.setReaderSetting(
                   widget.comicId!,
                   widget.comicSource!,
@@ -352,7 +360,11 @@ class _EndSelectorSelectSettingState extends State<_EndSelectorSelectSetting> {
         onTap: (index) {
           setState(() {
             var value = options.keys.elementAt(index);
-            if (widget.comicId != null) {
+            if (widget.comicId != null &&
+                appdata.settings.isComicSpecificSettingsEnabled(
+                  widget.comicId,
+                  widget.comicSource,
+                )) {
               appdata.settings.setReaderSetting(
                 widget.comicId!,
                 widget.comicSource!,
@@ -430,7 +442,11 @@ class _SliderSettingState extends State<_SliderSetting> {
         onChanged: (value) {
           if (value.toInt() == value) {
             setState(() {
-              if (widget.comicId != null) {
+              if (widget.comicId != null &&
+                  appdata.settings.isComicSpecificSettingsEnabled(
+                    widget.comicId,
+                    widget.comicSource,
+                  )) {
                 appdata.settings.setReaderSetting(
                   widget.comicId!,
                   widget.comicSource!,
@@ -449,7 +465,11 @@ class _SliderSettingState extends State<_SliderSetting> {
             });
           } else {
             setState(() {
-              if (widget.comicId != null) {
+              if (widget.comicId != null &&
+                  appdata.settings.isComicSpecificSettingsEnabled(
+                    widget.comicId,
+                    widget.comicSource,
+                  )) {
                 appdata.settings.setReaderSetting(
                   widget.comicId!,
                   widget.comicSource!,

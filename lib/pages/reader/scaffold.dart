@@ -883,14 +883,10 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
         comicId: context.reader.cid,
         comicSource: context.reader.type.sourceKey,
         onChanged: (key) {
-          if (key == "readerMode") {
-            context.reader.mode = ReaderMode.fromKey(
-              appdata.settings.getReaderSetting(
-                context.reader.cid,
-                context.reader.type.sourceKey,
-                key,
-              ),
-            );
+          if (key == "readerMode" || key == 'adaptiveComicType') {
+            context.reader.syncEffectiveReaderMode();
+            _attachReaderPipeline(context);
+            _reportReaderPage(context, context.reader.page);
           }
           if (key == "enableTurnPageByVolumeKey") {
             if (appdata.settings.getReaderSetting(
