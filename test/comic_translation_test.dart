@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:venera/foundation/comic_translation/benchmark.dart';
 import 'package:venera/foundation/comic_translation/engine.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
 import 'package:venera/foundation/comic_translation/policy.dart';
@@ -87,6 +88,31 @@ void main() {
     await registry.release(second);
     expect(ocr.unloads, 1);
     expect(translator.unloads, 1);
+  });
+
+  test('OCR benchmark runs without a remote translation backend', () async {
+    final image = File('${temp.path}/benchmark.bin');
+    await image.writeAsBytes(List<int>.generate(128, (i) => i));
+    final ocr = _OcrEngine();
+    final registry = ComicTranslationEngineRegistry()..ocrEngine = ocr;
+    final result = await ComicTranslationBenchmark(engines: registry).run(
+      pages: [
+        ComicTranslationPageIdentity(
+          imageKey: image.uri.toString(),
+          sourceKey: 'benchmark',
+          comicId: 'benchmark',
+          chapterId: '0',
+          pageIndex: 0,
+          mediaKind: ComicTranslationMediaKind.staticImage,
+        ),
+      ],
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+    );
+    expect(result.translationMeasured, false);
+    expect(result.samples.single.regionCount, 1);
+    expect(ocr.loads, 1);
+    expect(ocr.unloads, 1);
   });
 
   test('animated page uses the reserved unsupported state', () async {

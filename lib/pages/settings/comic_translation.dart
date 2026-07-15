@@ -38,7 +38,7 @@ class _ComicTranslationBackendPageState
 
   @override
   Widget build(BuildContext context) {
-    final engines = ComicTranslationEngineRegistry.instance;
+    final models = ComicTranslationModelManager.instance;
     return SmoothCustomScrollView(
       slivers: [
         SliverAppbar(title: Text('Translation models and API'.tl)),
@@ -49,24 +49,54 @@ class _ComicTranslationBackendPageState
               ListTile(
                 title: Text('Local OCR model'.tl),
                 subtitle: Text(
-                  engines.ocrEngine == null
-                      ? 'Not installed'.tl
-                      : '${engines.ocrEngine!.id} ${engines.ocrEngine!.modelVersion}',
+                  models.installed
+                      ? '${ComicTranslationModelManager.bundle.displayName} · ${_modelSize(ComicTranslationModelManager.bundle.bytes)}'
+                      : 'Not installed'.tl,
                 ),
               ),
+              if (!App.isAndroid)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text('Local OCR is currently available on Android only.'.tl),
+                )
+              else
+                ValueListenableBuilder<ComicTranslationModelProgress>(
+                  valueListenable: models.progress,
+                  builder: (context, progress, _) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (progress.phase != ComicTranslationModelPhase.idle) ...[
+                        LinearProgressIndicator(value: progress.fraction),
+                        Text(
+                          progress.phase == ComicTranslationModelPhase.verifying
+                              ? 'Verifying model'.tl
+                              : '${'Downloading model'.tl} · ${progress.fileName}',
+                          textAlign: TextAlign.center,
+                          style: ts.s12,
+                        ).paddingVertical(6),
+                      ],
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: models.installed
+                            ? FilledButton.tonalIcon(
+                                onPressed: models.installing ? null : _removeModel,
+                                icon: const Icon(Icons.delete_outline),
+                                label: Text('Remove'.tl),
+                              )
+                            : FilledButton.icon(
+                                onPressed: models.installing ? null : _installModel,
+                                icon: const Icon(Icons.download_outlined),
+                                label: Text('Download model'.tl),
+                              ),
+                      ).paddingHorizontal(16),
+                    ],
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text.rich(
-                  TextSpan(children: [
-                    TextSpan(
-                      text: 'This build does not include the OCR runtime adapter; downloading model files alone will not enable OCR.'.tl,
-                      style: TextStyle(color: context.colorScheme.error),
-                    ),
-                    const TextSpan(text: '\n'),
-                    TextSpan(
-                      text: 'Install and benchmark PP-OCRv6 small first. Use PP-OCRv6 tiny as the speed baseline and PP-OCRv5 mobile as the compatibility candidate.'.tl,
-                    ),
-                  ]),
+                child: Text(
+                  'PP-OCRv6 small is downloaded from the official PaddlePaddle repository and verified with SHA-256. The local OCR image never leaves the device.'.tl,
+                  style: ts.s12,
                 ),
               ),
               Wrap(
@@ -199,6 +229,37 @@ class _ComicTranslationBackendPageState
     return null;
   }
 
+  String _modelSize(int bytes) => '${(bytes / 1048576).toStringAsFixed(1)} MB';
+
+  Future<void> _installModel() async {
+    setState(() {});
+    try {
+      await ComicTranslationModelManager.instance.install();
+      ComicTranslationRuntime.instance.configure();
+      if (mounted) context.showMessage(message: 'OCR model installed'.tl);
+    } catch (error) {
+      if (mounted) context.showMessage(message: error.toString());
+    } finally {
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _removeModel() {
+    showConfirmDialog(
+      context: context,
+      title: 'Remove OCR model?'.tl,
+      content: 'The downloaded model files will be removed.'.tl,
+      confirmText: 'Remove',
+      onConfirm: _removeModelNow,
+    );
+  }
+
+  Future<void> _removeModelNow() async {
+    await ComicTranslationModelManager.instance.remove();
+    ComicTranslationRuntime.instance.configure();
+    if (mounted) setState(() {});
+  }
+
   Future<bool> _save() async {
     final error = _validate();
     if (error != null) {
@@ -314,7 +375,7 @@ class _ComicTranslationBenchmarkPageState
             ),
           ),
           FilledButton.icon(
-            onPressed: running || imagePath == null || !engines.ready
+            onPressed: running || imagePath == null || engines.ocrEngine == null
                 ? null
                 : _run,
             icon: const Icon(Icons.speed),
@@ -324,30 +385,32 @@ class _ComicTranslationBenchmarkPageState
             'Model load time is a warm-load value when another Reader session already owns the model.'.tl,
             style: ts.s12,
           ).paddingVertical(8),
-          if (!engines.ready)
+          if (engines.ocrEngine == null)
             Text(
-              'Install an OCR model and configure a translation backend before running the benchmark.'.tl,
+              'Install an OCR model before running the benchmark.'.tl,
             ).paddingVertical(12),
           if (error != null)
             SelectableText(error.toString()).paddingVertical(12),
           if (result != null) ...[
             const Divider(),
             Text('OCR load: ${result!.ocrLoadTime.inMilliseconds}ms'),
-            Text('Translation load: ${result!.translationLoadTime.inMilliseconds}ms'),
+            if (result!.translationMeasured)
+              Text('Translation load: ${result!.translationLoadTime.inMilliseconds}ms'),
             Text(
               'OCR P50/P95: ${_percentile(result!.samples.map((e) => e.ocrTime).toList(), 0.50)}ms / '
               '${_percentile(result!.samples.map((e) => e.ocrTime).toList(), 0.95)}ms',
             ),
-            Text(
-              'Translation P50/P95: ${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.50)}ms / '
-              '${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.95)}ms',
-            ),
+            if (result!.translationMeasured)
+              Text(
+                'Translation P50/P95: ${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.50)}ms / '
+                '${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.95)}ms',
+              ),
             const SizedBox(height: 8),
             for (var i = 0; i < result!.samples.length; i++)
               Text(
                 '#${i + 1} input=${result!.samples[i].inputResolveTime.inMilliseconds}ms '
                 'ocr=${result!.samples[i].ocrTime.inMilliseconds}ms '
-                'translation=${result!.samples[i].translationTime.inMilliseconds}ms '
+                '${result!.translationMeasured ? 'translation=${result!.samples[i].translationTime.inMilliseconds}ms ' : ''}'
                 'regions=${result!.samples[i].regionCount} '
                 'rssΔ=${((result!.samples[i].rssAfter - result!.samples[i].rssBefore) / 1048576).toStringAsFixed(1)}MB',
               ).paddingVertical(4),
@@ -379,12 +442,12 @@ class _ComicTranslationBenchmarkPageState
     final uri = Uri.file(imagePath!).toString();
     final pages = List.generate(
       runs,
-      (index) => ComicTranslationPageIdentity(
+      (_) => ComicTranslationPageIdentity(
         imageKey: uri,
         sourceKey: 'benchmark',
         comicId: 'benchmark',
         chapterId: '0',
-        pageIndex: index,
+        pageIndex: 0,
         mediaKind: ComicTranslationMediaKind.staticImage,
       ),
     );

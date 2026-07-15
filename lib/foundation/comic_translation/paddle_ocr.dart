@@ -1,0 +1,88 @@
+import 'dart:io';
+
+import 'package:flutter/services.dart';
+
+import 'engine.dart';
+import 'model_manager.dart';
+import 'models.dart';
+
+final class AndroidPaddleComicOcrEngine implements ComicOcrEngine {
+  static const _channel = MethodChannel('venera/comic_translation_ocr');
+  static const _analysisSide = 1600;
+
+  final ComicTranslationModelManager models;
+
+  const AndroidPaddleComicOcrEngine(this.models);
+
+  @override
+  String get id => 'paddleocr-android';
+
+  @override
+  String get modelVersion => ComicTranslationModelManager.bundle.version;
+
+  @override
+  bool get supportsAnimatedPosterFrame => false;
+
+  @override
+  Future<void> load() => _channel.invokeMethod('load', {
+    'detModelPath': models.pathOf('det.onnx'),
+    'recModelPath': models.pathOf('rec.onnx'),
+    'recConfigPath': models.pathOf('rec.yml'),
+    'maxAnalysisSide': _analysisSide,
+    'threads': Platform.numberOfProcessors.clamp(2, 4),
+  });
+
+  @override
+  Future<ComicOcrArtifact> recognize(ComicOcrInput input) async {
+    final value = Map<String, dynamic>.from(
+      (await _channel.invokeMapMethod<String, dynamic>('recognize', {
+        'filePath': input.filePath,
+      }))!,
+    );
+    final width = value['width'] as int;
+    final height = value['height'] as int;
+    final regions = (value['regions'] as List).map((raw) {
+      final region = Map<String, dynamic>.from(raw as Map);
+      final points = (region['points'] as List)
+          .map((rawPoint) {
+            final point = rawPoint as List;
+            return NormalizedPoint(
+              (point[0] as num).toDouble() / width,
+              (point[1] as num).toDouble() / height,
+            );
+          })
+          .toList();
+      final xs = points.map((point) => point.x);
+      final ys = points.map((point) => point.y);
+      final boxWidth = xs.reduce((a, b) => a > b ? a : b) -
+          xs.reduce((a, b) => a < b ? a : b);
+      final boxHeight = ys.reduce((a, b) => a > b ? a : b) -
+          ys.reduce((a, b) => a < b ? a : b);
+      return ComicOcrRegion(
+        id: region['id'] as String,
+        polygon: points,
+        text: region['text'] as String,
+        confidence: (region['confidence'] as num).toDouble(),
+        orientation: boxHeight > boxWidth * 1.3
+            ? ComicTextOrientation.vertical
+            : ComicTextOrientation.horizontal,
+        kind: ComicTextKind.unknown,
+        readingOrder: int.parse((region['id'] as String).substring(1)),
+      );
+    }).toList();
+    return ComicOcrArtifact(
+      contentDigest: input.contentDigest,
+      engineId: id,
+      modelVersion: modelVersion,
+      sourceLanguage: input.sourceLanguage,
+      imageWidth: width,
+      imageHeight: height,
+      mediaKind: input.identity.mediaKind,
+      animatedMode: input.animatedMode,
+      regions: regions,
+    );
+  }
+
+  @override
+  Future<void> unload() => _channel.invokeMethod('unload');
+}

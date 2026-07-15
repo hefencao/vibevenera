@@ -529,8 +529,14 @@
     "Configure OCR models, remote LLM and benchmark": "配置 OCR 模型、远程大模型和性能测试",
     "Local OCR model": "本地 OCR 模型",
     "Not installed": "未安装",
-    "This build does not include the OCR runtime adapter; downloading model files alone will not enable OCR.": "当前构建未包含 OCR 运行时适配器；仅下载模型文件无法启用 OCR。",
-    "Install and benchmark PP-OCRv6 small first. Use PP-OCRv6 tiny as the speed baseline and PP-OCRv5 mobile as the compatibility candidate.": "优先安装并测试 PP-OCRv6 small；PP-OCRv6 tiny 仅作速度基线，PP-OCRv5 mobile 作为兼容性候选。",
+    "Local OCR is currently available on Android only.": "本地 OCR 目前仅支持 Android。",
+    "PP-OCRv6 small is downloaded from the official PaddlePaddle repository and verified with SHA-256. The local OCR image never leaves the device.": "PP-OCRv6 small 从 PaddlePaddle 官方仓库下载并通过 SHA-256 校验。本地 OCR 图片不会离开设备。",
+    "Downloading model": "正在下载模型",
+    "Verifying model": "正在校验模型",
+    "Download model": "下载模型",
+    "OCR model installed": "OCR 模型已安装",
+    "Remove OCR model?": "移除 OCR 模型？",
+    "The downloaded model files will be removed.": "将移除已下载的模型文件。",
     "Model download guide": "模型下载指引",
     "Model list": "模型列表",
     "Translation backend": "翻译后端",
@@ -553,7 +559,8 @@
     "Run": "运行",
     "Benchmark runs": "测试轮数",
     "Model load time is a warm-load value when another Reader session already owns the model.": "若其他阅读器会话正持有模型，模型加载耗时为热加载值。",
-    "Install an OCR model and configure a translation backend before running the benchmark.": "运行性能测试前需安装 OCR 模型并配置翻译后端。"
+    "Install an OCR model and configure a translation backend before running the benchmark.": "运行性能测试前需安装 OCR 模型并配置翻译后端。",
+    "Install an OCR model before running the benchmark.": "运行性能测试前需安装 OCR 模型。"
   },
   "zh_TW": {
     "Home": "首頁",
@@ -1085,8 +1092,14 @@
     "Configure OCR models, remote LLM and benchmark": "設定 OCR 模型、遠端大模型和效能測試",
     "Local OCR model": "本機 OCR 模型",
     "Not installed": "未安裝",
-    "This build does not include the OCR runtime adapter; downloading model files alone will not enable OCR.": "目前版本未包含 OCR 執行階段介接器；僅下載模型檔案無法啟用 OCR。",
-    "Install and benchmark PP-OCRv6 small first. Use PP-OCRv6 tiny as the speed baseline and PP-OCRv5 mobile as the compatibility candidate.": "優先安裝並測試 PP-OCRv6 small；PP-OCRv6 tiny 僅作速度基線，PP-OCRv5 mobile 作為相容性候選。",
+    "Local OCR is currently available on Android only.": "本機 OCR 目前僅支援 Android。",
+    "PP-OCRv6 small is downloaded from the official PaddlePaddle repository and verified with SHA-256. The local OCR image never leaves the device.": "PP-OCRv6 small 從 PaddlePaddle 官方儲存庫下載並通過 SHA-256 驗證。本機 OCR 圖片不會離開裝置。",
+    "Downloading model": "正在下載模型",
+    "Verifying model": "正在驗證模型",
+    "Download model": "下載模型",
+    "OCR model installed": "OCR 模型已安裝",
+    "Remove OCR model?": "移除 OCR 模型？",
+    "The downloaded model files will be removed.": "將移除已下載的模型檔案。",
     "Model download guide": "模型下載指引",
     "Model list": "模型列表",
     "Translation backend": "翻譯後端",
@@ -1109,6 +1122,7 @@
     "Run": "執行",
     "Benchmark runs": "測試輪數",
     "Model load time is a warm-load value when another Reader session already owns the model.": "若其他閱讀器工作階段正持有模型，模型載入耗時為熱載入值。",
-    "Install an OCR model and configure a translation backend before running the benchmark.": "執行效能測試前需安裝 OCR 模型並設定翻譯後端。"
+    "Install an OCR model and configure a translation backend before running the benchmark.": "執行效能測試前需安裝 OCR 模型並設定翻譯後端。",
+    "Install an OCR model before running the benchmark.": "執行效能測試前需安裝 OCR 模型。"
   }
 }

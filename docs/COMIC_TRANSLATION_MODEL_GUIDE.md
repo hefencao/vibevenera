@@ -5,9 +5,10 @@
 `设置 → 阅读 → 翻译模型与 API`：
 
 - 查看本地 OCR 和远程翻译后端状态；
-- 打开官方模型下载/Android 部署文档；
+- 在应用内断点续传下载官方 PP-OCRv6 small 模型并做 SHA-256 校验；
+- 打开官方模型/Android 部署文档；
 - 配置 OpenAI-compatible Chat Completions endpoint、model 和 API key；
-- 选择本地漫画页执行三轮 benchmark。
+- 选择本地漫画页执行 3/10 轮 benchmark。
 
 ## OCR 候选顺序
 
@@ -26,9 +27,17 @@ models/
    └─ inference.yml
 ```
 
-当前仓库尚未绑定 OCR native runtime，因此页面只提供明确的下载指引和 benchmark 状态，
-不会下载一个无法执行的模型包。完成低、中、高端 Android 真机对照后，再固定 runtime、
-下载地址、SHA-256 和模型包 manifest。
+Android 已接入 PaddleOCR 官方 Android SDK、ONNX Runtime 1.21.1 和 OpenCV 4.13.0。
+模型清单固定到官方仓库提交，共 29.7 MiB；文件先写入 `.part`，服务器支持 Range 时从已有
+长度继续，逐文件校验后 rename，最后才写入安装 manifest。模型不随 APK 打包。
+
+OCR MethodChannel 只传文件路径和结构化结果。图片采样、OpenCV 预处理、ONNX 推理均在单独
+Android worker 执行，不占用 platform/UI 线程；输入长边按 1600 进行分析。动态 WebP/GIF
+仍不会进入该 runtime。
+
+真机 benchmark 会显示模型加载、输入解析、OCR、翻译 P50/P95 和每轮 RSS 变化。模型约
+29.7 MiB 只是磁盘权重大小，运行峰值还包含 ONNX session、OpenCV Mat、检测 tensor 和文字
+crop，必须在目标设备实测，不能由参数量直接推断。
 
 ## 远程翻译
 

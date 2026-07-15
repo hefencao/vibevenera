@@ -37,6 +37,7 @@ class MainActivity : FlutterFragmentActivity() {
     var listening = false
 
     private var webpTexturePlugin: WebPTexturePlugin? = null
+    private var comicTranslationOcrPlugin: ComicTranslationOcrPlugin? = null
 
     private val storageRequestCode = 0x10
     private var storagePermissionRequest: ((Boolean) -> Unit)? = null
@@ -107,12 +108,15 @@ class MainActivity : FlutterFragmentActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         webpTexturePlugin?.disposeAll()
         webpTexturePlugin = null
+        comicTranslationOcrPlugin?.dispose()
+        comicTranslationOcrPlugin = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         GeneratedPluginRegistrant.registerWith(flutterEngine)
         webpTexturePlugin = WebPTexturePlugin(flutterEngine)
+        comicTranslationOcrPlugin = ComicTranslationOcrPlugin(this, flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "venera/method_channel"

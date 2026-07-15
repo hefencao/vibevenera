@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:venera/foundation/appdata.dart';
 
 import 'engine.dart';
+import 'model_manager.dart';
+import 'paddle_ocr.dart';
 import 'remote_translation.dart';
 
 final class ComicTranslationSecrets {
@@ -37,12 +39,19 @@ final class ComicTranslationRuntime {
   static final instance = ComicTranslationRuntime._();
 
   Future<void> init(String dataPath) async {
-    await ComicTranslationSecrets.instance.init(dataPath);
+    await Future.wait([
+      ComicTranslationSecrets.instance.init(dataPath),
+      ComicTranslationModelManager.instance.init(dataPath),
+    ]);
     configure();
   }
 
   void configure() {
     final registry = ComicTranslationEngineRegistry.instance;
+    final models = ComicTranslationModelManager.instance;
+    registry.ocrEngine = Platform.isAndroid && models.installed
+        ? AndroidPaddleComicOcrEngine(models)
+        : null;
     registry.translationEngine = switch (appdata.settings['comicTranslationBackend']) {
       'openaiCompatible' => OpenAiCompatibleComicTranslationEngine(
           endpoint: appdata.settings['comicTranslationRemoteEndpoint'] as String,

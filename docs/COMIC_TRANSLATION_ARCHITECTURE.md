@@ -22,6 +22,10 @@ ComicTranslationSession                            页面策略/串行调度
 OpenAI-compatible Chat Completions adapter；endpoint、model 可配置，API key 单独写入
 本机 `comic_translation_secrets.json`，不进入 appdata、数据同步或翻译 artifact。
 
+Android 本地 OCR 使用独立 `ppocr-sdk` module。Flutter 侧模型管理器负责断点续传、固定
+长度/SHA-256 校验和原子发布；原生侧使用单线程 worker 加载 ONNX session、采样图片并执行
+PaddleOCR。MethodChannel 不传原图字节，也不在 Android platform 主线程推理。
+
 强制规则：
 
 1. 翻译不得改变图片 provider identity，不得重建下载或播放 session。
@@ -119,8 +123,8 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 ## 7. 当前实现状态
 
 已完成：旁路模型、内容寻址数据库、独立调度、缓存完成事件、Reader overlay、设置入口、
-动图协议和 benchmark harness。
+动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
-已提供 OpenAI-compatible 远程翻译 adapter。未完成：生产 OCR engine adapter、应用内模型包
-下载管理、气泡分割、竖排重排、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI
-明确报告模型未安装，不进行网络回退。
+已提供 OpenAI-compatible 远程翻译 adapter。未完成：iOS/桌面 OCR runtime、本地文本翻译、
+气泡分割、竖排重排、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI 明确报告模型
+未安装，不进行网络回退。
