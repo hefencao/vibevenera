@@ -6,8 +6,8 @@
  *
  * 本函数改为「JNI 直读」：Dart 侧只把 native 帧地址(int64)+宽高经通道传来，这里
  * 用 ANativeWindow 直接从该地址 memcpy 进 Surface 缓冲区。UI isolate 完全不碰
- * 像素字节，10MB 拷贝只在 native 侧发生一次（且在 Android 平台线程，不在 UI
- * isolate）。
+ * 像素字节，10MB 拷贝只在 native 侧发生一次；Kotlin 插件在专用 blit 线程调用本
+ * 函数，不占用 Dart UI isolate 或 Android platform 主线程。
  *
  * 源像素约定：Premultiplied RGBA8888，R,G,B,A 字节序 —— 与
  * WINDOW_FORMAT_RGBA_8888 的内存布局一致，直接逐行 memcpy。

@@ -28,6 +28,9 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   int _fallbackFramesEmitted = 0;
   int _playbackRevision = 0;
   Completer<void>? _playbackWaiter;
+  bool _playbackWakeDeferred = false;
+  ViewportTransitionPhase _observedTransitionPhase =
+      ViewportTransitionPhase.idle;
   // 诊断：本 provider 挂载时刻与各里程碑是否已上报，用于拆解「翻页→首帧」延迟
   // 分别落在下载封口 / 首帧解码就绪 / 首帧显示 哪一段。
   int _attachMs = 0;
@@ -293,13 +296,38 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   }
 
   void _signalPlayback() {
-    _playbackRevision++;
-    final waiter = _playbackWaiter;
-    if (waiter != null && !waiter.isCompleted) waiter.complete();
     if (_canPreparePlayback &&
         _lease?.decode.holder.hasRenderedFrames == true) {
       unawaited(_prepareTexture());
     }
+    final pipeline = PipelineController.instance;
+    final phase = pipeline.viewportTransition.phase;
+    final resumedTransition =
+        _observedTransitionPhase == ViewportTransitionPhase.overlap &&
+        phase != ViewportTransitionPhase.overlap;
+    _observedTransitionPhase = phase;
+    final deferResume =
+        (resumedTransition ||
+            phase == ViewportTransitionPhase.dominant &&
+                (pipeline.interactionState == InteractionState.dragging ||
+                    pipeline.interactionState == InteractionState.settling)) &&
+        WidgetsBinding.instance.schedulerPhase != SchedulerPhase.idle;
+    if (deferResume) {
+      if (_playbackWakeDeferred) return;
+      _playbackWakeDeferred = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _playbackWakeDeferred = false;
+        if (!_disposed) _wakePlayback();
+      });
+      return;
+    }
+    _wakePlayback();
+  }
+
+  void _wakePlayback() {
+    _playbackRevision++;
+    final waiter = _playbackWaiter;
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
     _schedulePump();
   }
 
@@ -419,17 +447,27 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       // ANativeWindow 直接 memcpy 进 Surface。像素字节不进 Dart、不经 MethodChannel
       // 序列化，UI isolate 不再做 ~10MB/帧的整块拷贝。帧必须存活到 blit 完成，故
       // dispose 放在 await 之后。
-      ImagePipelinePerf.count('framePresented');
-      _reportFirstFrameLatency();
+      final bool presented;
       try {
-        await WebPTextureChannel.instance.update(id, w, h, frame.address);
+        presented = await WebPTextureChannel.instance.update(
+          id,
+          w,
+          h,
+          frame.address,
+        );
       } finally {
         frame.dispose();
+      }
+      if (!presented) {
+        ImagePipelinePerf.count('texturePresentRejected');
+        return;
       }
       if (_disposed) {
         _disposeTexture();
         return;
       }
+      ImagePipelinePerf.count('framePresented');
+      _reportFirstFrameLatency();
       WebPTextureRegistry.instance.publish(
         _provider._fullKey,
         WebPTextureInfo(textureId: id, width: w, height: h),

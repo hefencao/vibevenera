@@ -183,7 +183,7 @@ class PipelineController {
     _preloadCount = session.preloadCount;
     if (contextChanged) {
       _hasCurrentIdx = false;
-      _viewportTransition = ViewportTransitionState.idle;
+      _resetViewportInteraction();
       _directionPredictor.reset(
         nowMs: DateTime.now().millisecondsSinceEpoch,
       );
@@ -229,6 +229,7 @@ class PipelineController {
     _sessionId++;
     resources.clear();
     _windowRuleIndex = -1;
+    _resetViewportInteraction();
   }
 
   InteractionState get interactionState => _interaction;
@@ -261,6 +262,10 @@ class PipelineController {
 
   bool shouldPreparePresentation(String imageKey) =>
       imageKey == _currentKey || _viewportTransition.prepares(imageKey);
+
+  void endViewportTransition(Object owner) {
+    if (identical(_readerOwner, owner)) setInteractionState(InteractionState.idle);
+  }
 
   void setInteractionState(InteractionState state) {
     final endTransition = state == InteractionState.idle &&
@@ -310,6 +315,16 @@ class PipelineController {
     final modeChanged = _currentUsesExternalCodec;
     _currentUsesExternalCodec = false;
     _updateCurrentBufferedFrames(frames, forcePolicySync: modeChanged);
+  }
+
+  void _resetViewportInteraction() {
+    final changed = _interaction != InteractionState.idle ||
+        _viewportTransition.phase != ViewportTransitionPhase.idle;
+    _interaction = InteractionState.idle;
+    _viewportTransition = ViewportTransitionState.idle;
+    _dragCommitTimer?.cancel();
+    _dragCommitTimer = null;
+    if (changed) _playbackPolicyRevision.value++;
   }
 
   void updateCurrentExternalCodec({required bool ready}) {
@@ -502,7 +517,7 @@ class PipelineController {
     resources.clear();
     _images = const [];
     _currentUsesExternalCodec = false;
-    _viewportTransition = ViewportTransitionState.idle;
+    _resetViewportInteraction();
     _sessionAliases = const {};
     _currentKey = '';
     _nearKeys.clear();

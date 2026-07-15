@@ -431,6 +431,8 @@ class _GalleryModeState extends State<_GalleryMode>
   Timer? _settlingTimer;
   double? _lastViewportPage;
   int _viewportDirection = 0;
+  bool _galleryRebuildPending = false;
+  bool _galleryRebuildScheduled = false;
 
   /// WebP 三级缓存（生命周期绑定本 State）
   @override
@@ -440,7 +442,47 @@ class _GalleryModeState extends State<_GalleryMode>
   // StreamingImageProvider（挂到管道正在解码的 session）→ 首次浏览即流式。仅首张动图页
   // 触发一次，之后同源页 build 时已在 registry → 直接使用流式 provider、不再翻转。
   void _onStreamingSourceLearned() {
-    if (mounted) setState(() {});
+    _requestGalleryRebuild();
+  }
+
+  void _requestGalleryRebuild() {
+    if (!mounted) return;
+    _galleryRebuildPending = true;
+    if (PipelineController.instance.viewportTransition.phase ==
+        ViewportTransitionPhase.idle) {
+      _scheduleGalleryRebuild();
+    }
+  }
+
+  void _scheduleGalleryRebuild() {
+    if (_galleryRebuildScheduled || !_galleryRebuildPending) return;
+    _galleryRebuildScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _galleryRebuildScheduled = false;
+      if (!mounted || !_galleryRebuildPending) return;
+      if (PipelineController.instance.viewportTransition.phase !=
+          ViewportTransitionPhase.idle) {
+        return;
+      }
+      _galleryRebuildPending = false;
+      setState(() {});
+    });
+  }
+
+  void _finishViewportTransition() {
+    _lastViewportPage = null;
+    _viewportDirection = 0;
+    PipelineController.instance.endViewportTransition(reader);
+    _scheduleGalleryRebuild();
+  }
+
+  void _restoreBoundaryPage(int page) {
+    controller.jumpToPage(page);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _reportReaderPage(context, page);
+      _finishViewportTransition();
+    });
   }
 
   void _beginViewportTransition(ScrollMetrics metrics) {
@@ -563,17 +605,8 @@ class _GalleryModeState extends State<_GalleryMode>
           );
         } else if (notification is ScrollUpdateNotification) {
           _updateViewportTransition(notification.metrics);
-          if (notification.dragDetails == null &&
-              PipelineController.instance.interactionState ==
-                  InteractionState.dragging) {
-            StreamingImageProvider.setInteractionState(
-              InteractionState.settling,
-            );
-          }
         } else if (notification is ScrollEndNotification) {
-          _lastViewportPage = null;
-          _viewportDirection = 0;
-          StreamingImageProvider.setInteractionState(InteractionState.idle);
+          _finishViewportTransition();
         }
         return false;
       },
@@ -647,7 +680,7 @@ class _GalleryModeState extends State<_GalleryMode>
                         imageProvider.hashCode,
                         newSize,
                       );
-                      if (mounted) setState(() {});
+                      _requestGalleryRebuild();
                     }
                   },
                   errorBuilder: (errorContext, error, s, retry) {
@@ -692,14 +725,17 @@ class _GalleryModeState extends State<_GalleryMode>
           );
         },
         onPageChanged: (i) {
+          var visiblePage = i;
           if (i == 0) {
             if (reader.isFirstChapterOfGroup ||
                 !reader.toPrevChapter(toLastPage: true)) {
-              controller.jumpToPage(1);
+              visiblePage = 1;
+              _restoreBoundaryPage(1);
             }
           } else if (i == totalPages + 1) {
             if (reader.isLastChapterOfGroup || !reader.toNextChapter()) {
-              controller.jumpToPage(totalPages);
+              visiblePage = totalPages;
+              _restoreBoundaryPage(totalPages);
             }
           } else {
             reader.setPage(i);
@@ -711,7 +747,7 @@ class _GalleryModeState extends State<_GalleryMode>
           }
           var keys = photoViewControllers.keys.toList();
           for (var key in keys) {
-            if (key != i) photoViewControllers.remove(key);
+            if (key != visiblePage) photoViewControllers.remove(key);
           }
         },
         ),
@@ -793,11 +829,12 @@ class _GalleryModeState extends State<_GalleryMode>
       page,
       duration: const Duration(milliseconds: 200),
       curve: Curves.ease,
-    );
+    ).whenComplete(_finishViewportTransition);
   }
 
   @override
   void toPage(int page) {
+    _finishViewportTransition();
     controller.jumpToPage(page);
   }
 

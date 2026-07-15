@@ -32,19 +32,19 @@ class WebPTextureChannel {
   /// [address] 是 native 帧像素的地址（int64）。像素字节不进 Dart、不经 MethodChannel
   /// 序列化——native 侧（webp_texture_blit.c）直接从该地址 memcpy 进 Surface。
   /// 调用方必须保证该地址指向的 native 帧在本 Future 完成前存活。
-  Future<void> update(
+  Future<bool> update(
     int textureId,
     int width,
     int height,
     int address,
   ) {
-    if (!isSupported) return Future<void>.value();
-    return _channel.invokeMethod<void>('update', <String, dynamic>{
+    if (!isSupported) return Future<bool>.value(false);
+    return _channel.invokeMethod<bool>('update', <String, dynamic>{
       'textureId': textureId,
       'width': width,
       'height': height,
       'address': address,
-    });
+    }).then((presented) => presented == true);
   }
 
   Future<void> dispose(int textureId) {

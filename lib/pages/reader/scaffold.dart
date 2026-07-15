@@ -183,7 +183,12 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
               : -(kBottomBarHeight + MediaQuery.of(context).padding.bottom),
           left: 0,
           right: 0,
-          child: buildBottom(),
+          child: _isOpen
+              ? ValueListenableBuilder<int>(
+                  valueListenable: _pageRevision,
+                  builder: (context, _, _) => buildBottom(),
+                )
+              : buildBottom(),
         ),
       ],
     );

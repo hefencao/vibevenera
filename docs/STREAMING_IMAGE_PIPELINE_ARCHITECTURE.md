@@ -213,6 +213,11 @@ WebP/GIF present；新页已占据主要 viewport 后，即使 PageView 的减�
 没有离散 `PageMetrics` 的 continuous/custom-slider `scroll` 仍在滚动期间冻结 present；
 它们不能伪造页面覆盖度。只有 Gallery 的 PageView 使用 dominant/overlap 提前恢复。
 
+Android 的 `ANativeWindow_lock + memcpy + unlockAndPost` 在专用串行 blit 线程执行，不能
+占用 Android platform 主线程。成功提交后必须调用 `SurfaceProducer.scheduleFrame()`；
+只更新 Surface 而不调度 engine frame，会在 PageView 滚动停止后表现为 WebP 停播。
+MethodChannel 的完成回调仍切回主线程，native frame 地址保持到回调完成后才释放。
+
 目标页在越过 `onPageChanged` 中点前就进入 transition 资源角色：下载、解码、上传优先级
 高于普通 near，并按 current 缓冲水位取得 1～数帧的准备深度。Android native texture 的
 创建也与首次 blit 分离，目标页有 rendered frame 后可提前创建 texture，恢复播放时不再
@@ -270,6 +275,11 @@ PageMetrics 的连续位置先报告当前页覆盖度和运动方向上的目�
 32/120ms poll。页码文字使用独立 notifier 局部重建，不因页码变化重建整个
 ReaderScaffold。静态高分辨率页默认使用双线性 low filter，避免首次进入页面时同步生成
 mipmap 造成 raster 峰值。
+
+Gallery 的边界 sentinel 跳回、`animateToPage` Future 完成及 ScrollEnd 都显式收口
+transition，不能只依赖某一种 ScrollNotification；章节/旋转/reader detach 也会重置交互
+状态。图片尺寸确认和首次流式源识别需要重建 Gallery 时，重建合并到过渡结束后的下一帧，
+不与 PageView 的 build/layout/raster 叠在同一滚动帧。
 
 WebP worker 池保留一个 current 槽，但不再要求 current 完全停止解码后才允许 near：一个
 worker 可补 current，另一个可预解 transition。是否产生 transition/near 解码任务仍由
