@@ -429,6 +429,8 @@ class _GalleryModeState extends State<_GalleryMode>
 
   /// Timer to transition from settling to idle after page animation completes.
   Timer? _settlingTimer;
+  double? _lastViewportPage;
+  int _viewportDirection = 0;
 
   /// WebP 三级缓存（生命周期绑定本 State）
   @override
@@ -439,6 +441,40 @@ class _GalleryModeState extends State<_GalleryMode>
   // 触发一次，之后同源页 build 时已在 registry → 直接使用流式 provider、不再翻转。
   void _onStreamingSourceLearned() {
     if (mounted) setState(() {});
+  }
+
+  void _beginViewportTransition(ScrollMetrics metrics) {
+    _lastViewportPage = metrics is PageMetrics ? metrics.page : null;
+    _viewportDirection = 0;
+    PipelineController.instance.beginViewportTransition();
+  }
+
+  void _updateViewportTransition(ScrollMetrics metrics) {
+    if (metrics is! PageMetrics || metrics.page == null) return;
+    final position = metrics.page!;
+    final previous = _lastViewportPage;
+    final delta = previous == null ? 0 : position - previous;
+    if (delta.abs() > 0.0001) _viewportDirection = delta > 0 ? 1 : -1;
+    _lastViewportPage = position;
+
+    final dominantPage = position.round();
+    final coverage = 1 - (position - dominantPage).abs();
+    final targetPage = switch (_viewportDirection) {
+      1 => position.ceil(),
+      -1 => position.floor(),
+      _ => dominantPage,
+    };
+    final targetKeys = <String>{};
+    if (_viewportDirection != 0 &&
+        targetPage >= 1 &&
+        targetPage <= totalImagePages) {
+      final (start, end) = getPageImagesRange(targetPage);
+      targetKeys.addAll(reader.images!.getRange(start, end));
+    }
+    PipelineController.instance.updateViewportTransition(
+      currentCoverage: coverage,
+      targetKeys: targetKeys,
+    );
   }
 
   @override
@@ -519,8 +555,24 @@ class _GalleryModeState extends State<_GalleryMode>
       onNotification: (notification) {
         if (notification.depth != 0) return false;
         if (notification is ScrollStartNotification) {
-          StreamingImageProvider.setInteractionState(InteractionState.dragging);
+          _beginViewportTransition(notification.metrics);
+          StreamingImageProvider.setInteractionState(
+            notification.dragDetails == null
+                ? InteractionState.settling
+                : InteractionState.dragging,
+          );
+        } else if (notification is ScrollUpdateNotification) {
+          _updateViewportTransition(notification.metrics);
+          if (notification.dragDetails == null &&
+              PipelineController.instance.interactionState ==
+                  InteractionState.dragging) {
+            StreamingImageProvider.setInteractionState(
+              InteractionState.settling,
+            );
+          }
         } else if (notification is ScrollEndNotification) {
+          _lastViewportPage = null;
+          _viewportDirection = 0;
           StreamingImageProvider.setInteractionState(InteractionState.idle);
         }
         return false;

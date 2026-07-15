@@ -94,12 +94,13 @@ class PipelineController {
       _progress.notifier;
   ValueListenable<List<CacheDownloadProgress>> get cacheDownloadProgress =>
       _cacheDownloads.notifier;
-  final ValueNotifier<int> _interactionRevision = ValueNotifier<int>(0);
-  ValueListenable<int> get interactionChanges => _interactionRevision;
+  final ValueNotifier<int> _playbackPolicyRevision = ValueNotifier<int>(0);
+  ValueListenable<int> get playbackPolicyChanges => _playbackPolicyRevision;
   final PipelineWindowPlanner _windowPlanner = const PipelineWindowPlanner();
   final PipelinePolicyApplier _policyApplier = const PipelinePolicyApplier();
 
   InteractionState _interaction = InteractionState.idle;
+  ViewportTransitionState _viewportTransition = ViewportTransitionState.idle;
   int _targetW = 0, _targetH = 0;
   int _currentIdx = 0;
   int _stableIdx = 0;
@@ -182,6 +183,7 @@ class PipelineController {
     _preloadCount = session.preloadCount;
     if (contextChanged) {
       _hasCurrentIdx = false;
+      _viewportTransition = ViewportTransitionState.idle;
       _directionPredictor.reset(
         nowMs: DateTime.now().millisecondsSinceEpoch,
       );
@@ -230,11 +232,43 @@ class PipelineController {
   }
 
   InteractionState get interactionState => _interaction;
+  ViewportTransitionState get viewportTransition => _viewportTransition;
+
+  void beginViewportTransition() => updateViewportTransition(
+    currentCoverage: 1,
+    targetKeys: const <String>{},
+  );
+
+  void updateViewportTransition({
+    required double currentCoverage,
+    required Set<String> targetKeys,
+  }) {
+    final next = ViewportTransitionState.moving(
+      currentCoverage: currentCoverage,
+      targetKeys: targetKeys,
+      previousPhase: _viewportTransition.phase,
+    );
+    final phaseChanged = next.phase != _viewportTransition.phase;
+    final targetsChanged = !_sameKeySet(
+      next.targetKeys,
+      _viewportTransition.targetKeys,
+    );
+    _viewportTransition = next;
+    if (phaseChanged || targetsChanged) _playbackPolicyRevision.value++;
+    if (!targetsChanged || _images.isEmpty) return;
+    _applyWindow(protectJump: _provisionalIdx != null);
+  }
+
+  bool shouldPreparePresentation(String imageKey) =>
+      imageKey == _currentKey || _viewportTransition.prepares(imageKey);
 
   void setInteractionState(InteractionState state) {
-    if (_interaction == state) return;
+    final endTransition = state == InteractionState.idle &&
+        _viewportTransition.phase != ViewportTransitionPhase.idle;
+    if (_interaction == state && !endTransition) return;
     _interaction = state;
-    _interactionRevision.value++;
+    if (endTransition) _viewportTransition = ViewportTransitionState.idle;
+    _playbackPolicyRevision.value++;
     if (state != InteractionState.scroll) {
       _dragCommitTimer?.cancel();
       _dragCommitTimer = null;
@@ -406,6 +440,7 @@ class PipelineController {
     // Ensure entries exist
     for (final key in {
       _currentKey,
+      ..._viewportTransition.targetKeys,
       ..._nearKeys,
       ..._prevKeys,
       ..._farKeys,
@@ -425,7 +460,12 @@ class PipelineController {
     _syncPolicyLeases();
     _syncCurrentDownloadProgress();
     _cache?.setActivePages(
-      [_currentKey, ..._nearKeys, ..._prevKeys]
+      [
+        _currentKey,
+        ..._viewportTransition.targetKeys,
+        ..._nearKeys,
+        ..._prevKeys,
+      ]
           .where((key) => key.isNotEmpty)
           .map(_fullKey),
     );
@@ -462,6 +502,7 @@ class PipelineController {
     resources.clear();
     _images = const [];
     _currentUsesExternalCodec = false;
+    _viewportTransition = ViewportTransitionState.idle;
     _sessionAliases = const {};
     _currentKey = '';
     _nearKeys.clear();
@@ -584,6 +625,7 @@ class PipelineController {
       resources: resources,
       interaction: _interaction,
       currentKey: _currentKey,
+      transitionKeys: _viewportTransition.targetKeys,
       nearKeys: _nearKeys,
       prevKeys: _prevKeys,
       farKeys: _farKeys,
@@ -639,14 +681,21 @@ class PipelineController {
       // 后翻对称。current=0 / next=+1 / next+1=+2 / prev=-1，其余距离目标 0。
       final offset = _offsetByKey[entry.imageKey] ?? _offsetFor(entry.imageKey);
       final readDist = offset * _readDirection;
-      final targetFrames = policy.allowDecode &&
-              (!_currentUsesExternalCodec ||
-                  entry.priority == PagePriority.current)
+      final decodeAllowedByMode = policy.allowDecode &&
+          (!_currentUsesExternalCodec ||
+              entry.priority == PagePriority.current);
+      var targetFrames = decodeAllowedByMode
           ? FrameDepthTable.targetFor(
               ruleIndex: _windowRuleIndex < 0 ? 4 : _windowRuleIndex,
               readDist: readDist,
             )
           : 0;
+      if (decodeAllowedByMode && entry.priority == PagePriority.transition) {
+        final minimum = FrameDepthTable.transitionMinimumFor(
+          _windowRuleIndex < 0 ? 4 : _windowRuleIndex,
+        );
+        if (targetFrames < minimum) targetFrames = minimum;
+      }
       // 解码 rank 按阅读方向距离衰减，让近页先拿 worker（n>m>反向p）。current 不衰减。
       // 注意 clamp(low, high) 要求 low<=high：当 policy.decodePriority==0（far/keep
       // 等允许解码但优先级为 0 的页）时，clamp(1,0) 会抛 Invalid argument。此处对
@@ -794,6 +843,9 @@ class PipelineController {
     }
     return true;
   }
+
+  static bool _sameKeySet(Set<String> left, Set<String> right) =>
+      left.length == right.length && left.containsAll(right);
 
   int _downloadRank(ResourceEntry entry, {PagePriority? priority}) {
     return DownloadRanker(

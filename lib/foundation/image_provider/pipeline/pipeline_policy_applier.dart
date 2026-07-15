@@ -8,6 +8,7 @@ class PipelinePolicyApplier {
     required ResourceManager resources,
     required InteractionState interaction,
     required String currentKey,
+    required Set<String> transitionKeys,
     required Set<String> nearKeys,
     required Set<String> prevKeys,
     required Set<String> farKeys,
@@ -17,6 +18,7 @@ class PipelinePolicyApplier {
   }) {
     final active = <String>{
       currentKey,
+      ...transitionKeys,
       ...nearKeys,
       ...prevKeys,
       ...farKeys,
@@ -37,7 +39,6 @@ class PipelinePolicyApplier {
       );
     }
 
-    applyKey(currentKey, PagePriority.current);
     for (final k in nearKeys) {
       applyKey(k, PagePriority.near);
     }
@@ -50,6 +51,10 @@ class PipelinePolicyApplier {
     for (final k in keepKeys) {
       applyKey(k, PagePriority.keep);
     }
+    for (final k in transitionKeys) {
+      if (k != currentKey) applyKey(k, PagePriority.transition);
+    }
+    applyKey(currentKey, PagePriority.current);
     if (markDistant) {
       resources.forEach((entry) {
         if (active.contains(entry.imageKey)) return;

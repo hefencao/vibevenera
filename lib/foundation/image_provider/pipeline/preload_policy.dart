@@ -157,6 +157,7 @@ class FrameDepthTable {
   static const List<int> _next = [5, 3, 2, 1, 0]; // readDist +1
   static const List<int> _nextNext = [3, 2, 1, 1, 0]; // readDist +2
   static const List<int> _prev = [2, 2, 1, 1, 0]; // readDist -1
+  static const List<int> _transitionMinimum = [3, 3, 2, 1, 1];
 
   /// 返回某页在给定档位、给定阅读方向距离下的目标缓冲帧深。
   static int targetFor({required int ruleIndex, required int readDist}) {
@@ -174,6 +175,11 @@ class FrameDepthTable {
         return 0;
     }
   }
+
+  /// 已进入 viewport 的目标页至少准备一帧；current 水位充足后再逐级加深。
+  /// 调用方应与普通相对页目标取 max，不能因此降低顺阅读方向的既有预解深度。
+  static int transitionMinimumFor(int ruleIndex) =>
+      _transitionMinimum[ruleIndex.clamp(0, 4)];
 }
 
 class DynamicPreloadPolicy {

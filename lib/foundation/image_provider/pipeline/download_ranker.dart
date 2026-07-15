@@ -34,6 +34,7 @@ class DownloadRanker {
         : 0;
     final base = switch (p) {
       PagePriority.current => 1000,
+      PagePriority.transition => 880,
       PagePriority.near when readDistance > 0 => 760,
       PagePriority.near => 720,
       PagePriority.far when readDistance > 0 => 520,
@@ -52,6 +53,7 @@ class DownloadRanker {
         pressurePenalty;
     final cap = switch (p) {
       PagePriority.current => 2000,
+      PagePriority.transition => 1100,
       PagePriority.near when readDistance > 0 => 940,
       PagePriority.near => 900,
       PagePriority.far when readDistance > 0 => 700,

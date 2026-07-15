@@ -1409,11 +1409,10 @@ class WorkerPoolScheduler {
 
       var pickedIsCurrent = false;
 
-      // 为 current 保留一个 worker：非 current 解码已占满 (worker数-1) 时，本轮不
-      // 再取 next/bg，让空出的 worker 只服务 current 续帧。current 队列不受此限。
-      final allowNonCurrent = _currentBusy == 0 &&
-          _currentQueue.isEmpty &&
-          _nonCurrentBusy < _workerCount - 1;
+      // 水位策略决定近页是否值得预解；worker 层只保证非 current 最多占一个槽。
+      // 因此 current 正在一个 worker 解码时，另一个 worker 可与目标页预解重叠，
+      // 但目标页永远不能占满池子、阻塞下一批 current 补帧。
+      final allowNonCurrent = _nonCurrentBusy < _workerCount - 1;
 
       for (final w in [0, 1]) {
         if (_workerBusy[w]) continue;

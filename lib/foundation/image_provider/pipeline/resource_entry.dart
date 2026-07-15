@@ -8,7 +8,51 @@ import 'package:venera/foundation/log.dart';
 
 enum InteractionState { idle, dragging, scroll, jumping, settling }
 
-enum PagePriority { current, near, far, keep, distant }
+enum ViewportTransitionPhase { idle, dominant, overlap }
+
+class ViewportTransitionState {
+  static const double overlapEnterCoverage = 0.82;
+  static const double dominantResumeCoverage = 0.90;
+
+  final ViewportTransitionPhase phase;
+  final double currentCoverage;
+  final Set<String> targetKeys;
+
+  const ViewportTransitionState._(
+    this.phase,
+    this.currentCoverage,
+    this.targetKeys,
+  );
+
+  static const idle = ViewportTransitionState._(
+    ViewportTransitionPhase.idle,
+    1,
+    <String>{},
+  );
+
+  factory ViewportTransitionState.moving({
+    required double currentCoverage,
+    required Set<String> targetKeys,
+    ViewportTransitionPhase previousPhase = ViewportTransitionPhase.idle,
+  }) {
+    final coverage = currentCoverage.clamp(0.0, 1.0);
+    final threshold = previousPhase == ViewportTransitionPhase.overlap
+        ? dominantResumeCoverage
+        : overlapEnterCoverage;
+    return ViewportTransitionState._(
+      coverage >= threshold
+          ? ViewportTransitionPhase.dominant
+          : ViewportTransitionPhase.overlap,
+      coverage,
+      Set.unmodifiable(targetKeys),
+    );
+  }
+
+  bool get shouldFreezePlayback => phase == ViewportTransitionPhase.overlap;
+  bool prepares(String imageKey) => targetKeys.contains(imageKey);
+}
+
+enum PagePriority { current, transition, near, far, keep, distant }
 
 /// Explicit task lifecycle state.
 /// [FIX-7] Replaces implicit state spread across Registry + Queue + bool flags.
@@ -94,6 +138,14 @@ class ResourcePolicy {
     decodePriority: 50,
   );
 
+  static const _transition = ResourcePolicy(
+    allowDownload: true,
+    allowDecode: true,
+    allowGpuUpload: true,
+    downloadPriority: 80,
+    decodePriority: 80,
+  );
+
   static const _far = ResourcePolicy(
     allowDownload: true,
     allowDecode: false,
@@ -142,6 +194,7 @@ class ResourcePolicy {
   static const _table = <InteractionState, Map<PagePriority, ResourcePolicy>>{
     InteractionState.dragging: {
       PagePriority.current: _draggingCurrent,
+      PagePriority.transition: _transition,
       PagePriority.near: _draggingNear,
       PagePriority.far: _draggingFar,
       PagePriority.keep: _keep,
@@ -149,6 +202,7 @@ class ResourcePolicy {
     },
     InteractionState.scroll: {
       PagePriority.current: _current,
+      PagePriority.transition: _transition,
       PagePriority.near: _distant,
       PagePriority.far: _distant,
       PagePriority.keep: _keep,
@@ -156,6 +210,7 @@ class ResourcePolicy {
     },
     InteractionState.jumping: {
       PagePriority.current: _current,
+      PagePriority.transition: _transition,
       PagePriority.near: _distant,
       PagePriority.far: _distant,
       PagePriority.keep: _keep,
@@ -163,6 +218,7 @@ class ResourcePolicy {
     },
     InteractionState.settling: {
       PagePriority.current: _current,
+      PagePriority.transition: _transition,
       PagePriority.near: _settlingNear,
       PagePriority.far: _settlingFar,
       PagePriority.keep: _keep,
@@ -170,6 +226,7 @@ class ResourcePolicy {
     },
     InteractionState.idle: {
       PagePriority.current: _current,
+      PagePriority.transition: _transition,
       PagePriority.near: _near,
       PagePriority.far: _far,
       PagePriority.keep: _keep,

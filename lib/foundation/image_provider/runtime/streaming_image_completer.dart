@@ -1,5 +1,7 @@
 part of '../streaming_image.dart';
 
+enum _PlaybackGate { present, prepare, wait }
+
 /// ImageProvider adapter for the Phase 3 session pipeline.
 ///
 /// It subscribes to an existing WebPDecodeSession/holder and never opens a
@@ -50,7 +52,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
 
   // native texture 播放状态（仅 Android 动图路径）。
   int? _textureId;
-  bool _textureCreating = false;
+  Future<int>? _textureCreation;
 
   _StreamingImageCompleter(this._provider)
     : _scopeId =
@@ -63,7 +65,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       onUpdated: _onGifUpdated,
       onError: _reportError,
     );
-    PipelineController.instance.interactionChanges.addListener(
+    PipelineController.instance.playbackPolicyChanges.addListener(
       _signalPlayback,
     );
     WidgetsBinding.instance.addObserver(this);
@@ -87,7 +89,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   @override
   void onDisposed() {
     _disposed = true;
-    PipelineController.instance.interactionChanges.removeListener(
+    PipelineController.instance.playbackPolicyChanges.removeListener(
       _signalPlayback,
     );
     _signalPlayback();
@@ -294,6 +296,10 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
     _playbackRevision++;
     final waiter = _playbackWaiter;
     if (waiter != null && !waiter.isCompleted) waiter.complete();
+    if (_canPreparePlayback &&
+        _lease?.decode.holder.hasRenderedFrames == true) {
+      unawaited(_prepareTexture());
+    }
     _schedulePump();
   }
 
@@ -330,16 +336,12 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         // （current 页 true / 近邻页 false），visible 与策略租约共享同一 decode
         // session，信号可靠。
         //
-        // 非当前、viewport 移动或缺帧时挂起到 session/interaction 的下一次状态信号。
+        // 非当前、viewport overlap 或缺帧时挂起到 session/policy 的下一次状态信号。
         // revision 消除“状态在建立 waiter 前变化”的丢唤醒竞态，不再用 32/120ms poll。
         final playbackRevision = _playbackRevision;
         final isCurrentNow = _lease?.decode.isCurrent == true;
-        if (_firstFrameReported && _isViewportMoving) {
-          await _waitForPlaybackSignal(playbackRevision);
-          continue;
-        }
-        if (!isCurrentNow && _firstFrameReported) {
-          // 非当前页：已present过静态首帧，此后静止——不消费帧、不驱动重解、不抢核。
+        final gate = _playbackGate(isCurrentNow);
+        if (gate != _PlaybackGate.present) {
           await _waitForPlaybackSignal(playbackRevision);
           continue;
         }
@@ -400,21 +402,18 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   /// 无 setState。
   Future<void> _presentTextureFrame(NativeAddressFrameHandle frame) async {
     try {
-      if (_textureId == null) {
-        if (_textureCreating) {
-          frame.dispose();
-          return;
-        }
-        _textureCreating = true;
-        _textureId = await WebPTextureChannel.instance.create();
-        _textureCreating = false;
-        if (_disposed || _textureId == null) {
-          frame.dispose();
-          _disposeTexture();
-          return;
-        }
+      final id = await _ensureTexture();
+      while (!_disposed &&
+          _playbackGate(_lease?.decode.isCurrent == true) !=
+              _PlaybackGate.present) {
+        final revision = _playbackRevision;
+        await _waitForPlaybackSignal(revision);
       }
-      final id = _textureId!;
+      if (_disposed) {
+        frame.dispose();
+        _disposeTexture();
+        return;
+      }
       final w = frame.width, h = frame.height;
       // JNI 直读：只把 native 帧地址交给平台侧，native（webp_texture_blit.c）用
       // ANativeWindow 直接 memcpy 进 Surface。像素字节不进 Dart、不经 MethodChannel
@@ -436,8 +435,39 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         WebPTextureInfo(textureId: id, width: w, height: h),
       );
     } catch (error, stack) {
-      _textureCreating = false;
       frame.dispose(); // idempotent
+      _reportError(error, stack);
+    }
+  }
+
+  Future<int> _ensureTexture() async {
+    final existing = _textureId;
+    if (existing != null) return existing;
+    final creating = _textureCreation;
+    if (creating != null) return creating;
+    final future = () async {
+      final id = await WebPTextureChannel.instance.create();
+      if (id == null) throw StateError('Failed to create WebP texture');
+      if (_disposed) {
+        await WebPTextureChannel.instance.dispose(id);
+        throw StateError('WebP texture owner was disposed during creation');
+      }
+      _textureId = id;
+      return id;
+    }();
+    _textureCreation = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_textureCreation, future)) _textureCreation = null;
+    }
+  }
+
+  Future<void> _prepareTexture() async {
+    if (!WebPTextureChannel.instance.isSupported || _textureId != null) return;
+    try {
+      await _ensureTexture();
+    } catch (error, stack) {
       _reportError(error, stack);
     }
   }
@@ -449,10 +479,28 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         state != ui.AppLifecycleState.detached;
   }
 
-  bool get _isViewportMoving {
-    final interaction = PipelineController.instance.interactionState;
-    return interaction == InteractionState.dragging ||
-        interaction == InteractionState.scroll;
+  bool get _shouldFreezePlayback {
+    final pipeline = PipelineController.instance;
+    final transition = pipeline.viewportTransition;
+    if (transition.phase != ViewportTransitionPhase.idle) {
+      return transition.shouldFreezePlayback;
+    }
+    // continuous/custom slider 没有离散 PageMetrics，保留 scroll 期间冻结；
+    // Gallery 则由覆盖度状态接管，不能再一直等到 ScrollEnd。
+    return pipeline.interactionState == InteractionState.scroll;
+  }
+
+  bool get _canPreparePlayback =>
+      PipelineController.instance.shouldPreparePresentation(
+        _provider.imageKey,
+      );
+
+  _PlaybackGate _playbackGate(bool isCurrent) {
+    if (!_firstFrameReported) return _PlaybackGate.present;
+    if (_shouldFreezePlayback || !isCurrent) {
+      return _canPreparePlayback ? _PlaybackGate.prepare : _PlaybackGate.wait;
+    }
+    return _PlaybackGate.present;
   }
 
   void _queueGifSnapshot(DownloadSessionSnapshot snapshot) {
@@ -563,6 +611,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
     final codec = _fallbackCodec;
     if (codec == null) return;
 
+    ui.FrameInfo? pendingFrame;
     _fallbackPumping = true;
     try {
       while (!_disposed &&
@@ -571,10 +620,6 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
           identical(_fallbackCodec, codec)) {
         final playbackRevision = _playbackRevision;
         final isCurrent = _lease?.decode.isCurrent == true;
-        if (_firstFrameReported && _isViewportMoving) {
-          await _waitForPlaybackSignal(playbackRevision);
-          continue;
-        }
         if (isCurrent) {
           final healthy =
               !_gifRuntime.hasFrames ||
@@ -584,11 +629,9 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
             ready: healthy,
           );
         }
-        if (!isCurrent && _firstFrameReported) {
-          await _waitForPlaybackSignal(playbackRevision);
-          continue;
-        }
-        if (_gifRuntime.hasFrames && _fallbackFramesEmitted >= _gifCodecFrames) {
+        if (pendingFrame == null &&
+            _gifRuntime.hasFrames &&
+            _fallbackFramesEmitted >= _gifCodecFrames) {
           final sourceChanged =
               _gifCodecEpoch != _gifRuntime.epoch && _gifRuntime.availableFrames > 0;
           if ((sourceChanged || _gifRuntime.availableFrames > _gifCodecFrames) &&
@@ -614,11 +657,23 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
           return;
         }
 
-        final frame = await codec.getNextFrame();
-        if (_disposed || !identical(_fallbackCodec, codec)) {
-          frame.image.dispose();
-          return;
+        final gate = _playbackGate(isCurrent);
+        if (gate != _PlaybackGate.present) {
+          if (gate == _PlaybackGate.prepare && pendingFrame == null) {
+            pendingFrame = await codec.getNextFrame();
+            if (_disposed || !identical(_fallbackCodec, codec)) return;
+          }
+          await _waitForPlaybackSignal(playbackRevision);
+          continue;
         }
+        pendingFrame ??= await codec.getNextFrame();
+        if (_disposed || !identical(_fallbackCodec, codec)) return;
+        if (_playbackGate(_lease?.decode.isCurrent == true) !=
+            _PlaybackGate.present) {
+          continue;
+        }
+        final frame = pendingFrame;
+        pendingFrame = null;
         ImagePipelinePerf.count('framePresentedFallback');
         _reportFirstFrameLatency();
         setImage(ImageInfo(image: frame.image, scale: _provider.scale));
@@ -646,6 +701,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
       if (identical(_fallbackCodec, codec)) _fallbackCodec = null;
       _reportError(error, stack);
     } finally {
+      pendingFrame?.image.dispose();
       _fallbackPumping = false;
     }
   }

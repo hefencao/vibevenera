@@ -204,9 +204,19 @@ other        -> sealed 后交给普通 Flutter codec fallback
    renderer 显示。
 
 `SurfaceProducer.setSize` 和 `ANativeWindow_setBuffersGeometry` 只在纹理尺寸第一次确定或
-真实变化时执行，不能在每个动画帧重复配置 buffer queue。页面 viewport 正在
-dragging/scroll 时，已显示过首帧的 WebP/GIF 暂停 present，下载和预解码仍继续，待
-viewport idle 后恢复播放。
+真实变化时执行，不能在每个动画帧重复配置 buffer queue。viewport 过渡被拆成
+`idle / dominant / overlap`：只有当前页可见占比低于 policy 水位、两页明显重叠时才冻结
+WebP/GIF present；新页已占据主要 viewport 后，即使 PageView 的减速动画尚未结束也恢复
+播放。native WebP 的 holder 继续按水位准备帧但 pump 不提前消费；GIF codec 可提前取得
+一帧但不提交，帧时长都从真正 present 后重新计时。
+
+没有离散 `PageMetrics` 的 continuous/custom-slider `scroll` 仍在滚动期间冻结 present；
+它们不能伪造页面覆盖度。只有 Gallery 的 PageView 使用 dominant/overlap 提前恢复。
+
+目标页在越过 `onPageChanged` 中点前就进入 transition 资源角色：下载、解码、上传优先级
+高于普通 near，并按 current 缓冲水位取得 1～数帧的准备深度。Android native texture 的
+创建也与首次 blit 分离，目标页有 rendered frame 后可提前创建 texture，恢复播放时不再
+串行等待 texture create。
 
 download、decode、upload 分属 scheduler 的 network/decode/upload lane。native 工作不在
 `onPageChanged` 或 build 中同步执行。
@@ -241,24 +251,30 @@ Reader 只报告：
 - current/stable index；
 - dragging/scroll/jumping/idle；
 - 阅读方向预测输入；
-- viewport 中实际显示的图片键。
+- viewport 的连续覆盖度、运动方向及目标图片键。
 
 Policy 决定：
 
 - 下载连接优先级与并发 lane；
 - current/next/previous/far 的窗口角色；
+- dominant/overlap 阈值与 transition 资源角色；
 - WebP decode frame depth；
 - upload 权限；
 - keep/evict；
 - external codec 模式下是否抑制邻页 native decode。
 
 PageView 的 `onPageChanged` 会在滚动动画越过中点时触发，而不是在动画结束时触发。
-此时立即提升新 current 的下载/解码 policy，让剩余动画时间用于准备帧；WebP/GIF 的
-present 独立冻结到 viewport idle，避免 texture 更新参与页面合成。interaction、holder
-和 decode session 使用 revision wake signal 恢复播放，不使用 32/120ms poll，因此 idle
-后没有额外轮询等待。页码文字使用独立 notifier 局部重建，不因页码变化重建整个
+PageMetrics 的连续位置先报告当前页覆盖度和运动方向上的目标图片键；policy 在中点前把
+目标页提升为 transition，中点处再立即提升为 current。present 只在 `overlap` 阶段冻结，
+进入 `dominant` 后由 revision wake signal 立即恢复，不等待 ScrollEnd，也不使用
+32/120ms poll。页码文字使用独立 notifier 局部重建，不因页码变化重建整个
 ReaderScaffold。静态高分辨率页默认使用双线性 low filter，避免首次进入页面时同步生成
 mipmap 造成 raster 峰值。
+
+WebP worker 池保留一个 current 槽，但不再要求 current 完全停止解码后才允许 near：一个
+worker 可补 current，另一个可预解 transition。是否产生 transition/near 解码任务仍由
+FrameDepthTable 水位决定；current 水位不足时目标页只保首帧需求，水位恢复后才加深，
+而不是让 worker 自行无限预取。两个 cursor 不会在同一 decoder 上并发。
 
 因此不能向 `onPageChanged` 添加缓存或下载策略参数，也不能由
 `_precacheLocalReaderPages` 一类 UI helper 直接拥有 session 生命周期。

@@ -107,6 +107,48 @@ void main() {
     );
   });
 
+  test('viewport 目标页在交互中保持完整准备权限', () {
+    for (final interaction in InteractionState.values) {
+      final transition = ResourcePolicy.compute(
+        interaction,
+        PagePriority.transition,
+      );
+      expect(
+        (
+          transition.allowDownload,
+          transition.allowDecode,
+          transition.allowGpuUpload,
+          transition.decodePriority,
+        ),
+        (true, true, true, 80),
+      );
+    }
+  });
+
+  test('viewport 只在两页明显重叠时冻结 present', () {
+    final dominant = ViewportTransitionState.moving(
+      currentCoverage: 0.9,
+      targetKeys: {'next'},
+    );
+    final overlap = ViewportTransitionState.moving(
+      currentCoverage: 0.7,
+      targetKeys: {'next'},
+    );
+    final hysteresis = ViewportTransitionState.moving(
+      currentCoverage: 0.85,
+      targetKeys: {'next'},
+      previousPhase: ViewportTransitionPhase.overlap,
+    );
+
+    expect(dominant.phase, ViewportTransitionPhase.dominant);
+    expect(dominant.shouldFreezePlayback, isFalse);
+    expect(dominant.prepares('next'), isTrue);
+    expect(overlap.phase, ViewportTransitionPhase.overlap);
+    expect(overlap.shouldFreezePlayback, isTrue);
+    expect(hysteresis.phase, ViewportTransitionPhase.overlap);
+    expect(ViewportTransitionState.idle.shouldFreezePlayback, isFalse);
+  });
+
   test('withDownloadPriority 只改下载优先级，其余不变', () {
     final base = ResourcePolicy.compute(
       InteractionState.idle,
