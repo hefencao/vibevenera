@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
-import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.Rect
 import android.os.Handler
@@ -25,9 +24,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.Executors
-import kotlin.math.ceil
-import kotlin.math.floor
-import kotlin.math.sqrt
 
 class ComicTranslationOcrPlugin(
     context: Context,
@@ -195,14 +191,10 @@ class ComicTranslationOcrPlugin(
     ): List<_RecognizedRegion> {
         val value = ocr!!.recognize(bitmap)
         metrics.add(value)
-        val backgrounds = value.results.map {
-            estimateBackground(bitmap, it.box.points)
-        }
         val segmentationStart = System.currentTimeMillis()
-        val bubbles = BubbleSegmenter.segment(
+        val segmentations = BubbleSegmenter.segment(
             bitmap,
             value.results.map { it.box },
-            backgrounds,
         )
         metrics.bubbleSegmentationMs += System.currentTimeMillis() - segmentationStart
         val scaleX = source.width().toFloat() / bitmap.width
@@ -211,12 +203,17 @@ class ComicTranslationOcrPlugin(
             _RecognizedRegion(
                 text = region.text,
                 confidence = region.confidence,
-                backgroundArgb = backgrounds[index],
+                backgroundArgb = segmentations[index].backgroundArgb,
                 points = region.box.points.map { point ->
                     PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
                 },
-                bubblePoints = bubbles[index]?.map { point ->
+                bubblePoints = segmentations[index].bubblePolygon?.map { point ->
                     PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
+                },
+                sourceMaskPolygons = segmentations[index].sourceMaskPolygons.map { polygon ->
+                    polygon.map { point ->
+                        PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
+                    }
                 },
             )
         }
@@ -233,44 +230,13 @@ class ComicTranslationOcrPlugin(
         inPreferredConfig = Bitmap.Config.ARGB_8888
     }
 
-    private fun estimateBackground(bitmap: android.graphics.Bitmap, points: List<PointF>): Int {
-        val left = floor(points.minOf { it.x }.toDouble()).toInt().coerceIn(0, bitmap.width - 1)
-        val top = floor(points.minOf { it.y }.toDouble()).toInt().coerceIn(0, bitmap.height - 1)
-        val right = ceil(points.maxOf { it.x }.toDouble()).toInt().coerceIn(left + 1, bitmap.width)
-        val bottom = ceil(points.maxOf { it.y }.toDouble()).toInt().coerceIn(top + 1, bitmap.height)
-        val step = sqrt(((right - left) * (bottom - top) / 1024.0).coerceAtLeast(1.0))
-            .toInt().coerceAtLeast(1)
-        val count = IntArray(4096)
-        val red = LongArray(4096)
-        val green = LongArray(4096)
-        val blue = LongArray(4096)
-        for (y in top until bottom step step) {
-            for (x in left until right step step) {
-                val color = bitmap.getPixel(x, y)
-                val r = Color.red(color)
-                val g = Color.green(color)
-                val b = Color.blue(color)
-                val bucket = (r shr 4 shl 8) or (g shr 4 shl 4) or (b shr 4)
-                count[bucket]++
-                red[bucket] += r.toLong()
-                green[bucket] += g.toLong()
-                blue[bucket] += b.toLong()
-            }
-        }
-        val bucket = count.indices.maxBy { count[it] }
-        return Color.rgb(
-            (red[bucket] / count[bucket]).toInt(),
-            (green[bucket] / count[bucket]).toInt(),
-            (blue[bucket] / count[bucket]).toInt(),
-        )
-    }
-
     private data class _RecognizedRegion(
         val text: String,
         val confidence: Float,
         val backgroundArgb: Int,
         val points: List<PointF>,
         val bubblePoints: List<PointF>?,
+        val sourceMaskPolygons: List<List<PointF>>,
     )
 
     private data class _ModelPaths(
@@ -311,6 +277,9 @@ class ComicTranslationOcrPlugin(
                     "points" to region.points.map { listOf(it.x.toDouble(), it.y.toDouble()) },
                     "bubblePoints" to region.bubblePoints?.map {
                         listOf(it.x.toDouble(), it.y.toDouble())
+                    },
+                    "sourceMaskPolygons" to region.sourceMaskPolygons.map { polygon ->
+                        polygon.map { listOf(it.x.toDouble(), it.y.toDouble()) }
                     },
                 )
             },

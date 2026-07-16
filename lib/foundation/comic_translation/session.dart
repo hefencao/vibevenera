@@ -301,6 +301,7 @@ final class ComicTranslationSession {
           orientation: region.orientation,
           kind: region.kind,
           readingOrder: region.readingOrder,
+          sourceMaskPolygons: region.sourceMaskPolygons,
           backgroundArgb: region.backgroundArgb,
           bubblePolygon: region.bubblePolygon,
           frameSpan: region.frameSpan,

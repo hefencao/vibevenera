@@ -12,6 +12,7 @@ final class ComicTranslationBenchmarkSample {
   final ComicOcrRunMetrics? ocrMetrics;
   final int regionCount;
   final int bubbleCount;
+  final int sourceMaskCount;
   final List<String> sourceTexts;
   final List<double> sourceConfidences;
   final List<String> translatedTexts;
@@ -26,6 +27,7 @@ final class ComicTranslationBenchmarkSample {
     required this.ocrMetrics,
     required this.regionCount,
     required this.bubbleCount,
+    required this.sourceMaskCount,
     required this.sourceTexts,
     required this.sourceConfidences,
     required this.translatedTexts,
@@ -135,6 +137,10 @@ final class ComicTranslationBenchmark {
           regionCount: artifact.regions.length,
           bubbleCount:
               artifact.regions.where((region) => region.bubblePolygon != null).length,
+          sourceMaskCount: artifact.regions.fold(
+            0,
+            (count, region) => count + region.sourceMaskPolygons.length,
+          ),
           sourceTexts: artifact.regions.map((region) => region.text).toList(),
           sourceConfidences:
               artifact.regions.map((region) => region.confidence).toList(),

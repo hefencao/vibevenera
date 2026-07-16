@@ -44,7 +44,7 @@ RSS 变化，并区分模型加载、边界采样最大值和释放后保留内�
 自动语言继续使用 PP-OCRv6 多语言 recognition；手动指定“韩文”会切换到独立的
 `korean_PP-OCRv5_mobile_rec`。两者共享同一检测模型文件，但当前 SDK 以完整 OCR session 为切换单位，
 因此切换语言时先释放旧 session，避免两套 recognition 权重同时常驻。benchmark 会显示 tile、
-逐区置信度、成功气泡数和气泡分割耗时。
+逐区置信度、成功气泡数、源文字 mask 数和分割耗时。
 
 ## 远程翻译
 
@@ -56,8 +56,8 @@ RSS 变化，并区分模型加载、边界采样最大值和释放后保留内�
 {"translations":{"regionId":"translated text"}}
 ```
 
-OCR 置信度只描述识别可靠性，不作为跳过翻译的条件。请求会把置信度和方向一并发送；若模型对
-包含文字的区域只返回问号或标点，会仅针对这些区域执行一次明确的翻译修复请求。
+OCR 置信度只描述识别可靠性，不作为跳过翻译的条件。请求只发送按 region id 对应的 OCR 文字；
+韩文识别问题由手动选择韩文 recognition 模型解决，不通过增加远程翻译重试掩盖。
 
 API key 保存于应用数据目录的 `comic_translation_secrets.json`，不会进入数据同步。Android
 应用私有目录受系统沙箱保护；桌面端文件目前未加密。

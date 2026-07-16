@@ -312,6 +312,7 @@ class _ComicTranslationBackendPageState
               orientation: ComicTextOrientation.horizontal,
               kind: ComicTextKind.dialogue,
               readingOrder: 0,
+              sourceMaskPolygons: [],
             ),
           ],
         ),
@@ -518,6 +519,7 @@ class _ComicTranslationBenchmarkPageState
           '${result!.translationMeasured ? 'translation=${sample.translationTime.inMilliseconds}ms ' : ''}'
           'regions=${sample.regionCount} '
           'bubbles=${sample.bubbleCount} '
+          'masks=${sample.sourceMaskCount} '
           'rssΔ=${_rssDelta(sample.rssAfter, sample.rssBefore)}',
         ),
         if (metrics != null)
@@ -530,7 +532,7 @@ class _ComicTranslationBenchmarkPageState
             '(${metrics.recognitionPreprocess.inMilliseconds}/'
             '${metrics.recognitionInference.inMilliseconds}/'
             '${metrics.recognitionPostprocess.inMilliseconds}) · '
-            'bubble=${metrics.bubbleSegmentation.inMilliseconds}ms',
+            'segment=${metrics.bubbleSegmentation.inMilliseconds}ms',
             style: ts.s12,
           ),
         if (sample.sourceTexts.isNotEmpty)

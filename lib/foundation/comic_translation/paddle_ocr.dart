@@ -23,7 +23,8 @@ final class AndroidPaddleComicOcrEngine
   String get id => 'paddleocr-android';
 
   @override
-  String get modelVersion => '${ComicTranslationModelManager.bundle.version}:bubble-v1';
+  String get modelVersion =>
+      '${ComicTranslationModelManager.bundle.version}:bubble-v2:pixel-mask-v1';
 
   @override
   bool get supportsAnimatedPosterFrame => false;
@@ -81,6 +82,17 @@ final class AndroidPaddleComicOcrEngine
             );
           })
           .toList();
+      final sourceMaskPolygons = (region['sourceMaskPolygons'] as List)
+          .map((rawPolygon) => (rawPolygon as List)
+              .map((rawPoint) {
+                final point = rawPoint as List;
+                return NormalizedPoint(
+                  (point[0] as num).toDouble() / width,
+                  (point[1] as num).toDouble() / height,
+                );
+              })
+              .toList())
+          .toList();
       final xs = points.map((point) => point.x);
       final ys = points.map((point) => point.y);
       final boxWidth = xs.reduce((a, b) => a > b ? a : b) -
@@ -97,6 +109,7 @@ final class AndroidPaddleComicOcrEngine
             : ComicTextOrientation.horizontal,
         kind: ComicTextKind.unknown,
         readingOrder: int.parse((region['id'] as String).substring(1)),
+        sourceMaskPolygons: sourceMaskPolygons,
         backgroundArgb: region['backgroundArgb'] as int,
         bubblePolygon: bubblePolygon,
       );

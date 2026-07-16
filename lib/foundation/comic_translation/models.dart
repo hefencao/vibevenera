@@ -87,6 +87,7 @@ final class ComicOcrRegion {
   final int readingOrder;
   final int? backgroundArgb;
   final List<NormalizedPoint>? bubblePolygon;
+  final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicOcrRegion({
@@ -97,6 +98,7 @@ final class ComicOcrRegion {
     required this.orientation,
     required this.kind,
     required this.readingOrder,
+    required this.sourceMaskPolygons,
     this.backgroundArgb,
     this.bubblePolygon,
     this.frameSpan,
@@ -118,6 +120,11 @@ final class ComicOcrRegion {
     bubblePolygon: (json['bubblePolygon'] as List?)
         ?.map((point) => NormalizedPoint.fromJson(point as List))
         .toList(),
+    sourceMaskPolygons: (json['sourceMaskPolygons'] as List? ?? const [])
+        .map((polygon) => (polygon as List)
+            .map((point) => NormalizedPoint.fromJson(point as List))
+            .toList())
+        .toList(),
     frameSpan: json['frameSpan'] == null
         ? null
         : AnimatedFrameSpan.fromJson(
@@ -136,6 +143,9 @@ final class ComicOcrRegion {
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
+    'sourceMaskPolygons': sourceMaskPolygons
+        .map((polygon) => polygon.map((point) => point.toJson()).toList())
+        .toList(),
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }
@@ -209,6 +219,7 @@ final class ComicTranslatedRegion {
   final int readingOrder;
   final int? backgroundArgb;
   final List<NormalizedPoint>? bubblePolygon;
+  final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicTranslatedRegion({
@@ -219,6 +230,7 @@ final class ComicTranslatedRegion {
     required this.orientation,
     required this.kind,
     required this.readingOrder,
+    required this.sourceMaskPolygons,
     this.backgroundArgb,
     this.bubblePolygon,
     this.frameSpan,
@@ -241,6 +253,11 @@ final class ComicTranslatedRegion {
         bubblePolygon: (json['bubblePolygon'] as List?)
             ?.map((point) => NormalizedPoint.fromJson(point as List))
             .toList(),
+        sourceMaskPolygons: (json['sourceMaskPolygons'] as List? ?? const [])
+            .map((polygon) => (polygon as List)
+                .map((point) => NormalizedPoint.fromJson(point as List))
+                .toList())
+            .toList(),
         frameSpan: json['frameSpan'] == null
             ? null
             : AnimatedFrameSpan.fromJson(
@@ -259,6 +276,9 @@ final class ComicTranslatedRegion {
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
+    'sourceMaskPolygons': sourceMaskPolygons
+        .map((polygon) => polygon.map((point) => point.toJson()).toList())
+        .toList(),
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }

@@ -52,6 +52,7 @@ void main() {
     expect(firstState.artifact!.regions.single.translatedText, '你好');
     expect(firstState.artifact!.regions.single.backgroundArgb, 0xFFFFFFFF);
     expect(firstState.artifact!.regions.single.bubblePolygon, isNotEmpty);
+    expect(firstState.artifact!.regions.single.sourceMaskPolygons.single, hasLength(4));
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
     first.setEnabled(false);
@@ -75,7 +76,11 @@ void main() {
       current: [identity],
       interaction: ComicTranslationInteraction.idle,
     );
-    await _waitFor(second, identity);
+    final secondState = await _waitFor(second, identity);
+    expect(
+      secondState.artifact!.regions.single.sourceMaskPolygons.single.first.x,
+      0.12,
+    );
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
     second.dispose();
@@ -275,6 +280,14 @@ final class _OcrEngine implements ComicOcrEngine {
           orientation: ComicTextOrientation.vertical,
           kind: ComicTextKind.dialogue,
           readingOrder: 0,
+          sourceMaskPolygons: [
+            [
+              NormalizedPoint(0.12, 0.12),
+              NormalizedPoint(0.2, 0.12),
+              NormalizedPoint(0.2, 0.3),
+              NormalizedPoint(0.12, 0.3),
+            ],
+          ],
           backgroundArgb: 0xFFFFFFFF,
           bubblePolygon: [
             NormalizedPoint(0.05, 0.05),

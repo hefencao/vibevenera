@@ -77,10 +77,9 @@ class _ComicTranslationPainter extends CustomPainter {
     final fitted = applyBoxFit(fit, sourceSize, size);
     final imageRect = alignment.inscribe(fitted.destination, Offset.zero & size);
     for (final block in _layoutBlocks()) {
-      final regionBounds = block.regions.map((region) => _displayBounds(
-        region.bounds,
-        imageRect,
-      )).toList();
+      final regionBounds = block.regions
+          .map((region) => _displayBounds(region.bounds, imageRect))
+          .toList();
       final regionFontSizes = regionBounds
           .map((bounds) => block.orientation == ComicTextOrientation.vertical
               ? bounds.width
@@ -90,33 +89,25 @@ class _ComicTranslationPainter extends CustomPainter {
         ..sort();
       final originalFontSize =
           sortedFontSizes[sortedFontSizes.length ~/ 2] * 0.82;
-      final bubblePolygons = block.regions
-          .map((region) => region.region.bubblePolygon)
-          .whereType<List<NormalizedPoint>>()
-          .map((polygon) => polygon
-              .map((point) => Offset(
-                    imageRect.left + point.x * imageRect.width,
-                    imageRect.top + point.y * imageRect.height,
-                  ))
-              .toList())
-          .toList();
-      final segmented = bubblePolygons.isNotEmpty;
-      final maskPath = Path();
-      for (final polygon in bubblePolygons) {
-        maskPath.addPolygon(polygon, true);
-      }
-      final maskBounds = (segmented
-              ? bubblePolygons
-                  .map(_bounds)
-                  .reduce((value, next) => value.expandToInclude(next))
-              : regionBounds
-                  .reduce((value, next) => value.expandToInclude(next))
-                  .inflate(math.max(2, originalFontSize * 0.45)))
-          .intersect(imageRect);
-      final padding = segmented
-          ? math.max(2.0, math.min(maskBounds.width, maskBounds.height) * 0.08)
-          : 0.0;
-      final bounds = maskBounds.deflate(padding);
+      final sourceBounds = regionBounds
+          .reduce((value, next) => value.expandToInclude(next));
+      final bubble = block.regions.first.region.bubblePolygon;
+      final bubblePoints = bubble == null
+          ? null
+          : _displayPolygon(bubble, imageRect);
+      final bubblePath = bubblePoints == null
+          ? null
+          : (Path()..addPolygon(bubblePoints, true));
+      final bounds = bubblePath == null
+          ? sourceBounds
+              .inflate(math.max(2, originalFontSize * 0.25))
+              .intersect(imageRect)
+          : _safeBubbleBounds(
+              bubblePath,
+              _bounds(bubblePoints!),
+              sourceBounds,
+              originalFontSize,
+            ).intersect(imageRect);
       if (bounds.width < 12 || bounds.height < 12) continue;
       final text = block.text;
       final blockBackground = _blockBackground(block);
@@ -124,27 +115,20 @@ class _ComicTranslationPainter extends CustomPainter {
         block,
         bounds,
         originalFontSize,
-        segmented,
+        bubblePath != null,
       );
-      final fallbackRadius = math.min(
-        originalFontSize * 0.8,
-        math.min(maskBounds.width, maskBounds.height) * 0.35,
-      );
-      final fallbackMask = RRect.fromRectAndRadius(
-        maskBounds,
-        Radius.circular(fallbackRadius),
-      );
-      if (segmented) {
-        canvas.drawPath(maskPath, Paint()..color = blockBackground);
-      } else {
-        canvas.drawRRect(fallbackMask, Paint()..color = blockBackground);
+      for (final region in block.regions) {
+        final paint = Paint()..color = _regionBackground(region.region);
+        for (final polygon in region.region.sourceMaskPolygons) {
+          if (polygon.length < 3) continue;
+          canvas.drawPath(
+            Path()..addPolygon(_displayPolygon(polygon, imageRect), true),
+            paint,
+          );
+        }
       }
       canvas.save();
-      if (segmented) {
-        canvas.clipPath(maskPath);
-      } else {
-        canvas.clipRRect(fallbackMask);
-      }
+      if (bubblePath != null) canvas.clipPath(bubblePath);
       if (block.orientation == ComicTextOrientation.vertical) {
         _paintVertical(canvas, text, bounds, maxFontSize, blockBackground);
       } else {
@@ -166,15 +150,60 @@ class _ComicTranslationPainter extends CustomPainter {
       (sum, region) => sum + region.region.sourceText.runes.length,
     );
     final targetLength = math.max(1, block.text.runes.length);
-    final densityScale = math.sqrt(sourceLength / targetLength).clamp(0.75, 1.6);
+    final densityScale = math.sqrt(sourceLength / targetLength).clamp(0.72, 1.25);
     final bubbleLimit = block.orientation == ComicTextOrientation.vertical
-        ? math.min(bounds.width, bounds.height) * 0.42
-        : bounds.height * 0.5;
+        ? math.min(bounds.width, bounds.height) * 0.52
+        : bounds.height * 0.55;
     return math.min(
       bubbleLimit,
-      originalFontSize * densityScale * 1.15,
+      originalFontSize * densityScale * 1.08,
     );
   }
+
+  Rect _safeBubbleBounds(
+    Path bubble,
+    Rect bubbleBounds,
+    Rect sourceBounds,
+    double sourceFontSize,
+  ) {
+    var center = sourceBounds.center;
+    if (!bubble.contains(center)) center = bubbleBounds.center;
+    final width = 2.0 * math.min(
+      center.dx - bubbleBounds.left,
+      bubbleBounds.right - center.dx,
+    );
+    final height = 2.0 * math.min(
+      center.dy - bubbleBounds.top,
+      bubbleBounds.bottom - center.dy,
+    );
+    var candidate = Rect.fromCenter(
+      center: center,
+      width: width,
+      height: height,
+    );
+    while (candidate.width >= 12 &&
+        candidate.height >= 12 &&
+        !_rectInside(bubble, candidate)) {
+      candidate = Rect.fromCenter(
+        center: center,
+        width: candidate.width * 0.94,
+        height: candidate.height * 0.94,
+      );
+    }
+    return candidate.deflate(math.max(2, sourceFontSize * 0.12));
+  }
+
+  bool _rectInside(Path path, Rect rect) => [
+    rect.topLeft,
+    rect.topCenter,
+    rect.topRight,
+    rect.centerLeft,
+    rect.center,
+    rect.centerRight,
+    rect.bottomLeft,
+    rect.bottomCenter,
+    rect.bottomRight,
+  ].every(path.contains);
 
   void _paintHorizontal(
     Canvas canvas,
@@ -226,11 +255,14 @@ class _ComicTranslationPainter extends CustomPainter {
     }
     final layout = _verticalLayout(glyphs.length, bounds, low, glyphMetrics);
     final startX = bounds.center.dx + layout.columns * layout.cellWidth / 2;
-    final usedRows = math.min(layout.rows, glyphs.length);
-    final startY = bounds.center.dy - usedRows * layout.cellHeight / 2;
     for (var i = 0; i < glyphs.length; i++) {
       final column = i ~/ layout.rows;
       final row = i % layout.rows;
+      final columnLength = math.min(
+        layout.rows,
+        glyphs.length - column * layout.rows,
+      );
+      final startY = bounds.center.dy - columnLength * layout.cellHeight / 2;
       final center = Offset(
         startX - (column + 0.5) * layout.cellWidth,
         startY + (row + 0.5) * layout.cellHeight,
@@ -248,19 +280,12 @@ class _ComicTranslationPainter extends CustomPainter {
     Color outline,
   ) {
     const sampleSize = 100.0;
-    final painter = _glyph(glyphs.join(), sampleSize, outline: outline);
-    var width = sampleSize;
-    var height = sampleSize;
-    var offset = 0;
+    var width = 0.0;
+    var height = 0.0;
     for (final glyph in glyphs) {
-      final end = offset + glyph.length;
-      for (final box in painter.getBoxesForSelection(
-        TextSelection(baseOffset: offset, extentOffset: end),
-      )) {
-        width = math.max(width, box.right - box.left);
-        height = math.max(height, box.bottom - box.top);
-      }
-      offset = end;
+      final painter = _glyph(glyph, sampleSize, outline: outline);
+      width = math.max(width, painter.width);
+      height = math.max(height, painter.height);
     }
     return _VerticalGlyphMetrics(width / sampleSize, height / sampleSize);
   }
@@ -280,7 +305,8 @@ class _ComicTranslationPainter extends CustomPainter {
       cellHeight: cellHeight,
       rows: rows,
       columns: columns,
-      fits: columns * cellWidth <= bounds.width,
+      fits: cellHeight <= bounds.height &&
+          columns * cellWidth <= bounds.width,
     );
   }
 
@@ -420,18 +446,11 @@ class _ComicTranslationPainter extends CustomPainter {
     _TranslationLayoutRegion b,
   ) {
     if (a.region.orientation != b.region.orientation) return false;
-    final aBubble = _normalizedBubbleBounds(a.region);
-    final bBubble = _normalizedBubbleBounds(b.region);
-    if (aBubble != null && bBubble != null) {
-      final overlap = aBubble.intersect(bBubble);
-      if (overlap.width * overlap.height /
-              math.min(
-                aBubble.width * aBubble.height,
-                bBubble.width * bBubble.height,
-              ) >=
-          0.72) {
-        return true;
-      }
+    final aBubble = a.region.bubblePolygon;
+    final bBubble = b.region.bubblePolygon;
+    if (aBubble != null || bBubble != null) {
+      return aBubble != null && bBubble != null &&
+          _samePolygon(aBubble, bBubble);
     }
     if (a.region.orientation == ComicTextOrientation.vertical) {
       final overlap = math.max(
@@ -465,12 +484,27 @@ class _ComicTranslationPainter extends CustomPainter {
     region.polygon.map((point) => Offset(point.x, point.y)),
   );
 
-  Rect? _normalizedBubbleBounds(ComicTranslatedRegion region) {
-    final polygon = region.bubblePolygon;
-    return polygon == null
-        ? null
-        : _bounds(polygon.map((point) => Offset(point.x, point.y)));
+  bool _samePolygon(
+    List<NormalizedPoint> a,
+    List<NormalizedPoint> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if ((a[i].x - b[i].x).abs() > 0.000001 ||
+          (a[i].y - b[i].y).abs() > 0.000001) {
+        return false;
+      }
+    }
+    return true;
   }
+
+  List<Offset> _displayPolygon(
+    List<NormalizedPoint> polygon,
+    Rect imageRect,
+  ) => polygon.map((point) => Offset(
+    imageRect.left + point.x * imageRect.width,
+    imageRect.top + point.y * imageRect.height,
+  )).toList();
 
   Rect _displayBounds(Rect bounds, Rect imageRect) => Rect.fromLTRB(
     imageRect.left + bounds.left * imageRect.width,
