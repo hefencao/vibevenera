@@ -86,6 +86,7 @@ final class ComicOcrRegion {
   final ComicTextKind kind;
   final int readingOrder;
   final int? backgroundArgb;
+  final List<NormalizedPoint>? bubblePolygon;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicOcrRegion({
@@ -97,6 +98,7 @@ final class ComicOcrRegion {
     required this.kind,
     required this.readingOrder,
     this.backgroundArgb,
+    this.bubblePolygon,
     this.frameSpan,
   });
 
@@ -113,6 +115,9 @@ final class ComicOcrRegion {
     kind: ComicTextKind.values.byName(json['kind'] as String),
     readingOrder: json['readingOrder'] as int,
     backgroundArgb: json['backgroundArgb'] as int?,
+    bubblePolygon: (json['bubblePolygon'] as List?)
+        ?.map((point) => NormalizedPoint.fromJson(point as List))
+        .toList(),
     frameSpan: json['frameSpan'] == null
         ? null
         : AnimatedFrameSpan.fromJson(
@@ -129,6 +134,8 @@ final class ComicOcrRegion {
     'kind': kind.name,
     'readingOrder': readingOrder,
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
+    if (bubblePolygon != null)
+      'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }
@@ -201,6 +208,7 @@ final class ComicTranslatedRegion {
   final ComicTextKind kind;
   final int readingOrder;
   final int? backgroundArgb;
+  final List<NormalizedPoint>? bubblePolygon;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicTranslatedRegion({
@@ -212,6 +220,7 @@ final class ComicTranslatedRegion {
     required this.kind,
     required this.readingOrder,
     this.backgroundArgb,
+    this.bubblePolygon,
     this.frameSpan,
   });
 
@@ -229,6 +238,9 @@ final class ComicTranslatedRegion {
         kind: ComicTextKind.values.byName(json['kind'] as String),
         readingOrder: json['readingOrder'] as int,
         backgroundArgb: json['backgroundArgb'] as int?,
+        bubblePolygon: (json['bubblePolygon'] as List?)
+            ?.map((point) => NormalizedPoint.fromJson(point as List))
+            .toList(),
         frameSpan: json['frameSpan'] == null
             ? null
             : AnimatedFrameSpan.fromJson(
@@ -245,6 +257,8 @@ final class ComicTranslatedRegion {
     'kind': kind.name,
     'readingOrder': readingOrder,
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
+    if (bubblePolygon != null)
+      'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }

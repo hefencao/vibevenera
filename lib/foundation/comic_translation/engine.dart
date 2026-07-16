@@ -53,20 +53,24 @@ final class ComicTranslationResult {
 }
 
 final class ComicOcrRunMetrics {
+  final int tileCount;
   final Duration detectionPreprocess;
   final Duration detectionInference;
   final Duration detectionPostprocess;
   final Duration recognitionPreprocess;
   final Duration recognitionInference;
   final Duration recognitionPostprocess;
+  final Duration bubbleSegmentation;
 
   const ComicOcrRunMetrics({
+    required this.tileCount,
     required this.detectionPreprocess,
     required this.detectionInference,
     required this.detectionPostprocess,
     required this.recognitionPreprocess,
     required this.recognitionInference,
     required this.recognitionPostprocess,
+    required this.bubbleSegmentation,
   });
 
   Duration get detection =>
@@ -89,7 +93,7 @@ abstract interface class ComicOcrEngine {
   /// must never share the Reader playback cursor or source epoch.
   bool get supportsAnimatedPosterFrame;
 
-  Future<void> load();
+  Future<void> load(String sourceLanguage);
 
   Future<ComicOcrArtifact> recognize(ComicOcrInput input);
 
@@ -136,10 +140,13 @@ final class ComicTranslationEngineRegistry {
     return _active!;
   });
 
-  Future<void> loadOcr(ComicTranslationEnginePair pair) => _serialized(() async {
+  Future<void> loadOcr(
+    ComicTranslationEnginePair pair,
+    String sourceLanguage,
+  ) => _serialized(() async {
     _checkLease(pair);
     if (_ocrLoaded) return;
-    await pair.ocr.load();
+    await pair.ocr.load(sourceLanguage);
     _ocrLoaded = true;
   });
 

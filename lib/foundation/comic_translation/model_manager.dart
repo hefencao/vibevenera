@@ -39,8 +39,8 @@ final class ComicTranslationModelBundle {
 
 const ppOcrV6SmallBundle = ComicTranslationModelBundle(
   id: 'ppocrv6-small',
-  version: '2026-06-pinned',
-  displayName: 'PP-OCRv6 small',
+  version: '2026-07-korean-pinned',
+  displayName: 'PP-OCRv6 small + Korean PP-OCRv5 mobile',
   files: [
     ComicTranslationModelFile(
       name: 'det.onnx',
@@ -59,6 +59,18 @@ const ppOcrV6SmallBundle = ComicTranslationModelBundle(
       url: 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/35200ec2acf6562260fa500e3262f5ea11f33642/inference.yml',
       bytes: 150579,
       sha256: 'ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1',
+    ),
+    ComicTranslationModelFile(
+      name: 'rec-ko.onnx',
+      url: 'https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.onnx',
+      bytes: 13418787,
+      sha256: '92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08',
+    ),
+    ComicTranslationModelFile(
+      name: 'rec-ko.yml',
+      url: 'https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.yml',
+      bytes: 96039,
+      sha256: 'f757fa1c40e99edcf27e9cce879b93eb2a51fa46f5ef39095689b8c37dd75998',
     ),
   ],
 );

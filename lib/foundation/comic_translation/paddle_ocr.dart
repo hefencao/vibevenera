@@ -23,18 +23,21 @@ final class AndroidPaddleComicOcrEngine
   String get id => 'paddleocr-android';
 
   @override
-  String get modelVersion => '${ComicTranslationModelManager.bundle.version}:mask-v1';
+  String get modelVersion => '${ComicTranslationModelManager.bundle.version}:bubble-v1';
 
   @override
   bool get supportsAnimatedPosterFrame => false;
 
   @override
-  Future<void> load() => _channel.invokeMethod('load', {
+  Future<void> load(String sourceLanguage) => _channel.invokeMethod('load', {
     'detModelPath': models.pathOf('det.onnx'),
     'recModelPath': models.pathOf('rec.onnx'),
     'recConfigPath': models.pathOf('rec.yml'),
+    'koreanRecModelPath': models.pathOf('rec-ko.onnx'),
+    'koreanRecConfigPath': models.pathOf('rec-ko.yml'),
     'maxAnalysisSide': _analysisSide,
     'threads': Platform.numberOfProcessors.clamp(2, 4),
+    'sourceLanguage': sourceLanguage,
   });
 
   @override
@@ -42,22 +45,35 @@ final class AndroidPaddleComicOcrEngine
     final value = Map<String, dynamic>.from(
       (await _channel.invokeMapMethod<String, dynamic>('recognize', {
         'filePath': input.filePath,
+        'sourceLanguage': input.sourceLanguage,
       }))!,
     );
     final width = value['width'] as int;
     final height = value['height'] as int;
     _lastRunMetrics = ComicOcrRunMetrics(
+      tileCount: value['tiles'] as int,
       detectionPreprocess: Duration(milliseconds: value['detPreprocessMs'] as int),
       detectionInference: Duration(milliseconds: value['detInferenceMs'] as int),
       detectionPostprocess: Duration(milliseconds: value['detPostprocessMs'] as int),
       recognitionPreprocess: Duration(milliseconds: value['recPreprocessMs'] as int),
       recognitionInference: Duration(milliseconds: value['recInferenceMs'] as int),
       recognitionPostprocess: Duration(milliseconds: value['recPostprocessMs'] as int),
+      bubbleSegmentation:
+          Duration(milliseconds: value['bubbleSegmentationMs'] as int),
     );
     final regions = (value['regions'] as List).map((raw) {
       final region = Map<String, dynamic>.from(raw as Map);
       final points = (region['points'] as List)
           .map((rawPoint) {
+            final point = rawPoint as List;
+            return NormalizedPoint(
+              (point[0] as num).toDouble() / width,
+              (point[1] as num).toDouble() / height,
+            );
+          })
+          .toList();
+      final bubblePolygon = (region['bubblePoints'] as List?)
+          ?.map((rawPoint) {
             final point = rawPoint as List;
             return NormalizedPoint(
               (point[0] as num).toDouble() / width,
@@ -82,6 +98,7 @@ final class AndroidPaddleComicOcrEngine
         kind: ComicTextKind.unknown,
         readingOrder: int.parse((region['id'] as String).substring(1)),
         backgroundArgb: region['backgroundArgb'] as int,
+        bubblePolygon: bubblePolygon,
       );
     }).toList();
     return ComicOcrArtifact(

@@ -51,6 +51,16 @@ void main() {
     final firstState = await _waitFor(first, identity);
     expect(firstState.artifact!.regions.single.translatedText, '你好');
     expect(firstState.artifact!.regions.single.backgroundArgb, 0xFFFFFFFF);
+    expect(firstState.artifact!.regions.single.bubblePolygon, isNotEmpty);
+    expect(ocr.calls, 1);
+    expect(translator.calls, 1);
+    first.setEnabled(false);
+    first.setEnabled(true);
+    first.reportPages(
+      current: [identity],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    await _waitFor(first, identity);
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
     first.dispose();
@@ -79,7 +89,7 @@ void main() {
       ..translationEngine = translator;
     final first = await registry.acquire();
     final second = await registry.acquire();
-    await registry.loadOcr(first);
+    await registry.loadOcr(first, 'ja');
     await registry.loadTranslator(second);
     expect(ocr.loads, 1);
     expect(translator.loads, 1);
@@ -237,7 +247,7 @@ final class _OcrEngine implements ComicOcrEngine {
   bool get supportsAnimatedPosterFrame => false;
 
   @override
-  Future<void> load() async => loads++;
+  Future<void> load(String sourceLanguage) async => loads++;
 
   @override
   Future<ComicOcrArtifact> recognize(ComicOcrInput input) async {
@@ -266,6 +276,12 @@ final class _OcrEngine implements ComicOcrEngine {
           kind: ComicTextKind.dialogue,
           readingOrder: 0,
           backgroundArgb: 0xFFFFFFFF,
+          bubblePolygon: [
+            NormalizedPoint(0.05, 0.05),
+            NormalizedPoint(0.95, 0.05),
+            NormalizedPoint(0.95, 0.55),
+            NormalizedPoint(0.05, 0.55),
+          ],
         ),
       ],
     );

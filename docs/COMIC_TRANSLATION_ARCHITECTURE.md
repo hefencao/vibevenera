@@ -47,6 +47,8 @@ Translation key = OCR digest + translation engine/model + target language
 
 因此 CDN authority 改变、版本迁移或页码偏移不会误使结果失效。OCR 与目标语言解耦；
 切换翻译语言只重做翻译。SQLite 只保存结构化区域和文字，不保存原图。
+Reader 内仅关闭再开启翻译时保留当前 session 的 ready artifact，不重新 OCR 或请求远程翻译；
+源/目标语言、模型或上下文确实改变时仍按上述 key 生成新 artifact。
 
 当前容量策略：
 
@@ -80,15 +82,18 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - overlay 有独立 `RepaintBoundary`；
 - 动图 Texture 更新不重绘文字；
 - artifact 通过每页 `ValueListenable` 发布，不调用 Reader `setState`；
-- 相邻且主轴重叠的 OCR 行/竖列会合并为同一排版区块；翻译文字在区块内重新换行，
-  同一区块只使用一个字体大小；字号上限来自原文字行高或竖列宽度，不再按译文长度放大。
-- 竖排区块保持从右到左分列，中文、日文和韩文字体按目标语言 locale 选择 fallback。
-- OCR 同时采样每个文字区的主背景色；原文字用紧致字形遮罩覆盖，译文以同色描边，
-  字形以外完全透明，不再绘制大面积圆角矩形色块。
-- 当前仍是字形近似遮罩，不是像素级分割或修补；复杂艺术字、渐变底色仍需后续 mask/
-  inpainting artifact。MVP 继续跳过拟声词。
+- 同一气泡或相邻且主轴重叠的 OCR 行/竖列会合并为同一排版区块；翻译文字在区块内重新换行，
+  同一区块只使用一个字体大小。字号同时受气泡可用范围、原文字号及源/目标文字量比例约束；
+  较短的中文译文可以适度放大，但不会无限填满整个气泡。
+- 竖排区块保持从右到左分列；排版按目标字体的实际 glyph 宽高测量，不以源文字数或
+  `fontSize` 近似目标字符尺寸，因此短中文译文与较长韩文原文可在同一范围内重新居中排版。
+- OCR 后以文字区主背景色生成颜色连通域，提取闭合连通分量的实际轮廓并简化为 bubble polygon；
+  同一轮廓内的多行复用分割结果。overlay 按该 polygon 不透明填充并裁剪译文，不再用矩形代替
+  已成功分割的气泡。
+- 无闭合轮廓、气泡与页面同色连通、渐变或纹理背景仍可能无法分割；这类区域明确退回 OCR 区块
+  遮罩。OCR 完全漏检的气泡仍需独立 balloon detector/inpainting。MVP 继续跳过拟声词。
 
-后续气泡 mask、轮廓排版与 LaMa 修补属于 layout/render artifact，不修改 OCR artifact。
+后续 learned balloon detector、轮廓内接排版与 LaMa 修补仍属于 layout/render artifact。
 
 ## 5. 动图扩展点
 
@@ -110,19 +115,23 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 
 - OCR/翻译模型加载耗时；
 - 输入解析、检测预处理/推理/后处理、识别预处理/推理/后处理和翻译耗时；
-- 区域数量、OCR 原文和翻译结果；
+- 区域数量、逐区 OCR 置信度、OCR 原文和翻译结果；
 - 模型加载、边界采样最大值、释放后 RSS，以及每页推理前后 RSS。
 
 真机结果显示高性能设备的 OCR P50 约 0.5 秒，旧设备约 2.4 秒。任务仍保持单路后台
-执行，不为追求吞吐增加并发；1600 长边保留为准确率基线。首轮 RSS 上升后趋于稳定不是
-逐页泄漏，但瞬时占用仍偏高，因此检测预处理改为从 8-bit Mat 直接生成 CHW tensor，移除
+执行，不为追求吞吐增加并发。普通页以 1600 长边为准确率基线；若整页缩放后的宽度会低于
+900 分析像素，则按保留文字宽度的 1600 高窗口分块，窗口重叠 256 分析像素并按检测框中心
+去重。因此 1080×3055 页面不再因未达到旧的 3:1 比例而错误地只运行一个 tile。首轮 RSS
+上升后趋于稳定不是逐页泄漏，但瞬时
+占用仍偏高，因此检测预处理改为从 8-bit Mat 直接生成 CHW tensor，移除
 float Mat、通道 Mat 和逐通道数组的重复副本；Bitmap 已是 ARGB8888 时也不再复制。
 
 候选顺序：
 
 1. PP-OCRv6 small det/rec：日文漫画的移动端主候选；
 2. PP-OCRv5 mobile det/rec：兼容性和日文准确率基线；
-3. PP-OCRv6 small 内置韩文基线；仅在真机漫画样本明显不足时再增加韩文独立 pack；
+3. 手动指定韩文时切换到 `korean_PP-OCRv5_mobile_rec`；切换时释放前一个 recognition session，
+   不让两套 ONNX recognition 权重同时常驻；
 4. 本地 Marian/Bergamot 与显式远程翻译后端。
 
 PP-OCRv6 tiny 先只作为体积/速度基线；其日文覆盖和漫画竖排准确率必须以实际模型包验证，
@@ -137,5 +146,5 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
 已提供 OpenAI-compatible 远程翻译 adapter。未完成：iOS/桌面 OCR runtime、本地文本翻译、
-气泡分割、竖排重排、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI 明确报告模型
+独立 balloon detector、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI 明确报告模型
 未安装，不进行网络回退。

@@ -68,7 +68,10 @@ final class ComicTranslationSession {
       _submissionTimer?.cancel();
       _queue.clear();
       for (final state in _states.values) {
-        state.value = ComicTranslationPageState.disabled;
+        state.value = ComicTranslationPageState(
+          ComicTranslationPhase.disabled,
+          artifact: state.value.artifact,
+        );
       }
       return;
     }
@@ -145,6 +148,14 @@ final class ComicTranslationSession {
     if (!engines.ready) {
       state.value = const ComicTranslationPageState(
         ComicTranslationPhase.unavailable,
+      );
+      return;
+    }
+    final readyArtifact = state.value.artifact;
+    if (readyArtifact != null) {
+      state.value = ComicTranslationPageState(
+        ComicTranslationPhase.ready,
+        artifact: readyArtifact,
       );
       return;
     }
@@ -229,7 +240,7 @@ final class ComicTranslationSession {
       sourceLanguage: sourceLanguage,
     );
     if (ocr == null) {
-      await engines.loadOcr(pair);
+      await engines.loadOcr(pair, sourceLanguage);
       _setState(
         identity,
         const ComicTranslationPageState(
@@ -291,6 +302,7 @@ final class ComicTranslationSession {
           kind: region.kind,
           readingOrder: region.readingOrder,
           backgroundArgb: region.backgroundArgb,
+          bubblePolygon: region.bubblePolygon,
           frameSpan: region.frameSpan,
         );
       }).toList();

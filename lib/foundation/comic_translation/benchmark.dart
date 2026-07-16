@@ -11,7 +11,9 @@ final class ComicTranslationBenchmarkSample {
   final Duration translationTime;
   final ComicOcrRunMetrics? ocrMetrics;
   final int regionCount;
+  final int bubbleCount;
   final List<String> sourceTexts;
+  final List<double> sourceConfidences;
   final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
@@ -23,7 +25,9 @@ final class ComicTranslationBenchmarkSample {
     required this.translationTime,
     required this.ocrMetrics,
     required this.regionCount,
+    required this.bubbleCount,
     required this.sourceTexts,
+    required this.sourceConfidences,
     required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
@@ -82,7 +86,7 @@ final class ComicTranslationBenchmark {
     final samples = <ComicTranslationBenchmarkSample>[];
     try {
       final timer = Stopwatch()..start();
-      await benchmarkEngines.loadOcr(pair);
+      await benchmarkEngines.loadOcr(pair, sourceLanguage);
       ocrLoad = timer.elapsed;
       timer.reset();
       await benchmarkEngines.loadTranslator(pair);
@@ -129,7 +133,11 @@ final class ComicTranslationBenchmark {
               ? (pair.ocr as ComicOcrEngineDiagnostics).lastRunMetrics
               : null,
           regionCount: artifact.regions.length,
+          bubbleCount:
+              artifact.regions.where((region) => region.bubblePolygon != null).length,
           sourceTexts: artifact.regions.map((region) => region.text).toList(),
+          sourceConfidences:
+              artifact.regions.map((region) => region.confidence).toList(),
           translatedTexts: artifact.regions
               .map((region) => translation.translations[region.id]!)
               .toList(),

@@ -517,22 +517,27 @@ class _ComicTranslationBenchmarkPageState
           'ocr=${sample.ocrTime.inMilliseconds}ms '
           '${result!.translationMeasured ? 'translation=${sample.translationTime.inMilliseconds}ms ' : ''}'
           'regions=${sample.regionCount} '
+          'bubbles=${sample.bubbleCount} '
           'rssΔ=${_rssDelta(sample.rssAfter, sample.rssBefore)}',
         ),
         if (metrics != null)
           Text(
-            'det=${metrics.detection.inMilliseconds}ms '
+            'tiles=${metrics.tileCount} · det=${metrics.detection.inMilliseconds}ms '
             '(${metrics.detectionPreprocess.inMilliseconds}/'
             '${metrics.detectionInference.inMilliseconds}/'
             '${metrics.detectionPostprocess.inMilliseconds}) · '
             'rec=${metrics.recognition.inMilliseconds}ms '
             '(${metrics.recognitionPreprocess.inMilliseconds}/'
             '${metrics.recognitionInference.inMilliseconds}/'
-            '${metrics.recognitionPostprocess.inMilliseconds})',
+            '${metrics.recognitionPostprocess.inMilliseconds}) · '
+            'bubble=${metrics.bubbleSegmentation.inMilliseconds}ms',
             style: ts.s12,
           ),
         if (sample.sourceTexts.isNotEmpty)
-          SelectableText('OCR: ${sample.sourceTexts.join(' | ')}', style: ts.s12),
+          SelectableText(
+            'OCR: ${List.generate(sample.sourceTexts.length, (i) => '[${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join(' | ')}',
+            style: ts.s12,
+          ),
         if (result!.translationMeasured && sample.translatedTexts.isNotEmpty)
           SelectableText(
             '${'Translation'.tl}: ${sample.translatedTexts.join(' | ')}',

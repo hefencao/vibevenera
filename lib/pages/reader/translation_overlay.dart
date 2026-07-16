@@ -90,125 +90,90 @@ class _ComicTranslationPainter extends CustomPainter {
         ..sort();
       final originalFontSize =
           sortedFontSizes[sortedFontSizes.length ~/ 2] * 0.82;
-      final bounds = regionBounds
-          .reduce((value, next) => value.expandToInclude(next))
-          .inflate(math.max(2, originalFontSize * 0.22))
+      final bubblePolygons = block.regions
+          .map((region) => region.region.bubblePolygon)
+          .whereType<List<NormalizedPoint>>()
+          .map((polygon) => polygon
+              .map((point) => Offset(
+                    imageRect.left + point.x * imageRect.width,
+                    imageRect.top + point.y * imageRect.height,
+                  ))
+              .toList())
+          .toList();
+      final segmented = bubblePolygons.isNotEmpty;
+      final maskPath = Path();
+      for (final polygon in bubblePolygons) {
+        maskPath.addPolygon(polygon, true);
+      }
+      final maskBounds = (segmented
+              ? bubblePolygons
+                  .map(_bounds)
+                  .reduce((value, next) => value.expandToInclude(next))
+              : regionBounds
+                  .reduce((value, next) => value.expandToInclude(next))
+                  .inflate(math.max(2, originalFontSize * 0.45)))
           .intersect(imageRect);
+      final padding = segmented
+          ? math.max(2.0, math.min(maskBounds.width, maskBounds.height) * 0.08)
+          : 0.0;
+      final bounds = maskBounds.deflate(padding);
       if (bounds.width < 12 || bounds.height < 12) continue;
       final text = block.text;
-      final blockBackground = _regionBackground(block.regions.first.region);
+      final blockBackground = _blockBackground(block);
+      final maxFontSize = _maxTranslationFont(
+        block,
+        bounds,
+        originalFontSize,
+        segmented,
+      );
+      final fallbackRadius = math.min(
+        originalFontSize * 0.8,
+        math.min(maskBounds.width, maskBounds.height) * 0.35,
+      );
+      final fallbackMask = RRect.fromRectAndRadius(
+        maskBounds,
+        Radius.circular(fallbackRadius),
+      );
+      if (segmented) {
+        canvas.drawPath(maskPath, Paint()..color = blockBackground);
+      } else {
+        canvas.drawRRect(fallbackMask, Paint()..color = blockBackground);
+      }
       canvas.save();
-      canvas.clipRect(bounds);
-      for (var i = 0; i < block.regions.length; i++) {
-        _paintSourceMask(
-          canvas,
-          block.regions[i].region.sourceText,
-          regionBounds.elementAt(i),
-          block.orientation,
-          regionFontSizes[i] * 0.82,
-          _regionBackground(block.regions[i].region),
-        );
+      if (segmented) {
+        canvas.clipPath(maskPath);
+      } else {
+        canvas.clipRRect(fallbackMask);
       }
       if (block.orientation == ComicTextOrientation.vertical) {
-        _paintVertical(canvas, text, bounds, originalFontSize, blockBackground);
+        _paintVertical(canvas, text, bounds, maxFontSize, blockBackground);
       } else {
-        _paintHorizontal(canvas, text, bounds, originalFontSize, blockBackground);
+        _paintHorizontal(canvas, text, bounds, maxFontSize, blockBackground);
       }
       canvas.restore();
     }
   }
 
-  void _paintSourceMask(
-    Canvas canvas,
-    String text,
+  double _maxTranslationFont(
+    _TranslationLayoutBlock block,
     Rect bounds,
-    ComicTextOrientation orientation,
-    double maxFontSize,
-    Color maskColor,
+    double originalFontSize,
+    bool segmented,
   ) {
-    if (text.trim().isEmpty) return;
-    if (orientation == ComicTextOrientation.vertical) {
-      final glyphs = text.runes.map(String.fromCharCode).toList();
-      var low = 2.0;
-      var high = math.max(low, maxFontSize);
-      for (var i = 0; i < 7; i++) {
-        final size = (low + high) / 2;
-        if (_verticalFits(glyphs.length, bounds, size)) {
-          low = size;
-        } else {
-          high = size;
-        }
-      }
-      final lineHeight = low * 1.08;
-      final rows = math.max(1, (bounds.height / lineHeight).floor());
-      for (var i = 0; i < glyphs.length; i++) {
-        final column = i ~/ rows;
-        final row = i % rows;
-        final fill = _glyph(
-          glyphs[i],
-          low,
-          mask: true,
-          outline: maskColor,
-          locale: _sourceLocale,
-        );
-        final center = Offset(
-          bounds.right - (column + 0.5) * low * 1.12,
-          bounds.top + (row + 0.5) * lineHeight,
-        );
-        final offset = center - Offset(fill.width / 2, fill.height / 2);
-        _glyph(
-          glyphs[i],
-          low,
-          stroke: true,
-          mask: true,
-          outline: maskColor,
-          locale: _sourceLocale,
-        ).paint(canvas, offset);
-        fill.paint(canvas, offset);
-      }
-      return;
-    }
-    var low = 2.0;
-    var high = math.max(low, maxFontSize);
-    for (var i = 0; i < 7; i++) {
-      final size = (low + high) / 2;
-      final painter = _paragraph(
-        text,
-        size,
-        bounds.width,
-        mask: true,
-        outline: maskColor,
-        locale: _sourceLocale,
-      );
-      if (painter.height <= bounds.height) {
-        low = size;
-      } else {
-        high = size;
-      }
-    }
-    final fill = _paragraph(
-      text,
-      low,
-      bounds.width,
-      mask: true,
-      outline: maskColor,
-      locale: _sourceLocale,
+    if (!segmented) return originalFontSize;
+    final sourceLength = block.regions.fold(
+      0,
+      (sum, region) => sum + region.region.sourceText.runes.length,
     );
-    final offset = Offset(
-      bounds.left + (bounds.width - fill.width) / 2,
-      bounds.top + (bounds.height - fill.height) / 2,
+    final targetLength = math.max(1, block.text.runes.length);
+    final densityScale = math.sqrt(sourceLength / targetLength).clamp(0.75, 1.6);
+    final bubbleLimit = block.orientation == ComicTextOrientation.vertical
+        ? math.min(bounds.width, bounds.height) * 0.42
+        : bounds.height * 0.5;
+    return math.min(
+      bubbleLimit,
+      originalFontSize * densityScale * 1.15,
     );
-    _paragraph(
-      text,
-      low,
-      bounds.width,
-      stroke: true,
-      mask: true,
-      outline: maskColor,
-      locale: _sourceLocale,
-    )
-        .paint(canvas, offset);
-    fill.paint(canvas, offset);
   }
 
   void _paintHorizontal(
@@ -248,27 +213,27 @@ class _ComicTranslationPainter extends CustomPainter {
   ) {
     final glyphs = text.runes.map(String.fromCharCode).toList();
     if (glyphs.isEmpty) return;
+    final glyphMetrics = _verticalGlyphMetrics(glyphs, outline);
     var low = 2.0;
     var high = math.max(low, maxFontSize);
     for (var i = 0; i < 7; i++) {
       final size = (low + high) / 2;
-      if (_verticalFits(glyphs.length, bounds, size)) {
+      if (_verticalLayout(glyphs.length, bounds, size, glyphMetrics).fits) {
         low = size;
       } else {
         high = size;
       }
     }
-    final lineHeight = low * 1.08;
-    final columnWidth = low * 1.12;
-    final rows = math.max(1, (bounds.height / lineHeight).floor());
-    final columns = (glyphs.length / rows).ceil();
-    final startX = bounds.center.dx + columns * columnWidth / 2;
+    final layout = _verticalLayout(glyphs.length, bounds, low, glyphMetrics);
+    final startX = bounds.center.dx + layout.columns * layout.cellWidth / 2;
+    final usedRows = math.min(layout.rows, glyphs.length);
+    final startY = bounds.center.dy - usedRows * layout.cellHeight / 2;
     for (var i = 0; i < glyphs.length; i++) {
-      final column = i ~/ rows;
-      final row = i % rows;
+      final column = i ~/ layout.rows;
+      final row = i % layout.rows;
       final center = Offset(
-        startX - (column + 0.5) * columnWidth,
-        bounds.top + (row + 0.5) * lineHeight,
+        startX - (column + 0.5) * layout.cellWidth,
+        startY + (row + 0.5) * layout.cellHeight,
       );
       final fill = _glyph(glyphs[i], low, outline: outline);
       final offset = center - Offset(fill.width / 2, fill.height / 2);
@@ -278,10 +243,45 @@ class _ComicTranslationPainter extends CustomPainter {
     }
   }
 
-  bool _verticalFits(int glyphs, Rect bounds, double fontSize) {
-    final rows = math.max(1, (bounds.height / (fontSize * 1.08)).floor());
-    final columns = (glyphs / rows).ceil();
-    return columns * fontSize * 1.12 <= bounds.width;
+  _VerticalGlyphMetrics _verticalGlyphMetrics(
+    List<String> glyphs,
+    Color outline,
+  ) {
+    const sampleSize = 100.0;
+    final painter = _glyph(glyphs.join(), sampleSize, outline: outline);
+    var width = sampleSize;
+    var height = sampleSize;
+    var offset = 0;
+    for (final glyph in glyphs) {
+      final end = offset + glyph.length;
+      for (final box in painter.getBoxesForSelection(
+        TextSelection(baseOffset: offset, extentOffset: end),
+      )) {
+        width = math.max(width, box.right - box.left);
+        height = math.max(height, box.bottom - box.top);
+      }
+      offset = end;
+    }
+    return _VerticalGlyphMetrics(width / sampleSize, height / sampleSize);
+  }
+
+  _VerticalTextLayout _verticalLayout(
+    int glyphCount,
+    Rect bounds,
+    double fontSize,
+    _VerticalGlyphMetrics glyphMetrics,
+  ) {
+    final cellWidth = fontSize * glyphMetrics.widthFactor * 1.08;
+    final cellHeight = fontSize * glyphMetrics.heightFactor * 1.04;
+    final rows = math.max(1, (bounds.height / cellHeight).floor());
+    final columns = (glyphCount / rows).ceil();
+    return _VerticalTextLayout(
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+      rows: rows,
+      columns: columns,
+      fits: columns * cellWidth <= bounds.width,
+    );
   }
 
   TextPainter _paragraph(
@@ -289,49 +289,44 @@ class _ComicTranslationPainter extends CustomPainter {
     double fontSize,
     double width, {
     bool stroke = false,
-    bool mask = false,
     required Color outline,
-    Locale? locale,
   }) => TextPainter(
       text: TextSpan(
         text: text,
-        style: _textStyle(fontSize, stroke, mask, outline),
+        style: _textStyle(fontSize, stroke, outline),
       ),
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
-      locale: locale ?? _targetLocale,
+      locale: _targetLocale,
     )..layout(maxWidth: width);
 
   TextPainter _glyph(
     String text,
     double fontSize, {
     bool stroke = false,
-    bool mask = false,
     required Color outline,
-    Locale? locale,
   }) =>
       TextPainter(
         text: TextSpan(
           text: text,
-          style: _textStyle(fontSize, stroke, mask, outline),
+          style: _textStyle(fontSize, stroke, outline),
         ),
         textDirection: TextDirection.ltr,
-        locale: locale ?? _targetLocale,
+        locale: _targetLocale,
       )..layout();
 
   TextStyle _textStyle(
     double fontSize,
     bool stroke,
-    bool mask,
     Color outline,
   ) => TextStyle(
-    color: stroke ? null : (mask ? outline : foreground),
+    color: stroke ? null : foreground,
     foreground: stroke
         ? (Paint()
             ..color = outline
             ..style = PaintingStyle.stroke
             ..strokeJoin = StrokeJoin.round
-            ..strokeWidth = math.max(1.2, fontSize * (mask ? 0.28 : 0.14)))
+            ..strokeWidth = math.max(1.2, fontSize * 0.14))
         : null,
     fontSize: fontSize,
     height: 1.05,
@@ -339,9 +334,25 @@ class _ComicTranslationPainter extends CustomPainter {
   );
 
   Color _regionBackground(ComicTranslatedRegion region) =>
-      region.backgroundArgb == null ? background : Color(region.backgroundArgb!);
+      region.backgroundArgb == null
+          ? background.withValues(alpha: 1)
+          : Color(region.backgroundArgb!);
 
-  Locale? get _sourceLocale => _languageLocale(artifact.sourceLanguage);
+  Color _blockBackground(_TranslationLayoutBlock block) {
+    final colors = block.regions
+        .map((region) => _regionBackground(region.region))
+        .toList();
+    int median(int Function(Color color) channel) {
+      final values = colors.map(channel).toList()..sort();
+      return values[values.length ~/ 2];
+    }
+    return Color.fromARGB(
+      255,
+      median((color) => (color.r * 255).round()),
+      median((color) => (color.g * 255).round()),
+      median((color) => (color.b * 255).round()),
+    );
+  }
 
   Locale? get _targetLocale => _languageLocale(artifact.targetLanguage);
 
@@ -409,6 +420,19 @@ class _ComicTranslationPainter extends CustomPainter {
     _TranslationLayoutRegion b,
   ) {
     if (a.region.orientation != b.region.orientation) return false;
+    final aBubble = _normalizedBubbleBounds(a.region);
+    final bBubble = _normalizedBubbleBounds(b.region);
+    if (aBubble != null && bBubble != null) {
+      final overlap = aBubble.intersect(bBubble);
+      if (overlap.width * overlap.height /
+              math.min(
+                aBubble.width * aBubble.height,
+                bBubble.width * bBubble.height,
+              ) >=
+          0.72) {
+        return true;
+      }
+    }
     if (a.region.orientation == ComicTextOrientation.vertical) {
       final overlap = math.max(
         0.0,
@@ -440,6 +464,13 @@ class _ComicTranslationPainter extends CustomPainter {
   Rect _normalizedBounds(ComicTranslatedRegion region) => _bounds(
     region.polygon.map((point) => Offset(point.x, point.y)),
   );
+
+  Rect? _normalizedBubbleBounds(ComicTranslatedRegion region) {
+    final polygon = region.bubblePolygon;
+    return polygon == null
+        ? null
+        : _bounds(polygon.map((point) => Offset(point.x, point.y)));
+  }
 
   Rect _displayBounds(Rect bounds, Rect imageRect) => Rect.fromLTRB(
     imageRect.left + bounds.left * imageRect.width,
@@ -491,4 +522,27 @@ class _TranslationLayoutBlock {
     required this.orientation,
     required this.text,
   });
+}
+
+class _VerticalTextLayout {
+  final double cellWidth;
+  final double cellHeight;
+  final int rows;
+  final int columns;
+  final bool fits;
+
+  const _VerticalTextLayout({
+    required this.cellWidth,
+    required this.cellHeight,
+    required this.rows,
+    required this.columns,
+    required this.fits,
+  });
+}
+
+class _VerticalGlyphMetrics {
+  final double widthFactor;
+  final double heightFactor;
+
+  const _VerticalGlyphMetrics(this.widthFactor, this.heightFactor);
 }

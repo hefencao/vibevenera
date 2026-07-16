@@ -1,14 +1,19 @@
 package com.github.wgh136.venera
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
 import android.graphics.Color
 import android.graphics.PointF
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.PaddleOCR
 import com.paddle.ocr.PaddleOCRConfig
+import com.paddle.ocr.model.OCRRunResult
+import com.paddle.ocr.postprocess.BubbleSegmenter
 import com.paddle.ocr.util.OpenCVUtils
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -37,6 +42,9 @@ class ComicTranslationOcrPlugin(
     private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private var ocr: PaddleOCR? = null
+    private lateinit var modelPaths: _ModelPaths
+    private lateinit var engineConfig: EngineConfig
+    private var activeRecognition = ""
     private var maxAnalysisSide = 1600
 
     init {
@@ -57,69 +65,172 @@ class ComicTranslationOcrPlugin(
         ocr?.release()
         val maxSide = call.argument<Number>("maxAnalysisSide")!!.toInt()
         maxAnalysisSide = maxSide
-        ocr = PaddleOCR.create(
-            appContext,
-            PaddleOCRConfig(
-                detLimitSideLen = maxSide,
-                detLimitType = "max",
-                detMaxSideLimit = maxSide,
-                detBoxThresh = 0.45f,
-                detUnclipRatio = 1.4f,
-                recScoreThresh = 0.35f,
-                recBatchSize = 4,
-            ),
-            EngineConfig(call.argument<Number>("threads")!!.toInt()),
-            call.argument<String>("detModelPath")!!,
-            call.argument<String>("recModelPath")!!,
-            call.argument<String>("recConfigPath")!!,
+        engineConfig = EngineConfig(call.argument<Number>("threads")!!.toInt())
+        modelPaths = _ModelPaths(
+            detection = call.argument<String>("detModelPath")!!,
+            defaultRecognition = call.argument<String>("recModelPath")!!,
+            defaultConfig = call.argument<String>("recConfigPath")!!,
+            koreanRecognition = call.argument<String>("koreanRecModelPath")!!,
+            koreanConfig = call.argument<String>("koreanRecConfigPath")!!,
         )
+        activeRecognition = recognitionFor(call.argument<String>("sourceLanguage")!!)
+        ocr = if (activeRecognition == "korean") {
+            createOcr(modelPaths.koreanRecognition, modelPaths.koreanConfig)
+        } else {
+            createOcr(modelPaths.defaultRecognition, modelPaths.defaultConfig)
+        }
+    }
+
+    private suspend fun createOcr(recognition: String, config: String) = PaddleOCR.create(
+        appContext,
+        PaddleOCRConfig(
+            detLimitSideLen = maxAnalysisSide,
+            detLimitType = "max",
+            detMaxSideLimit = maxAnalysisSide,
+            detBoxThresh = 0.45f,
+            detUnclipRatio = 1.4f,
+            recScoreThresh = 0.35f,
+            recBatchSize = 4,
+        ),
+        engineConfig,
+        modelPaths.detection,
+        recognition,
+        config,
+    )
+
+    private fun recognitionFor(sourceLanguage: String) =
+        if (sourceLanguage.substringBefore('-').substringBefore('_') == "ko") {
+            "korean"
+        } else {
+            "default"
+        }
+
+    private suspend fun selectRecognition(sourceLanguage: String) {
+        val target = recognitionFor(sourceLanguage)
+        if (activeRecognition == target) return
+        ocr!!.release()
+        ocr = null
+        activeRecognition = ""
+        ocr = if (target == "korean") {
+            createOcr(modelPaths.koreanRecognition, modelPaths.koreanConfig)
+        } else {
+            createOcr(modelPaths.defaultRecognition, modelPaths.defaultConfig)
+        }
+        activeRecognition = target
     }
 
     private suspend fun recognize(call: MethodCall): Map<String, Any> {
+        selectRecognition(call.argument<String>("sourceLanguage")!!)
         val file = File(call.argument<String>("filePath")!!)
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
             error("Unsupported image: ${file.path}")
         }
-        var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxAnalysisSide) {
-            sample *= 2
+        val scaledWidth = bounds.outWidth.toLong() * maxAnalysisSide / bounds.outHeight
+        val page = if (bounds.outHeight > maxAnalysisSide && scaledWidth < 900) {
+            recognizeTiled(file, bounds.outWidth, bounds.outHeight)
+        } else {
+            recognizeSingle(file, bounds.outWidth, bounds.outHeight)
         }
-        val bitmap = BitmapFactory.decodeFile(
-            file.path,
-            BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
-            },
-        ) ?: error("Unsupported image: ${file.path}")
+        return page.toMap()
+    }
+
+    private suspend fun recognizeSingle(file: File, width: Int, height: Int): _PageResult {
+        val sample = sampleFor(maxOf(width, height))
+        val bitmap = BitmapFactory.decodeFile(file.path, bitmapOptions(sample))
+            ?: error("Unsupported image: ${file.path}")
         return try {
-            val value = ocr!!.recognize(bitmap)
-            mapOf(
-                "width" to bitmap.width,
-                "height" to bitmap.height,
-                "detectionMs" to value.detectionTimeMs,
-                "recognitionMs" to value.recognitionTimeMs,
-                "totalMs" to value.totalTimeMs,
-                "detPreprocessMs" to value.detPreprocessMs,
-                "detInferenceMs" to value.detInferenceMs,
-                "detPostprocessMs" to value.detPostprocessMs,
-                "recPreprocessMs" to value.recPreprocessMs,
-                "recInferenceMs" to value.recInferenceMs,
-                "recPostprocessMs" to value.recPostprocessMs,
-                "regions" to value.results.mapIndexed { index, region ->
-                    mapOf(
-                        "id" to "r$index",
-                        "text" to region.text,
-                        "confidence" to region.confidence.toDouble(),
-                        "backgroundArgb" to estimateBackground(bitmap, region.box.points),
-                        "points" to region.box.points.map { listOf(it.x.toDouble(), it.y.toDouble()) },
-                    )
-                },
-            )
+            val metrics = _RunMetrics()
+            val regions = recognizeBitmap(bitmap, Rect(0, 0, width, height), metrics)
+            _PageResult(width, height, 1, metrics, regions)
         } finally {
             bitmap.recycle()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun recognizeTiled(file: File, width: Int, height: Int): _PageResult {
+        val sample = sampleFor(width)
+        val tileHeight = maxAnalysisSide * sample
+        val overlap = minOf(256 * sample, tileHeight / 2)
+        val decoder = BitmapRegionDecoder.newInstance(file.path, false)
+        val metrics = _RunMetrics()
+        val regions = mutableListOf<_RecognizedRegion>()
+        var tiles = 0
+        var top = 0
+        try {
+            while (top < height) {
+                val bottom = minOf(top + tileHeight, height)
+                val source = Rect(0, top, width, bottom)
+                val bitmap = decoder.decodeRegion(source, bitmapOptions(sample))
+                    ?: error("Cannot decode OCR tile: ${file.path} y=$top")
+                try {
+                    val ownedTop = if (top == 0) 0f else (top + overlap / 2).toFloat()
+                    val ownedBottom = if (bottom == height) height.toFloat()
+                    else (bottom - overlap / 2).toFloat()
+                    regions += recognizeBitmap(bitmap, source, metrics).filter {
+                        it.points.sumOf { point -> point.y.toDouble() }.toFloat() / it.points.size in
+                            ownedTop..<ownedBottom
+                    }
+                } finally {
+                    bitmap.recycle()
+                }
+                tiles++
+                if (bottom == height) break
+                top = bottom - overlap
+            }
+        } finally {
+            decoder.recycle()
+        }
+        regions.sortWith(compareBy({ it.points.minOf { point -> point.y } },
+            { it.points.minOf { point -> point.x } }))
+        return _PageResult(width, height, tiles, metrics, regions)
+    }
+
+    private suspend fun recognizeBitmap(
+        bitmap: Bitmap,
+        source: Rect,
+        metrics: _RunMetrics,
+    ): List<_RecognizedRegion> {
+        val value = ocr!!.recognize(bitmap)
+        metrics.add(value)
+        val backgrounds = value.results.map {
+            estimateBackground(bitmap, it.box.points)
+        }
+        val segmentationStart = System.currentTimeMillis()
+        val bubbles = BubbleSegmenter.segment(
+            bitmap,
+            value.results.map { it.box },
+            backgrounds,
+        )
+        metrics.bubbleSegmentationMs += System.currentTimeMillis() - segmentationStart
+        val scaleX = source.width().toFloat() / bitmap.width
+        val scaleY = source.height().toFloat() / bitmap.height
+        return value.results.mapIndexed { index, region ->
+            _RecognizedRegion(
+                text = region.text,
+                confidence = region.confidence,
+                backgroundArgb = backgrounds[index],
+                points = region.box.points.map { point ->
+                    PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
+                },
+                bubblePoints = bubbles[index]?.map { point ->
+                    PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
+                },
+            )
+        }
+    }
+
+    private fun sampleFor(length: Int): Int {
+        var sample = 1
+        while (length / (sample * 2) >= maxAnalysisSide) sample *= 2
+        return sample
+    }
+
+    private fun bitmapOptions(sample: Int) = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
     }
 
     private fun estimateBackground(bitmap: android.graphics.Bitmap, points: List<PointF>): Int {
@@ -154,9 +265,87 @@ class ComicTranslationOcrPlugin(
         )
     }
 
+    private data class _RecognizedRegion(
+        val text: String,
+        val confidence: Float,
+        val backgroundArgb: Int,
+        val points: List<PointF>,
+        val bubblePoints: List<PointF>?,
+    )
+
+    private data class _ModelPaths(
+        val detection: String,
+        val defaultRecognition: String,
+        val defaultConfig: String,
+        val koreanRecognition: String,
+        val koreanConfig: String,
+    )
+
+    private data class _PageResult(
+        val width: Int,
+        val height: Int,
+        val tiles: Int,
+        val metrics: _RunMetrics,
+        val regions: List<_RecognizedRegion>,
+    ) {
+        fun toMap(): Map<String, Any> = mapOf(
+            "width" to width,
+            "height" to height,
+            "tiles" to tiles,
+            "detectionMs" to metrics.detectionMs,
+            "recognitionMs" to metrics.recognitionMs,
+            "totalMs" to metrics.totalMs,
+            "detPreprocessMs" to metrics.detPreprocessMs,
+            "detInferenceMs" to metrics.detInferenceMs,
+            "detPostprocessMs" to metrics.detPostprocessMs,
+            "recPreprocessMs" to metrics.recPreprocessMs,
+            "recInferenceMs" to metrics.recInferenceMs,
+            "recPostprocessMs" to metrics.recPostprocessMs,
+            "bubbleSegmentationMs" to metrics.bubbleSegmentationMs,
+            "regions" to regions.mapIndexed { index, region ->
+                mapOf(
+                    "id" to "r$index",
+                    "text" to region.text,
+                    "confidence" to region.confidence.toDouble(),
+                    "backgroundArgb" to region.backgroundArgb,
+                    "points" to region.points.map { listOf(it.x.toDouble(), it.y.toDouble()) },
+                    "bubblePoints" to region.bubblePoints?.map {
+                        listOf(it.x.toDouble(), it.y.toDouble())
+                    },
+                )
+            },
+        )
+    }
+
+    private class _RunMetrics {
+        var detectionMs = 0L
+        var recognitionMs = 0L
+        var totalMs = 0L
+        var detPreprocessMs = 0L
+        var detInferenceMs = 0L
+        var detPostprocessMs = 0L
+        var recPreprocessMs = 0L
+        var recInferenceMs = 0L
+        var recPostprocessMs = 0L
+        var bubbleSegmentationMs = 0L
+
+        fun add(value: OCRRunResult) {
+            detectionMs += value.detectionTimeMs
+            recognitionMs += value.recognitionTimeMs
+            totalMs += value.totalTimeMs
+            detPreprocessMs += value.detPreprocessMs
+            detInferenceMs += value.detInferenceMs
+            detPostprocessMs += value.detPostprocessMs
+            recPreprocessMs += value.recPreprocessMs
+            recInferenceMs += value.recInferenceMs
+            recPostprocessMs += value.recPostprocessMs
+        }
+    }
+
     private suspend fun unload() {
         ocr?.release()
         ocr = null
+        activeRecognition = ""
     }
 
     private fun execute(result: MethodChannel.Result, action: suspend () -> Any?) {
