@@ -516,6 +516,9 @@ class _GalleryModeState extends State<_GalleryMode>
   }
 
   @override
+  bool turnViewport(bool forward) => false;
+
+  @override
   void toPage(int page) {
     _finishViewportTransition();
     controller.jumpToPage(page);

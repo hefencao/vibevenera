@@ -433,6 +433,24 @@ class _ContinuousModeState extends State<_ContinuousMode>
   }
 
   @override
+  bool turnViewport(bool forward) {
+    final position = scrollController.position;
+    final target = (position.pixels +
+            (forward ? 1 : -1) * position.viewportDimension * 0.8)
+        .clamp(position.minScrollExtent, position.maxScrollExtent);
+    if (target == position.pixels) return false;
+    _futurePosition = target;
+    unawaited(scrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.ease,
+    ).whenComplete(() {
+      if (_futurePosition == target) _futurePosition = null;
+    }));
+    return true;
+  }
+
+  @override
   void handleDoubleTap(Offset location) {
     if (appdata.settings['quickCollectImage'] == 'DoubleTap') {
       context.readerScaffold.addImageFavorite();

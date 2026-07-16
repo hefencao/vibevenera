@@ -71,6 +71,7 @@ final class ComicTranslationSession {
         state.value = ComicTranslationPageState(
           ComicTranslationPhase.disabled,
           artifact: state.value.artifact,
+          cleanOverlayPng: state.value.cleanOverlayPng,
         );
       }
       return;
@@ -156,6 +157,7 @@ final class ComicTranslationSession {
       state.value = ComicTranslationPageState(
         ComicTranslationPhase.ready,
         artifact: readyArtifact,
+        cleanOverlayPng: state.value.cleanOverlayPng,
       );
       return;
     }
@@ -283,26 +285,26 @@ final class ComicTranslationSession {
           ComicTranslationPhase.translating,
         ),
       );
-      final result = await translator.translate(ComicTranslationRequest(
+      final request = ComicTranslationRequest(
         ocr: ocr,
         targetLanguage: targetLanguage,
         previousPages: context,
-      ));
+      );
+      final result = await translator.translate(request);
+      final translatedRegions = request.expandUnitTranslations(result);
       final regions = ocr.regions.map((region) {
-        final text = result.translations[region.id];
-        if (text == null) {
-          throw StateError('Translation missing OCR region ${region.id}');
-        }
         return ComicTranslatedRegion(
           ocrRegionId: region.id,
           sourceText: region.text,
-          translatedText: text,
+          translatedText: translatedRegions[region.id]!,
           polygon: region.polygon,
           orientation: region.orientation,
           kind: region.kind,
           readingOrder: region.readingOrder,
           sourceMaskPolygons: region.sourceMaskPolygons,
           backgroundArgb: region.backgroundArgb,
+          foregroundArgb: region.foregroundArgb,
+          bubbleGroupId: region.bubbleGroupId,
           bubblePolygon: region.bubblePolygon,
           frameSpan: region.frameSpan,
         );
@@ -330,6 +332,7 @@ final class ComicTranslationSession {
       ComicTranslationPageState(
         ComicTranslationPhase.ready,
         artifact: translation,
+        cleanOverlayPng: ocr.cleanOverlayPng,
       ),
     );
   }
@@ -345,11 +348,13 @@ final class ComicTranslationSession {
       ..sort();
     return pages.map((page) {
       final artifact = chapter[page]!;
+      final regions = artifact.regions
+          .where((region) => region.kind != ComicTextKind.soundEffect)
+          .toList();
       return ComicTranslationContextEntry(
         pageIndex: page,
-        sourceTexts: artifact.regions.map((region) => region.sourceText).toList(),
-        translatedTexts:
-            artifact.regions.map((region) => region.translatedText).toList(),
+        sourceTexts: regions.map((region) => region.sourceText).toList(),
+        translatedTexts: regions.map((region) => region.translatedText).toList(),
       );
     }).toList();
   }

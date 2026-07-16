@@ -15,6 +15,7 @@ final class ComicTranslationBenchmarkSample {
   final int sourceMaskCount;
   final List<String> sourceTexts;
   final List<double> sourceConfidences;
+  final List<int?> bubbleGroupIds;
   final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
@@ -30,6 +31,7 @@ final class ComicTranslationBenchmarkSample {
     required this.sourceMaskCount,
     required this.sourceTexts,
     required this.sourceConfidences,
+    required this.bubbleGroupIds,
     required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
@@ -43,6 +45,8 @@ final class ComicTranslationBenchmarkResult {
   final List<ComicTranslationBenchmarkSample> samples;
   final int rssBeforeLoad;
   final int rssAfterLoad;
+  /// Highest whole-process RSS sampled at load/page boundaries, not the
+  /// instantaneous OCR inference peak.
   final int maxObservedRss;
   final int rssAfterRelease;
 
@@ -119,11 +123,13 @@ final class ComicTranslationBenchmark {
         ));
         final ocrTime = timer.elapsed;
         timer.reset();
-        final translation = await pair.translator.translate(ComicTranslationRequest(
+        final request = ComicTranslationRequest(
           ocr: artifact,
           targetLanguage: targetLanguage,
           previousPages: const [],
-        ));
+        );
+        final translation = await pair.translator.translate(request);
+        final translatedRegions = request.expandUnitTranslations(translation);
         final rssAfter = ProcessInfo.currentRss;
         if (rssAfter > maxObservedRss) maxObservedRss = rssAfter;
         samples.add(ComicTranslationBenchmarkSample(
@@ -135,8 +141,11 @@ final class ComicTranslationBenchmark {
               ? (pair.ocr as ComicOcrEngineDiagnostics).lastRunMetrics
               : null,
           regionCount: artifact.regions.length,
-          bubbleCount:
-              artifact.regions.where((region) => region.bubblePolygon != null).length,
+          bubbleCount: artifact.regions
+              .map((region) => region.bubbleGroupId)
+              .whereType<int>()
+              .toSet()
+              .length,
           sourceMaskCount: artifact.regions.fold(
             0,
             (count, region) => count + region.sourceMaskPolygons.length,
@@ -144,8 +153,10 @@ final class ComicTranslationBenchmark {
           sourceTexts: artifact.regions.map((region) => region.text).toList(),
           sourceConfidences:
               artifact.regions.map((region) => region.confidence).toList(),
+          bubbleGroupIds:
+              artifact.regions.map((region) => region.bubbleGroupId).toList(),
           translatedTexts: artifact.regions
-              .map((region) => translation.translations[region.id]!)
+              .map((region) => translatedRegions[region.id]!)
               .toList(),
           rssBefore: rssBefore,
           rssAfter: rssAfter,
@@ -184,7 +195,7 @@ final class _BenchmarkNoopTranslationEngine
   Future<ComicTranslationResult> translate(
     ComicTranslationRequest request,
   ) async => ComicTranslationResult({
-    for (final region in request.ocr.regions) region.id: region.text,
+    for (final unit in request.units) unit.id: unit.sourceLines,
   });
 
   @override

@@ -12,7 +12,8 @@
 
 ## OCR 候选顺序
 
-1. **PP-OCRv6 small**：支持日文、韩文等多语言的移动端主候选；
+1. **PP-OCRv6 small**：支持中文、英文、日文和 46 种拉丁字母语言的移动端主候选，
+   **不支持韩文**；
 2. **PP-OCRv5 mobile**：兼容性及日文准确率对照；
 3. **korean PP-OCRv5 mobile recognition**：手动指定韩文时使用；
 4. **PP-OCRv6 tiny**：先用于体积/速度对照；日文覆盖和漫画竖排准确率需实测。
@@ -32,19 +33,25 @@ Android 已接入 PaddleOCR 官方 Android SDK、ONNX Runtime 1.21.1 和 OpenCV 
 长度继续，逐文件校验后 rename，最后才写入安装 manifest。模型不随 APK 打包。
 
 OCR MethodChannel 只传文件路径和结构化结果。图片采样、OpenCV 预处理、ONNX 推理均在单独
-Android worker 执行，不占用 platform/UI 线程；普通输入长边按 1600 分析，长条页按保留
-文字宽度的窗口分块并重叠检测。动态 WebP/GIF 仍不会进入该 runtime。
+Android worker 执行，不占用 platform/UI 线程；默认分析长边为 1600，实际值由每次 OCR 输入
+传入。只有整页分析宽度低于有效下限的极长页才动态分块，窗口重叠不超过 128 分析像素。
+动态 WebP/GIF 仍不会进入该 runtime。
 
 benchmark 可明确选择日文、韩文、中文或英文源语言。它会显示模型加载、检测/识别各阶段、
-OCR/翻译 P50/P95、OCR 原文及每轮
-RSS 变化，并区分模型加载、边界采样最大值和释放后保留内存。约 42.6 MiB 只是磁盘权重大小，
+OCR/翻译 P50/P95、OCR 原文、检测总输入像素、每个 tile 的 tensor shape 及每轮 RSS 变化，
+浅色气泡补检 proposal 时间、候选/补回数和 inpainting clean-overlay PNG 大小，
+并区分模型加载、边界采样最大值和释放后保留内存。RSS 是整个 App 进程的边界采样，不是推理
+瞬时峰值。约 42.6 MiB 只是磁盘权重大小，
 运行峰值还包含 ONNX session、OpenCV Mat、检测 tensor 和文字 crop，必须在目标设备实测，
 不能由参数量直接推断。
 
-自动语言继续使用 PP-OCRv6 多语言 recognition；手动指定“韩文”会切换到独立的
-`korean_PP-OCRv5_mobile_rec`。两者共享同一检测模型文件，但当前 SDK 以完整 OCR session 为切换单位，
+自动语言当前使用 PP-OCRv6 recognition，因此不能识别韩文；韩文必须明确选择“韩文”，切换到独立的
+`korean_PP-OCRv5_mobile_rec`。检测模型与文字识别模型相互独立：两条路径共享同一检测模型文件，
+但当前 SDK 以完整 OCR session 为切换单位，
 因此切换语言时先释放旧 session，避免两套 recognition 权重同时常驻。benchmark 会显示 tile、
-逐区置信度、成功气泡数、源文字 mask 数和分割耗时。
+实际使用的 recognizer、检测框/非空原始解码/阈值接受数量、逐区置信度、OCR 原文和翻译、
+成功气泡数、源文字 mask 数和分割耗时。识别置信度是闭集类别内的概率；不支持的文字仍可能被
+高置信度误识别成其他字符，不能据此推断模型支持该语言。
 
 ## 远程翻译
 
@@ -53,10 +60,11 @@ RSS 变化，并区分模型加载、边界采样最大值和释放后保留内�
 不上传原图。返回必须是：
 
 ```json
-{"translations":{"regionId":"translated text"}}
+{"translations":{"unitId":"translated text"}}
 ```
 
-OCR 置信度只描述识别可靠性，不作为跳过翻译的条件。请求只发送按 region id 对应的 OCR 文字；
+同一气泡内的多行 OCR 作为一个 unit 的有序 `sourceLines` 发送，远程模型必须只返回一份完整译文。
+OCR 置信度只描述识别可靠性，不作为跳过翻译的条件。请求只发送 OCR 文字；
 韩文识别问题由手动选择韩文 recognition 模型解决，不通过增加远程翻译重试掩盖。
 
 API key 保存于应用数据目录的 `comic_translation_secrets.json`，不会进入数据同步。Android

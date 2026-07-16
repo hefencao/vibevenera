@@ -33,6 +33,49 @@ void main() {
     expect(profile?.confidence, greaterThan(0.95));
   });
 
+  test('raw Korean metadata enables translation with Korean OCR', () {
+    final profile = classifier(tags: const ['韓漫', '生肉']).classifyMetadata();
+    expect(profile?.sourceLanguage, 'ko');
+    expect(profile?.autoTranslate, isTrue);
+  });
+
+  test('raw Japanese metadata enables translation with Japanese OCR', () {
+    final profile = classifier(
+      tags: const ['language:japanese', 'language:raw'],
+    ).classifyMetadata();
+    expect(profile?.sourceLanguage, 'ja');
+    expect(profile?.autoTranslate, isTrue);
+  });
+
+  test('adaptive language and translation become effective reader settings', () {
+    const id = 'adaptive-language-test';
+    const source = 'test';
+    appdata.settings['adaptiveComicType'] = true;
+    appdata.settings.setAdaptiveComicProfile(id, source, {
+      'type': 'vertical',
+      'confidence': 0.97,
+      'sourceLanguage': 'ko',
+      'autoTranslate': true,
+      'modelVersion': AdaptiveComicProfile.modelVersion,
+    });
+    expect(
+      appdata.settings.getReaderSetting(
+        id,
+        source,
+        'comicTranslationSourceLanguage',
+      ),
+      'ko',
+    );
+    expect(
+      appdata.settings.getReaderSetting(
+        id,
+        source,
+        'enableComicTranslation',
+      ),
+      isTrue,
+    );
+  });
+
   test('comic source can provide a high-confidence layout', () {
     final profile = classifier(
       tags: const ['category:manga'],

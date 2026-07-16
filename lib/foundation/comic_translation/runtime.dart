@@ -57,6 +57,8 @@ final class ComicTranslationRuntime {
           endpoint: appdata.settings['comicTranslationRemoteEndpoint'] as String,
           model: appdata.settings['comicTranslationRemoteModel'] as String,
           apiKey: ComicTranslationSecrets.instance.apiKey,
+          additionalPrompt:
+              appdata.settings['comicTranslationAdditionalPrompt'] as String,
         ),
       _ => null,
     };

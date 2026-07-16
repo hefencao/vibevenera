@@ -81,6 +81,16 @@ void _attachReaderPipeline(BuildContext context) {
   if (images == null) return;
   final (targetWidth, targetHeight) =
       StreamingImageProvider.calculateTargetSize(context);
+  final configuredPreload = appdata.settings.getReaderSetting(
+    reader.cid,
+    reader.type.sourceKey,
+    'preloadImageCount',
+  ) as int;
+  final preloadCount = reader.translationSession.enabled
+      ? reader.translationSession.policy.effectiveImagePreloadPages(
+          configuredPreload,
+        )
+      : configuredPreload;
   PipelineController.instance.attachReaderSession(ReaderPipelineSession(
     owner: reader,
     images: images,
@@ -90,11 +100,7 @@ void _attachReaderPipeline(BuildContext context) {
     cache: reader._imageViewController?.streamingCache,
     targetWidth: targetWidth,
     targetHeight: targetHeight,
-    preloadCount: appdata.settings.getReaderSetting(
-      reader.cid,
-      reader.type.sourceKey,
-      'preloadImageCount',
-    ),
+    preloadCount: preloadCount,
   ));
 }
 

@@ -20,6 +20,9 @@ data class OCRRunResult(
     val recognitionTimeMs: Long,
     val totalTimeMs: Long,
     val lineCount: Int,
+    val detectedLineCount: Int,
+    val decodedLineCount: Int,
+    val acceptedLineCount: Int,
     // Detailed per-stage timing
     val detPreprocessMs: Long = 0,
     val detInferenceMs: Long = 0,

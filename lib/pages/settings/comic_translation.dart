@@ -13,6 +13,7 @@ class _ComicTranslationBackendPageState
   late String backend;
   late final TextEditingController endpoint;
   late final TextEditingController model;
+  late final TextEditingController additionalPrompt;
   final apiKey = TextEditingController();
   bool working = false;
 
@@ -25,6 +26,9 @@ class _ComicTranslationBackendPageState
     model = TextEditingController(
       text: appdata.settings['comicTranslationRemoteModel'] as String,
     );
+    additionalPrompt = TextEditingController(
+      text: appdata.settings['comicTranslationAdditionalPrompt'] as String,
+    );
     super.initState();
   }
 
@@ -32,6 +36,7 @@ class _ComicTranslationBackendPageState
   void dispose() {
     endpoint.dispose();
     model.dispose();
+    additionalPrompt.dispose();
     apiKey.dispose();
     super.dispose();
   }
@@ -162,6 +167,17 @@ class _ComicTranslationBackendPageState
                   ),
                 ).paddingHorizontal(16).paddingVertical(6),
                 TextField(
+                  controller: additionalPrompt,
+                  minLines: 2,
+                  maxLines: 5,
+                  decoration: InputDecoration(
+                    labelText: 'Additional translation instructions'.tl,
+                    helperText:
+                        'Appended to the built-in format rules; use it for names, terminology and style.'.tl,
+                    border: const OutlineInputBorder(),
+                  ),
+                ).paddingHorizontal(16).paddingVertical(6),
+                TextField(
                   controller: apiKey,
                   obscureText: true,
                   enableSuggestions: false,
@@ -270,6 +286,8 @@ class _ComicTranslationBackendPageState
     appdata.settings['comicTranslationBackend'] = backend;
     appdata.settings['comicTranslationRemoteEndpoint'] = endpoint.text.trim();
     appdata.settings['comicTranslationRemoteModel'] = model.text.trim();
+    appdata.settings['comicTranslationAdditionalPrompt'] =
+        additionalPrompt.text.trim();
     if (apiKey.text.isNotEmpty) {
       await ComicTranslationSecrets.instance.setApiKey(apiKey.text);
       apiKey.clear();
@@ -346,6 +364,7 @@ class _ComicTranslationBenchmarkPageState
   Object? error;
   bool running = false;
   int runs = 3;
+  int analysisSide = 1600;
   String sourceLanguage = 'ja';
   String targetLanguage = 'zh-CN';
 
@@ -378,7 +397,28 @@ class _ComicTranslationBenchmarkPageState
             ),
           ),
           ListTile(
+            title: const Text('OCR analysis side'),
+            trailing: DropdownButton<int>(
+              value: analysisSide,
+              items: const [
+                DropdownMenuItem(value: 960, child: Text('960')),
+                DropdownMenuItem(value: 1280, child: Text('1280')),
+                DropdownMenuItem(value: 1600, child: Text('1600')),
+              ],
+              onChanged: running
+                  ? null
+                  : (value) => setState(() {
+                      analysisSide = value!;
+                      result = null;
+                      error = null;
+                    }),
+            ),
+          ),
+          ListTile(
             title: Text('Source language'.tl),
+            subtitle: sourceLanguage == 'auto'
+                ? Text('Automatic source language does not support Korean; select Korean to use the dedicated recognizer'.tl)
+                : null,
             trailing: DropdownButton<String>(
               value: sourceLanguage,
               items: [
@@ -390,7 +430,11 @@ class _ComicTranslationBenchmarkPageState
               ],
               onChanged: running
                   ? null
-                  : (value) => setState(() => sourceLanguage = value!),
+                  : (value) => setState(() {
+                      sourceLanguage = value!;
+                      result = null;
+                      error = null;
+                    }),
             ),
           ),
           ListTile(
@@ -406,7 +450,11 @@ class _ComicTranslationBenchmarkPageState
               ],
               onChanged: running
                   ? null
-                  : (value) => setState(() => targetLanguage = value!),
+                  : (value) => setState(() {
+                      targetLanguage = value!;
+                      result = null;
+                      error = null;
+                    }),
             ),
           ),
           FilledButton.icon(
@@ -441,7 +489,7 @@ class _ComicTranslationBenchmarkPageState
                 '${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.95)}ms',
               ),
             Text(
-              'RSS load/observed max/retained: '
+              'RSS boundary load/max/retained (whole process): '
               '${_rssDelta(result!.rssAfterLoad, result!.rssBeforeLoad)} / '
               '${_rssDelta(result!.maxObservedRss, result!.rssBeforeLoad)} / '
               '${_rssDelta(result!.rssAfterRelease, result!.rssBeforeLoad)}',
@@ -491,6 +539,7 @@ class _ComicTranslationBenchmarkPageState
         pages: pages,
         sourceLanguage: sourceLanguage,
         targetLanguage: targetLanguage,
+        maxAnalysisSide: analysisSide,
       );
       if (mounted) setState(() => result = value);
     } catch (value) {
@@ -524,7 +573,15 @@ class _ComicTranslationBenchmarkPageState
         ),
         if (metrics != null)
           Text(
-            'tiles=${metrics.tileCount} · det=${metrics.detection.inMilliseconds}ms '
+            'recognizer=${metrics.recognizer} · tiles=${metrics.tileCount} · '
+            'detInput=${(metrics.detectionInputPixels / 1000000).toStringAsFixed(2)}MP '
+            '[${metrics.detectionInputShapes.map((shape) => '${shape[2]}×${shape[3]}').join(' + ')}] · '
+            'lines(det/decoded/accepted)=${metrics.detectedCount}/'
+            '${metrics.rawDecodedCount}/${metrics.acceptedCount} · '
+            'rescue=${metrics.balloonCandidates}/'
+            '${metrics.rescuedRegions} '
+            '(${metrics.balloonProposal.inMilliseconds}ms) · '
+            'det=${metrics.detection.inMilliseconds}ms '
             '(${metrics.detectionPreprocess.inMilliseconds}/'
             '${metrics.detectionInference.inMilliseconds}/'
             '${metrics.detectionPostprocess.inMilliseconds}) · '
@@ -532,19 +589,19 @@ class _ComicTranslationBenchmarkPageState
             '(${metrics.recognitionPreprocess.inMilliseconds}/'
             '${metrics.recognitionInference.inMilliseconds}/'
             '${metrics.recognitionPostprocess.inMilliseconds}) · '
-            'segment=${metrics.bubbleSegmentation.inMilliseconds}ms',
+            'segment=${metrics.bubbleSegmentation.inMilliseconds}ms · '
+            'patch=${(metrics.cleanOverlayBytes / 1024).toStringAsFixed(1)}KiB/'
+            '${metrics.cleanOverlayEncode.inMilliseconds}ms',
             style: ts.s12,
           ),
-        if (sample.sourceTexts.isNotEmpty)
-          SelectableText(
-            'OCR: ${List.generate(sample.sourceTexts.length, (i) => '[${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join(' | ')}',
-            style: ts.s12,
-          ),
-        if (result!.translationMeasured && sample.translatedTexts.isNotEmpty)
-          SelectableText(
-            '${'Translation'.tl}: ${sample.translatedTexts.join(' | ')}',
-            style: ts.s12,
-          ),
+        SelectableText(
+          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
+          style: ts.s12,
+        ),
+        SelectableText(
+          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? 'Translation backend is not configured'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i]}').join('\n')}',
+          style: ts.s12,
+        ),
       ],
     ).paddingVertical(6);
   }

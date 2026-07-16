@@ -35,25 +35,25 @@ class DetectionEngine(
         val inputShape: List<Int>,
     )
 
-    fun detect(bitmap: Bitmap): DetectionResult {
+    fun detect(bitmap: Bitmap, maxAnalysisSide: Int? = null): DetectionResult {
         return detect {
             DetPreprocessor.preprocess(
                 bitmap,
-                config.detLimitSideLen,
+                maxAnalysisSide ?: config.detLimitSideLen,
                 config.detLimitType,
-                config.detMaxSideLimit,
+                maxAnalysisSide ?: config.detMaxSideLimit,
                 config.detImgMode,
             )
         }
     }
 
-    fun detect(src: Mat): DetectionResult {
+    fun detect(src: Mat, maxAnalysisSide: Int? = null): DetectionResult {
         return detect {
             DetPreprocessor.preprocess(
                 src,
-                config.detLimitSideLen,
+                maxAnalysisSide ?: config.detLimitSideLen,
                 config.detLimitType,
-                config.detMaxSideLimit,
+                maxAnalysisSide ?: config.detMaxSideLimit,
                 config.detImgMode,
             )
         }

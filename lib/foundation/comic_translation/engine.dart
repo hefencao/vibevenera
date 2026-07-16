@@ -32,28 +32,131 @@ final class ComicTranslationContextEntry {
   });
 }
 
+final class ComicTranslationUnit {
+  final String id;
+  final List<String> regionIds;
+  final List<String> sourceLines;
+
+  const ComicTranslationUnit({
+    required this.id,
+    required this.regionIds,
+    required this.sourceLines,
+  });
+
+  static List<ComicTranslationUnit> fromOcr(ComicOcrArtifact ocr) {
+    final regions = [...ocr.regions]
+      ..sort((a, b) {
+        final order = a.readingOrder.compareTo(b.readingOrder);
+        return order == 0 ? a.id.compareTo(b.id) : order;
+      });
+    final groups = <String, List<ComicOcrRegion>>{};
+    for (final region in regions) {
+      if (region.kind == ComicTextKind.soundEffect) continue;
+      final id = region.bubbleGroupId == null
+          ? region.id
+          : 'bubble:${region.bubbleGroupId}';
+      groups.putIfAbsent(id, () => []).add(region);
+    }
+    return groups.entries.map((entry) {
+      final regions = entry.value;
+      final vertical = regions
+          .where((region) =>
+              region.orientation == ComicTextOrientation.vertical)
+          .length;
+      if (vertical * 2 > regions.length) {
+        regions.sort((a, b) {
+          final column = _centerX(b).compareTo(_centerX(a));
+          return column != 0 ? column : _top(a).compareTo(_top(b));
+        });
+      } else if (vertical * 2 < regions.length) {
+        regions.sort((a, b) {
+          final row = _top(a).compareTo(_top(b));
+          return row != 0 ? row : _left(a).compareTo(_left(b));
+        });
+      }
+      return ComicTranslationUnit(
+        id: entry.key,
+        regionIds: regions.map((region) => region.id).toList(),
+        sourceLines: regions.map((region) => region.text).toList(),
+      );
+    }).toList();
+  }
+
+  static double _left(ComicOcrRegion region) => region.polygon
+      .map((point) => point.x)
+      .reduce((value, next) => value < next ? value : next);
+
+  static double _top(ComicOcrRegion region) => region.polygon
+      .map((point) => point.y)
+      .reduce((value, next) => value < next ? value : next);
+
+  static double _centerX(ComicOcrRegion region) {
+    final xs = region.polygon.map((point) => point.x);
+    final left = xs.reduce((value, next) => value < next ? value : next);
+    final right = xs.reduce((value, next) => value > next ? value : next);
+    return (left + right) / 2;
+  }
+}
+
 final class ComicTranslationRequest {
   final ComicOcrArtifact ocr;
+  final List<ComicTranslationUnit> units;
   final String targetLanguage;
   final List<ComicTranslationContextEntry> previousPages;
   final Map<String, String> glossary;
 
-  const ComicTranslationRequest({
+  ComicTranslationRequest({
     required this.ocr,
     required this.targetLanguage,
     required this.previousPages,
     this.glossary = const {},
-  });
+  }) : units = ComicTranslationUnit.fromOcr(ocr);
+
+  Map<String, String> expandUnitTranslations(
+    ComicTranslationResult result,
+  ) {
+    final expected = units.map((unit) => unit.id).toSet();
+    if (result.translations.keys.toSet().difference(expected).isNotEmpty ||
+        expected.difference(result.translations.keys.toSet()).isNotEmpty) {
+      throw StateError('Translation unit IDs do not match the request');
+    }
+    final expanded = {for (final region in ocr.regions) region.id: ''};
+    for (final unit in units) {
+      final lines = result.translations[unit.id]!;
+      if (lines.length != unit.regionIds.length) {
+        throw StateError(
+          'Translation unit ${unit.id} has ${lines.length} lines; '
+          'expected ${unit.regionIds.length}',
+        );
+      }
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].trim().isEmpty) {
+          throw StateError('Translation unit ${unit.id} line $i is empty');
+        }
+        expanded[unit.regionIds[i]] = lines[i];
+      }
+    }
+    return expanded;
+  }
 }
 
 final class ComicTranslationResult {
-  final Map<String, String> translations;
+  final Map<String, List<String>> translations;
 
   const ComicTranslationResult(this.translations);
 }
 
 final class ComicOcrRunMetrics {
+  final String recognizer;
   final int tileCount;
+  final int detectionInputPixels;
+  final List<List<int>> detectionInputShapes;
+  final int detectedCount;
+  final int rawDecodedCount;
+  final int acceptedCount;
+  final int balloonCandidates;
+  final int rescuedRegions;
+  final int cleanOverlayBytes;
   final Duration detectionPreprocess;
   final Duration detectionInference;
   final Duration detectionPostprocess;
@@ -61,9 +164,20 @@ final class ComicOcrRunMetrics {
   final Duration recognitionInference;
   final Duration recognitionPostprocess;
   final Duration bubbleSegmentation;
+  final Duration balloonProposal;
+  final Duration cleanOverlayEncode;
 
   const ComicOcrRunMetrics({
+    required this.recognizer,
     required this.tileCount,
+    required this.detectionInputPixels,
+    required this.detectionInputShapes,
+    required this.detectedCount,
+    required this.rawDecodedCount,
+    required this.acceptedCount,
+    required this.balloonCandidates,
+    required this.rescuedRegions,
+    required this.cleanOverlayBytes,
     required this.detectionPreprocess,
     required this.detectionInference,
     required this.detectionPostprocess,
@@ -71,6 +185,8 @@ final class ComicOcrRunMetrics {
     required this.recognitionInference,
     required this.recognitionPostprocess,
     required this.bubbleSegmentation,
+    required this.balloonProposal,
+    required this.cleanOverlayEncode,
   });
 
   Duration get detection =>

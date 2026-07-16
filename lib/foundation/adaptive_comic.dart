@@ -3,7 +3,7 @@ import 'dart:math' as math;
 enum AdaptiveComicType { paged, vertical, animated, mixed }
 
 final class AdaptiveComicProfile {
-  static const modelVersion = 3;
+  static const modelVersion = 4;
   static const applyConfidence = 0.60;
   static const stopConfidence = 0.80;
 
@@ -13,6 +13,8 @@ final class AdaptiveComicProfile {
   final int inferenceMicros;
   final String basis;
   final int metadataFingerprint;
+  final String? sourceLanguage;
+  final bool autoTranslate;
 
   bool get isTerminal => confidence >= stopConfidence;
 
@@ -23,6 +25,8 @@ final class AdaptiveComicProfile {
     required this.inferenceMicros,
     required this.basis,
     required this.metadataFingerprint,
+    this.sourceLanguage,
+    this.autoTranslate = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -32,6 +36,8 @@ final class AdaptiveComicProfile {
     'inferenceMicros': inferenceMicros,
     'basis': basis,
     'metadataFingerprint': metadataFingerprint,
+    if (sourceLanguage != null) 'sourceLanguage': sourceLanguage,
+    'autoTranslate': autoTranslate,
     'modelVersion': modelVersion,
     'updatedAt': DateTime.now().millisecondsSinceEpoch,
   };
@@ -44,6 +50,8 @@ final class AdaptiveComicClassifier {
   final List<String> tags;
   final String sourceIdentity;
   final String? sourceType;
+  late final String? sourceLanguage;
+  late final bool autoTranslate;
   late final int metadataFingerprint;
   final Map<String, ({int width, int height})> _samples = {};
   final Set<String> _animatedSamples = {};
@@ -61,6 +69,8 @@ final class AdaptiveComicClassifier {
        tags = tags.map((tag) => tag.toLowerCase()).toList(),
        sourceIdentity = '$sourceKey $sourceName $sourceUrl'.toLowerCase() {
     this.tags.sort();
+    sourceLanguage = _metadataLanguage();
+    autoTranslate = sourceLanguage != null && _hasRawTag();
     metadataFingerprint = _fingerprint(
       '${this.title}\u0000${this.tags.join('\u0000')}\u0000'
       '$sourceIdentity\u0000${sourceType?.toLowerCase() ?? ''}',
@@ -200,6 +210,14 @@ final class AdaptiveComicClassifier {
         stopwatch,
       );
     }
+    if (sourceLanguage == 'ko') {
+      return _profile(AdaptiveComicType.vertical, 0.86,
+          'language:korean', stopwatch);
+    }
+    if (sourceLanguage == 'ja') {
+      return _profile(AdaptiveComicType.paged, 0.86,
+          'language:japanese', stopwatch);
+    }
     return null;
   }
 
@@ -230,6 +248,8 @@ final class AdaptiveComicClassifier {
       inferenceMicros: stopwatch.elapsedMicroseconds,
       basis: 'page-geometry',
       metadataFingerprint: metadataFingerprint,
+      sourceLanguage: sourceLanguage,
+      autoTranslate: autoTranslate,
     );
   }
 
@@ -248,6 +268,8 @@ final class AdaptiveComicClassifier {
       inferenceMicros: 0,
       basis: 'decoded-animation',
       metadataFingerprint: metadataFingerprint,
+      sourceLanguage: sourceLanguage,
+      autoTranslate: autoTranslate,
     );
   }
 
@@ -335,6 +357,42 @@ final class AdaptiveComicClassifier {
     return null;
   }
 
+  String? _metadataLanguage() {
+    if (_match(tags, const [
+      'language:korean', '语言:韩语', '語言:韓語', '韩语', '韓語', '한국어',
+      'korean', '韩漫', '韓漫', 'manhwa',
+    ]) != null) {
+      return 'ko';
+    }
+    if (_match(tags, const [
+      'language:japanese', '语言:日语', '語言:日語', '日语', '日語', '日本語',
+      'japanese', '日漫',
+    ]) != null) {
+      return 'ja';
+    }
+    if (!_hasRawTag()) return null;
+    if (_match(tags, const ['webtoon', 'manhwa', '韩漫', '韓漫']) != null ||
+        _match([sourceIdentity], const [
+          'webtoons.com', 'lezhin', 'bomtoon', 'toomics', 'toptoon',
+        ]) != null) {
+      return 'ko';
+    }
+    if (_match(tags, const [
+          'manga', 'comic', 'doujinshi', '同人', '日漫',
+        ]) != null ||
+        _match([sourceIdentity], const ['ehentai', 'e-hentai', 'nhentai']) !=
+            null) {
+      return 'ja';
+    }
+    return null;
+  }
+
+  bool _hasRawTag() => tags.any((tag) {
+    final value = tag.contains(':') ? tag.substring(tag.indexOf(':') + 1) : tag;
+    return value == 'raw' || value == 'untranslated' ||
+        tag.contains('生肉') || tag.contains('未翻译') || tag.contains('未翻譯');
+  });
+
   static String? _match(List<String> values, List<String> tokens) {
     for (final value in values) {
       for (final token in tokens) {
@@ -356,6 +414,8 @@ final class AdaptiveComicClassifier {
     inferenceMicros: stopwatch.elapsedMicroseconds,
     basis: basis,
     metadataFingerprint: metadataFingerprint,
+    sourceLanguage: sourceLanguage,
+    autoTranslate: autoTranslate,
   );
 
   static int _fingerprint(String value) {

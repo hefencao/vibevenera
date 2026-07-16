@@ -227,6 +227,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           visible: _settingValue('enableComicTranslation') == true,
           child: SelectSetting(
             title: 'Source language'.tl,
+            help: 'Automatic source language does not support Korean; select Korean to use the dedicated recognizer'.tl,
             settingKey: 'comicTranslationSourceLanguage',
             optionTranslation: {
               'auto': 'Automatic'.tl,

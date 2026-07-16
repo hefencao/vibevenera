@@ -52,9 +52,9 @@ class OCREngine(
         recognitionEngine = RecognitionEngine(ortManager, configured.characterList)
     }
 
-    fun run(bitmap: Bitmap): OCREngineResult {
+    fun run(bitmap: Bitmap, maxAnalysisSide: Int? = null): OCREngineResult {
         val srcMat = BitmapUtils.bitmapToBGRMat(bitmap)
-        return runWithOwnedMat(srcMat)
+        return runWithOwnedMat(srcMat, maxAnalysisSide)
     }
 
     fun run(imageBytes: ByteArray): OCREngineResult {
@@ -63,20 +63,26 @@ class OCREngine(
             srcMat.release()
             throw OCRError.InvalidImage()
         }
-        return runWithOwnedMat(srcMat)
+        return runWithOwnedMat(srcMat, null)
     }
 
-    private fun runWithOwnedMat(srcMat: org.opencv.core.Mat): OCREngineResult {
+    private fun runWithOwnedMat(
+        srcMat: org.opencv.core.Mat,
+        maxAnalysisSide: Int?,
+    ): OCREngineResult {
         return try {
-            run(srcMat)
+            run(srcMat, maxAnalysisSide)
         } finally {
             srcMat.release()
         }
     }
 
-    private fun run(srcMat: org.opencv.core.Mat): OCREngineResult {
+    private fun run(
+        srcMat: org.opencv.core.Mat,
+        maxAnalysisSide: Int?,
+    ): OCREngineResult {
         val totalStart = System.currentTimeMillis()
-        val detResult = detectionEngine.detect(srcMat)
+        val detResult = detectionEngine.detect(srcMat, maxAnalysisSide)
         val boxes = detResult.boxes
 
         if (boxes.isEmpty()) {
@@ -87,6 +93,9 @@ class OCREngine(
                 recognitionTimeMs = 0,
                 totalTimeMs = elapsed,
                 lineCount = 0,
+                detectedLineCount = 0,
+                decodedLineCount = 0,
+                acceptedLineCount = 0,
                 detPreprocessMs = detResult.preprocessMs,
                 detInferenceMs = detResult.inferenceMs,
                 detPostprocessMs = detResult.postprocessMs,
@@ -103,6 +112,7 @@ class OCREngine(
         var totalRecInfMs = 0L
         var totalRecPostMs = 0L
         var totalRecMs = 0L
+        var decodedLineCount = 0
         val allResults = mutableListOf<OCRResult>()
         val recInputShapes = mutableListOf<List<Int>>()
         val perLineRecMs = mutableListOf<Long>()
@@ -139,6 +149,7 @@ class OCREngine(
                     for (j in batchResult.texts.indices) {
                         val boxIdx = batchBoxIndices[j]
                         val (text, confidence) = batchResult.texts[j]
+                        if (text.isNotEmpty()) decodedLineCount++
                         if (confidence >= config.recScoreThresh) {
                             allResults.add(
                                 OCRResult(
@@ -165,6 +176,9 @@ class OCREngine(
             recognitionTimeMs = totalRecMs,
             totalTimeMs = totalElapsed,
             lineCount = allResults.size,
+            detectedLineCount = sortedBoxes.size,
+            decodedLineCount = decodedLineCount,
+            acceptedLineCount = allResults.size,
             detPreprocessMs = detResult.preprocessMs,
             detInferenceMs = detResult.inferenceMs,
             detPostprocessMs = detResult.postprocessMs,

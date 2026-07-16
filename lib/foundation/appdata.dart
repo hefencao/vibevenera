@@ -259,6 +259,7 @@ class Settings with ChangeNotifier {
     'comicTranslationBackend': 'none',
     'comicTranslationRemoteEndpoint': 'https://api.openai.com/v1/chat/completions',
     'comicTranslationRemoteModel': '',
+    'comicTranslationAdditionalPrompt': '',
   };
 
   operator [](String key) {
@@ -308,10 +309,22 @@ class Settings with ChangeNotifier {
             AdaptiveComicProfile.applyConfidence) {
       return base;
     }
-    return _adaptiveReaderSetting(profile['type'] as String?, key, base);
+    return _adaptiveReaderSetting(profile, key, base);
   }
 
-  dynamic _adaptiveReaderSetting(String? type, String key, dynamic base) {
+  dynamic _adaptiveReaderSetting(
+    Map<String, dynamic> profile,
+    String key,
+    dynamic base,
+  ) {
+    final type = profile['type'] as String?;
+    if (key == 'comicTranslationSourceLanguage' &&
+        profile['sourceLanguage'] != null) {
+      return profile['sourceLanguage'];
+    }
+    if (key == 'enableComicTranslation' && profile['autoTranslate'] == true) {
+      return true;
+    }
     if (key == 'readerMode') {
       if (type == 'vertical') return 'continuousTopToBottom';
       if (type == 'paged' || type == 'animated') {

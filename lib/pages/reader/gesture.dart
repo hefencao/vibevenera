@@ -215,7 +215,9 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
   }
 
   void onTap(Offset location) {
-    if (reader._imageViewController!.handleOnTap(location)) {
+    if (reader.peekTranslationSourceAt(location)) {
+      return;
+    } else if (reader._imageViewController!.handleOnTap(location)) {
       return;
     } else if (context.readerScaffold.isOpen) {
       context.readerScaffold.openOrClose();
@@ -242,12 +244,20 @@ class _ReaderGestureDetectorState extends AutomaticGlobalState<_ReaderGestureDet
           isBottom = true;
         }
         bool isCenter = false;
-        var prev = () => context.reader.toPrevPage();
-        var next = () => context.reader.toNextPage();
+        var prev = () =>
+            reader._imageViewController!.turnViewport(false) ||
+            context.reader.toPrevPage();
+        var next = () =>
+            reader._imageViewController!.turnViewport(true) ||
+            context.reader.toNextPage();
         if (appdata.settings.getReaderSetting(
             reader.cid, reader.type.sourceKey, 'reverseTapToTurnPages')) {
-          prev = () => context.reader.toNextPage();
-          next = () => context.reader.toPrevPage();
+          prev = () =>
+              reader._imageViewController!.turnViewport(true) ||
+              context.reader.toNextPage();
+          next = () =>
+              reader._imageViewController!.turnViewport(false) ||
+              context.reader.toPrevPage();
         }
         switch (context.reader.mode) {
           case ReaderMode.galleryLeftToRight:

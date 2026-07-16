@@ -73,11 +73,14 @@ class PaddleOCR private constructor(
         }
     }
 
-    suspend fun recognize(bitmap: Bitmap): OCRRunResult {
+    suspend fun recognize(
+        bitmap: Bitmap,
+        maxAnalysisSide: Int? = null,
+    ): OCRRunResult {
         if (bitmap.width == 0 || bitmap.height == 0) {
             throw OCRError.InvalidImage()
         }
-        return recognizeResult { engine.run(bitmap) }
+        return recognizeResult { engine.run(bitmap, maxAnalysisSide) }
     }
 
     suspend fun recognize(imageBytes: ByteArray): OCRRunResult {
@@ -96,6 +99,9 @@ class PaddleOCR private constructor(
                 recognitionTimeMs = result.recognitionTimeMs,
                 totalTimeMs = result.totalTimeMs,
                 lineCount = result.lineCount,
+                detectedLineCount = result.detectedLineCount,
+                decodedLineCount = result.decodedLineCount,
+                acceptedLineCount = result.acceptedLineCount,
                 detPreprocessMs = result.detPreprocessMs,
                 detInferenceMs = result.detInferenceMs,
                 detPostprocessMs = result.detPostprocessMs,

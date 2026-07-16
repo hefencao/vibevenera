@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
@@ -86,6 +87,8 @@ final class ComicOcrRegion {
   final ComicTextKind kind;
   final int readingOrder;
   final int? backgroundArgb;
+  final int? foregroundArgb;
+  final int? bubbleGroupId;
   final List<NormalizedPoint>? bubblePolygon;
   final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
@@ -100,6 +103,8 @@ final class ComicOcrRegion {
     required this.readingOrder,
     required this.sourceMaskPolygons,
     this.backgroundArgb,
+    this.foregroundArgb,
+    this.bubbleGroupId,
     this.bubblePolygon,
     this.frameSpan,
   });
@@ -117,6 +122,8 @@ final class ComicOcrRegion {
     kind: ComicTextKind.values.byName(json['kind'] as String),
     readingOrder: json['readingOrder'] as int,
     backgroundArgb: json['backgroundArgb'] as int?,
+    foregroundArgb: json['foregroundArgb'] as int?,
+    bubbleGroupId: json['bubbleGroupId'] as int?,
     bubblePolygon: (json['bubblePolygon'] as List?)
         ?.map((point) => NormalizedPoint.fromJson(point as List))
         .toList(),
@@ -141,6 +148,8 @@ final class ComicOcrRegion {
     'kind': kind.name,
     'readingOrder': readingOrder,
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
+    if (foregroundArgb != null) 'foregroundArgb': foregroundArgb,
+    if (bubbleGroupId != null) 'bubbleGroupId': bubbleGroupId,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
     'sourceMaskPolygons': sourceMaskPolygons
@@ -160,6 +169,7 @@ final class ComicOcrArtifact {
   final ComicTranslationMediaKind mediaKind;
   final AnimatedTranslationMode animatedMode;
   final List<ComicOcrRegion> regions;
+  final Uint8List? cleanOverlayPng;
 
   const ComicOcrArtifact({
     required this.contentDigest,
@@ -171,6 +181,7 @@ final class ComicOcrArtifact {
     required this.mediaKind,
     required this.animatedMode,
     required this.regions,
+    this.cleanOverlayPng,
   });
 
   String get digest => sha256.convert(utf8.encode(jsonEncode(toJson()))).toString();
@@ -194,6 +205,9 @@ final class ComicOcrArtifact {
                   Map<String, dynamic>.from(region as Map),
                 ))
             .toList(),
+        cleanOverlayPng: json['cleanOverlayPng'] == null
+            ? null
+            : base64Decode(json['cleanOverlayPng'] as String),
       );
 
   Map<String, dynamic> toJson() => {
@@ -206,6 +220,8 @@ final class ComicOcrArtifact {
     'mediaKind': mediaKind.name,
     'animatedMode': animatedMode.name,
     'regions': regions.map((region) => region.toJson()).toList(),
+    if (cleanOverlayPng != null)
+      'cleanOverlayPng': base64Encode(cleanOverlayPng!),
   };
 }
 
@@ -218,6 +234,8 @@ final class ComicTranslatedRegion {
   final ComicTextKind kind;
   final int readingOrder;
   final int? backgroundArgb;
+  final int? foregroundArgb;
+  final int? bubbleGroupId;
   final List<NormalizedPoint>? bubblePolygon;
   final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
@@ -232,6 +250,8 @@ final class ComicTranslatedRegion {
     required this.readingOrder,
     required this.sourceMaskPolygons,
     this.backgroundArgb,
+    this.foregroundArgb,
+    this.bubbleGroupId,
     this.bubblePolygon,
     this.frameSpan,
   });
@@ -250,6 +270,8 @@ final class ComicTranslatedRegion {
         kind: ComicTextKind.values.byName(json['kind'] as String),
         readingOrder: json['readingOrder'] as int,
         backgroundArgb: json['backgroundArgb'] as int?,
+        foregroundArgb: json['foregroundArgb'] as int?,
+        bubbleGroupId: json['bubbleGroupId'] as int?,
         bubblePolygon: (json['bubblePolygon'] as List?)
             ?.map((point) => NormalizedPoint.fromJson(point as List))
             .toList(),
@@ -274,6 +296,8 @@ final class ComicTranslatedRegion {
     'kind': kind.name,
     'readingOrder': readingOrder,
     if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
+    if (foregroundArgb != null) 'foregroundArgb': foregroundArgb,
+    if (bubbleGroupId != null) 'bubbleGroupId': bubbleGroupId,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
     'sourceMaskPolygons': sourceMaskPolygons
@@ -355,9 +379,15 @@ final class ComicTranslationArtifact {
 final class ComicTranslationPageState {
   final ComicTranslationPhase phase;
   final ComicTranslationArtifact? artifact;
+  final Uint8List? cleanOverlayPng;
   final Object? error;
 
-  const ComicTranslationPageState(this.phase, {this.artifact, this.error});
+  const ComicTranslationPageState(
+    this.phase, {
+    this.artifact,
+    this.cleanOverlayPng,
+    this.error,
+  });
 
   static const disabled = ComicTranslationPageState(
     ComicTranslationPhase.disabled,

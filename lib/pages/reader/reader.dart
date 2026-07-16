@@ -219,6 +219,14 @@ class _ReaderState extends State<Reader>
   late ComicTranslationSession translationSession;
   ComicTranslationInteraction _translationInteraction =
       ComicTranslationInteraction.idle;
+  final _translationLayers = <_ReaderTranslationLayerState>{};
+
+  bool peekTranslationSourceAt(Offset globalPosition) {
+    for (final layer in _translationLayers) {
+      if (layer.peekSourceAt(globalPosition)) return true;
+    }
+    return false;
+  }
 
   @override
   bool isLoading = false;
@@ -600,10 +608,19 @@ class _ReaderState extends State<Reader>
 
   void reportTranslationPage(int logicalPage) {
     final current = _translationImagesForPage(logicalPage);
-    final next = _translationImagesForPage(logicalPage + 1);
+    final near = <ComicTranslationPageIdentity>[];
+    for (var page = logicalPage + 1;
+        near.length < translationSession.policy.prefetchPages;
+        page++) {
+      final candidates = _translationImagesForPage(page);
+      if (candidates.isEmpty) break;
+      near.addAll(candidates.take(
+        translationSession.policy.prefetchPages - near.length,
+      ));
+    }
     translationSession.reportPages(
       current: current,
-      near: next,
+      near: near,
       interaction: _translationInteraction,
     );
   }
@@ -1131,6 +1148,8 @@ abstract interface class _ImageViewController {
   void toPage(int page);
 
   Future<void> animateToPage(int page);
+
+  bool turnViewport(bool forward);
 
   void handleDoubleTap(Offset location);
 

@@ -1,6 +1,6 @@
 part of 'reader.dart';
 
-class _ReaderTranslationLayer extends StatelessWidget {
+class _ReaderTranslationLayer extends StatefulWidget {
   final int pageIndex;
   final Alignment alignment;
   final Widget child;
@@ -12,14 +12,89 @@ class _ReaderTranslationLayer extends StatelessWidget {
   });
 
   @override
+  State<_ReaderTranslationLayer> createState() =>
+      _ReaderTranslationLayerState();
+}
+
+class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
+  static const _sourcePeekDuration = Duration(milliseconds: 1500);
+  Timer? _sourcePeekTimer;
+  String? _hiddenBlockKey;
+  _ComicTranslationPainter? _painter;
+  _ReaderState? _reader;
+  Uint8List? _cleanOverlayBytes;
+  bool _cleanOverlayReady = false;
+
+  void _markCleanOverlayReady(Uint8List bytes) {
+    if (_cleanOverlayReady || !identical(_cleanOverlayBytes, bytes)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _cleanOverlayReady ||
+          !identical(_cleanOverlayBytes, bytes)) {
+        return;
+      }
+      setState(() => _cleanOverlayReady = true);
+    });
+  }
+
+  void _peekSource(String blockKey) {
+    _sourcePeekTimer?.cancel();
+    setState(() => _hiddenBlockKey = blockKey);
+    _sourcePeekTimer = Timer(_sourcePeekDuration, () {
+      if (mounted) setState(() => _hiddenBlockKey = null);
+    });
+  }
+
+  bool peekSourceAt(Offset globalPosition) {
+    final painter = _painter;
+    final box = context.findRenderObject();
+    if (painter == null || box is! RenderBox || !box.attached) return false;
+    final position = box.globalToLocal(globalPosition);
+    if (!(Offset.zero & box.size).contains(position)) return false;
+    final blockKey = painter.blockAt(position);
+    if (blockKey == null) return false;
+    _peekSource(blockKey);
+    return true;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reader = context.reader;
+    if (identical(_reader, reader)) return;
+    _reader?._translationLayers.remove(this);
+    _reader = reader.._translationLayers.add(this);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReaderTranslationLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.pageIndex == widget.pageIndex) return;
+    _sourcePeekTimer?.cancel();
+    _hiddenBlockKey = null;
+    _painter = null;
+    _cleanOverlayBytes = null;
+    _cleanOverlayReady = false;
+  }
+
+  @override
+  void dispose() {
+    _sourcePeekTimer?.cancel();
+    _reader?._translationLayers.remove(this);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final reader = context.reader;
-    if (!reader.translationSession.enabled) return child;
-    final identity = reader.translationIdentity(pageIndex);
+    if (!reader.translationSession.enabled) {
+      _painter = null;
+      return widget.child;
+    }
+    final identity = reader.translationIdentity(widget.pageIndex);
     return Stack(
       fit: StackFit.passthrough,
       children: [
-        child,
+        widget.child,
         Positioned.fill(
           child: IgnorePointer(
             child: RepaintBoundary(
@@ -30,18 +105,61 @@ class _ReaderTranslationLayer extends StatelessWidget {
                   final artifact = state.artifact;
                   if (state.phase != ComicTranslationPhase.ready ||
                       artifact == null) {
+                    _painter = null;
                     return const SizedBox();
                   }
-                  return CustomPaint(
-                    painter: _ComicTranslationPainter(
-                      artifact: artifact,
-                      fit: BoxFit.contain,
-                      alignment: alignment,
-                      background: context.colorScheme.surface.withValues(
-                        alpha: 0.88,
-                      ),
-                      foreground: context.colorScheme.onSurface,
-                    ),
+                  final background = context.colorScheme.surface.withValues(
+                    alpha: 0.88,
+                  );
+                  final foreground = context.colorScheme.onSurface;
+                  final cleanOverlayPng = state.cleanOverlayPng;
+                  if (!identical(_cleanOverlayBytes, cleanOverlayPng)) {
+                    _cleanOverlayBytes = cleanOverlayPng;
+                    _cleanOverlayReady = false;
+                  }
+                  final showCleanOverlay =
+                      cleanOverlayPng != null &&
+                      _cleanOverlayReady &&
+                      _hiddenBlockKey == null;
+                  final current = _painter;
+                  final painter = current != null &&
+                          current.artifact == artifact &&
+                          current.alignment == widget.alignment &&
+                          current.background == background &&
+                          current.foreground == foreground &&
+                          current.hasCleanOverlay ==
+                              showCleanOverlay &&
+                          current.hiddenBlockKey == _hiddenBlockKey
+                      ? current
+                      : _ComicTranslationPainter(
+                          artifact: artifact,
+                          fit: BoxFit.contain,
+                          alignment: widget.alignment,
+                          background: background,
+                          foreground: foreground,
+                          hasCleanOverlay: showCleanOverlay,
+                          hiddenBlockKey: _hiddenBlockKey,
+                        );
+                  _painter = painter;
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (cleanOverlayPng != null &&
+                          _hiddenBlockKey == null)
+                        Image.memory(
+                          cleanOverlayPng,
+                          fit: BoxFit.contain,
+                          alignment: widget.alignment,
+                          filterQuality: FilterQuality.medium,
+                          frameBuilder: (context, child, frame, _) {
+                            if (frame != null) {
+                              _markCleanOverlayReady(cleanOverlayPng);
+                            }
+                            return child;
+                          },
+                        ),
+                      CustomPaint(painter: painter),
+                    ],
                   );
                 },
               ),
@@ -59,17 +177,23 @@ class _ComicTranslationPainter extends CustomPainter {
   final Alignment alignment;
   final Color background;
   final Color foreground;
+  final bool hasCleanOverlay;
+  final String? hiddenBlockKey;
+  final List<_TranslationHitRegion> _hitRegions = [];
 
-  const _ComicTranslationPainter({
+  _ComicTranslationPainter({
     required this.artifact,
     required this.fit,
     required this.alignment,
     required this.background,
     required this.foreground,
+    required this.hasCleanOverlay,
+    required this.hiddenBlockKey,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
+    _hitRegions.clear();
     final sourceSize = Size(
       artifact.imageWidth.toDouble(),
       artifact.imageHeight.toDouble(),
@@ -77,6 +201,7 @@ class _ComicTranslationPainter extends CustomPainter {
     final fitted = applyBoxFit(fit, sourceSize, size);
     final imageRect = alignment.inscribe(fitted.destination, Offset.zero & size);
     for (final block in _layoutBlocks()) {
+      if (block.key == hiddenBlockKey) continue;
       final regionBounds = block.regions
           .map((region) => _displayBounds(region.bounds, imageRect))
           .toList();
@@ -91,7 +216,7 @@ class _ComicTranslationPainter extends CustomPainter {
           sortedFontSizes[sortedFontSizes.length ~/ 2] * 0.82;
       final sourceBounds = regionBounds
           .reduce((value, next) => value.expandToInclude(next));
-      final bubble = block.regions.first.region.bubblePolygon;
+      final bubble = block.useBubbleBounds ? _blockBubble(block) : null;
       final bubblePoints = bubble == null
           ? null
           : _displayPolygon(bubble, imageRect);
@@ -99,8 +224,9 @@ class _ComicTranslationPainter extends CustomPainter {
           ? null
           : (Path()..addPolygon(bubblePoints, true));
       final bounds = bubblePath == null
-          ? sourceBounds
-              .inflate(math.max(2, originalFontSize * 0.25))
+          ? (block.independent
+                  ? sourceBounds
+                  : sourceBounds.inflate(math.max(2, originalFontSize * 0.25)))
               .intersect(imageRect)
           : _safeBubbleBounds(
               bubblePath,
@@ -108,31 +234,53 @@ class _ComicTranslationPainter extends CustomPainter {
               sourceBounds,
               originalFontSize,
             ).intersect(imageRect);
-      if (bounds.width < 12 || bounds.height < 12) continue;
+      final minSide = block.independent ? 3.0 : 12.0;
+      if (bounds.width < minSide || bounds.height < minSide) continue;
+      _hitRegions.add(_TranslationHitRegion(
+        block.key,
+        bubblePath ?? (Path()..addRect(bounds)),
+      ));
       final text = block.text;
       final blockBackground = _blockBackground(block);
+      final blockForeground = _blockForeground(block);
       final maxFontSize = _maxTranslationFont(
         block,
         bounds,
         originalFontSize,
         bubblePath != null,
       );
-      for (final region in block.regions) {
-        final paint = Paint()..color = _regionBackground(region.region);
-        for (final polygon in region.region.sourceMaskPolygons) {
-          if (polygon.length < 3) continue;
-          canvas.drawPath(
-            Path()..addPolygon(_displayPolygon(polygon, imageRect), true),
-            paint,
-          );
+      if (!hasCleanOverlay) {
+        for (final region in block.regions) {
+          final paint = Paint()..color = _regionBackground(region.region);
+          for (final polygon in region.region.sourceMaskPolygons) {
+            if (polygon.length < 3) continue;
+            canvas.drawPath(
+              Path()..addPolygon(_displayPolygon(polygon, imageRect), true),
+              paint,
+            );
+          }
         }
       }
       canvas.save();
       if (bubblePath != null) canvas.clipPath(bubblePath);
       if (block.orientation == ComicTextOrientation.vertical) {
-        _paintVertical(canvas, text, bounds, maxFontSize, blockBackground);
+        _paintVertical(
+          canvas,
+          text,
+          bounds,
+          maxFontSize,
+          blockForeground,
+          blockBackground,
+        );
       } else {
-        _paintHorizontal(canvas, text, bounds, maxFontSize, blockBackground);
+        _paintHorizontal(
+          canvas,
+          text,
+          bounds,
+          maxFontSize,
+          blockForeground,
+          blockBackground,
+        );
       }
       canvas.restore();
     }
@@ -150,13 +298,13 @@ class _ComicTranslationPainter extends CustomPainter {
       (sum, region) => sum + region.region.sourceText.runes.length,
     );
     final targetLength = math.max(1, block.text.runes.length);
-    final densityScale = math.sqrt(sourceLength / targetLength).clamp(0.72, 1.25);
+    final densityScale = math.sqrt(sourceLength / targetLength).clamp(0.82, 1.25);
     final bubbleLimit = block.orientation == ComicTextOrientation.vertical
         ? math.min(bounds.width, bounds.height) * 0.52
         : bounds.height * 0.55;
     return math.min(
       bubbleLimit,
-      originalFontSize * densityScale * 1.08,
+      originalFontSize * densityScale * 1.2,
     );
   }
 
@@ -166,30 +314,38 @@ class _ComicTranslationPainter extends CustomPainter {
     Rect sourceBounds,
     double sourceFontSize,
   ) {
-    var center = sourceBounds.center;
-    if (!bubble.contains(center)) center = bubbleBounds.center;
-    final width = 2.0 * math.min(
-      center.dx - bubbleBounds.left,
-      bubbleBounds.right - center.dx,
-    );
-    final height = 2.0 * math.min(
-      center.dy - bubbleBounds.top,
-      bubbleBounds.bottom - center.dy,
-    );
-    var candidate = Rect.fromCenter(
-      center: center,
-      width: width,
-      height: height,
-    );
-    while (candidate.width >= 12 &&
-        candidate.height >= 12 &&
-        !_rectInside(bubble, candidate)) {
-      candidate = Rect.fromCenter(
-        center: center,
-        width: candidate.width * 0.94,
-        height: candidate.height * 0.94,
+    Rect candidateAt(Offset center) {
+      final width = 2.0 * math.min(
+        center.dx - bubbleBounds.left,
+        bubbleBounds.right - center.dx,
       );
+      final height = 2.0 * math.min(
+        center.dy - bubbleBounds.top,
+        bubbleBounds.bottom - center.dy,
+      );
+      var candidate = Rect.fromCenter(
+        center: center,
+        width: math.max(0, width),
+        height: math.max(0, height),
+      );
+      while (candidate.width >= 12 &&
+          candidate.height >= 12 &&
+          !_rectInside(bubble, candidate)) {
+        candidate = Rect.fromCenter(
+          center: center,
+          width: candidate.width * 0.94,
+          height: candidate.height * 0.94,
+        );
+      }
+      return candidate;
     }
+    final centers = [bubbleBounds.center, sourceBounds.center]
+        .where(bubble.contains)
+        .toList();
+    if (centers.isEmpty) centers.add(sourceBounds.center);
+    final candidates = centers.map(candidateAt).toList();
+    final candidate = candidates.reduce((a, b) =>
+        a.width * a.height >= b.width * b.height ? a : b);
     return candidate.deflate(math.max(2, sourceFontSize * 0.12));
   }
 
@@ -210,26 +366,45 @@ class _ComicTranslationPainter extends CustomPainter {
     String text,
     Rect bounds,
     double maxFontSize,
+    Color fillColor,
     Color outline,
   ) {
     var low = 2.0;
     var high = math.max(low, maxFontSize);
     for (var i = 0; i < 7; i++) {
       final size = (low + high) / 2;
-      final painter = _paragraph(text, size, bounds.width, outline: outline);
+      final painter = _paragraph(
+        text,
+        size,
+        bounds.width,
+        fillColor: fillColor,
+        outline: outline,
+      );
       if (painter.height <= bounds.height) {
         low = size;
       } else {
         high = size;
       }
     }
-    final fill = _paragraph(text, low, bounds.width, outline: outline);
+    final fill = _paragraph(
+      text,
+      low,
+      bounds.width,
+      fillColor: fillColor,
+      outline: outline,
+    );
     final offset = Offset(
       bounds.left + (bounds.width - fill.width) / 2,
       bounds.top + (bounds.height - fill.height) / 2,
     );
-    _paragraph(text, low, bounds.width, stroke: true, outline: outline)
-        .paint(canvas, offset);
+    _paragraph(
+      text,
+      low,
+      bounds.width,
+      stroke: true,
+      fillColor: fillColor,
+      outline: outline,
+    ).paint(canvas, offset);
     fill.paint(canvas, offset);
   }
 
@@ -238,11 +413,12 @@ class _ComicTranslationPainter extends CustomPainter {
     String text,
     Rect bounds,
     double maxFontSize,
+    Color fillColor,
     Color outline,
   ) {
     final glyphs = text.runes.map(String.fromCharCode).toList();
     if (glyphs.isEmpty) return;
-    final glyphMetrics = _verticalGlyphMetrics(glyphs, outline);
+    final glyphMetrics = _verticalGlyphMetrics(glyphs, fillColor, outline);
     var low = 2.0;
     var high = math.max(low, maxFontSize);
     for (var i = 0; i < 7; i++) {
@@ -267,23 +443,39 @@ class _ComicTranslationPainter extends CustomPainter {
         startX - (column + 0.5) * layout.cellWidth,
         startY + (row + 0.5) * layout.cellHeight,
       );
-      final fill = _glyph(glyphs[i], low, outline: outline);
+      final fill = _glyph(
+        glyphs[i],
+        low,
+        fillColor: fillColor,
+        outline: outline,
+      );
       final offset = center - Offset(fill.width / 2, fill.height / 2);
-      _glyph(glyphs[i], low, stroke: true, outline: outline)
-          .paint(canvas, offset);
+      _glyph(
+        glyphs[i],
+        low,
+        stroke: true,
+        fillColor: fillColor,
+        outline: outline,
+      ).paint(canvas, offset);
       fill.paint(canvas, offset);
     }
   }
 
   _VerticalGlyphMetrics _verticalGlyphMetrics(
     List<String> glyphs,
+    Color fillColor,
     Color outline,
   ) {
     const sampleSize = 100.0;
     var width = 0.0;
     var height = 0.0;
     for (final glyph in glyphs) {
-      final painter = _glyph(glyph, sampleSize, outline: outline);
+      final painter = _glyph(
+        glyph,
+        sampleSize,
+        fillColor: fillColor,
+        outline: outline,
+      );
       width = math.max(width, painter.width);
       height = math.max(height, painter.height);
     }
@@ -315,11 +507,12 @@ class _ComicTranslationPainter extends CustomPainter {
     double fontSize,
     double width, {
     bool stroke = false,
+    required Color fillColor,
     required Color outline,
   }) => TextPainter(
       text: TextSpan(
         text: text,
-        style: _textStyle(fontSize, stroke, outline),
+        style: _textStyle(fontSize, stroke, fillColor, outline),
       ),
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
@@ -330,12 +523,13 @@ class _ComicTranslationPainter extends CustomPainter {
     String text,
     double fontSize, {
     bool stroke = false,
+    required Color fillColor,
     required Color outline,
   }) =>
       TextPainter(
         text: TextSpan(
           text: text,
-          style: _textStyle(fontSize, stroke, outline),
+          style: _textStyle(fontSize, stroke, fillColor, outline),
         ),
         textDirection: TextDirection.ltr,
         locale: _targetLocale,
@@ -344,15 +538,16 @@ class _ComicTranslationPainter extends CustomPainter {
   TextStyle _textStyle(
     double fontSize,
     bool stroke,
+    Color fillColor,
     Color outline,
   ) => TextStyle(
-    color: stroke ? null : foreground,
+    color: stroke ? null : fillColor,
     foreground: stroke
         ? (Paint()
             ..color = outline
             ..style = PaintingStyle.stroke
             ..strokeJoin = StrokeJoin.round
-            ..strokeWidth = math.max(1.2, fontSize * 0.14))
+            ..strokeWidth = math.max(0.55, fontSize * 0.045))
         : null,
     fontSize: fontSize,
     height: 1.05,
@@ -368,6 +563,18 @@ class _ComicTranslationPainter extends CustomPainter {
     final colors = block.regions
         .map((region) => _regionBackground(region.region))
         .toList();
+    return _medianColor(colors);
+  }
+
+  Color _blockForeground(_TranslationLayoutBlock block) {
+    final colors = block.regions
+        .where((region) => region.region.foregroundArgb != null)
+        .map((region) => Color(region.region.foregroundArgb!))
+        .toList();
+    return colors.isEmpty ? foreground : _medianColor(colors);
+  }
+
+  Color _medianColor(List<Color> colors) {
     int median(int Function(Color color) channel) {
       final values = colors.map(channel).toList()..sort();
       return values[values.length ~/ 2];
@@ -378,6 +585,24 @@ class _ComicTranslationPainter extends CustomPainter {
       median((color) => (color.g * 255).round()),
       median((color) => (color.b * 255).round()),
     );
+  }
+
+  List<NormalizedPoint>? _blockBubble(_TranslationLayoutBlock block) {
+    List<NormalizedPoint>? best;
+    var bestArea = 0.0;
+    for (final region in block.regions) {
+      final polygon = region.region.bubblePolygon;
+      if (polygon == null) continue;
+      final bounds = _bounds(
+        polygon.map((point) => Offset(point.x, point.y)),
+      );
+      final area = bounds.width * bounds.height;
+      if (area > bestArea) {
+        best = polygon;
+        bestArea = area;
+      }
+    }
+    return best;
   }
 
   Locale? get _targetLocale => _languageLocale(artifact.targetLanguage);
@@ -395,10 +620,22 @@ class _ComicTranslationPainter extends CustomPainter {
     final regions = artifact.regions
         .where((region) =>
             region.kind != ComicTextKind.soundEffect &&
-            region.translatedText.trim().isNotEmpty &&
             region.polygon.isNotEmpty)
         .map((region) => _TranslationLayoutRegion(region, _normalizedBounds(region)))
         .toList();
+    if (!_usesBubbleLayout) {
+      return regions
+          .where((region) => region.region.translatedText.trim().isNotEmpty)
+          .map((region) => _TranslationLayoutBlock(
+                key: 'region:${region.region.ocrRegionId}',
+                regions: [region],
+                orientation: region.region.orientation,
+                text: region.region.translatedText.trim(),
+                independent: true,
+                useBubbleBounds: false,
+              ))
+          .toList();
+    }
     final parent = List.generate(regions.length, (index) => index);
     int root(int value) {
       while (parent[value] != value) {
@@ -417,8 +654,20 @@ class _ComicTranslationPainter extends CustomPainter {
     for (var i = 0; i < regions.length; i++) {
       groups.putIfAbsent(root(i), () => []).add(regions[i]);
     }
-    return groups.values.map((regions) {
-      final orientation = regions.first.region.orientation;
+    return groups.values
+        .where((regions) => regions.any(
+              (region) => region.region.translatedText.trim().isNotEmpty,
+            ))
+        .map((regions) {
+      final vertical = regions
+          .where((region) =>
+              region.region.orientation == ComicTextOrientation.vertical)
+          .length;
+      final orientation = vertical * 2 == regions.length
+          ? regions.first.region.orientation
+          : vertical * 2 > regions.length
+              ? ComicTextOrientation.vertical
+              : ComicTextOrientation.horizontal;
       regions.sort(orientation == ComicTextOrientation.vertical
           ? (a, b) {
               final column = b.bounds.center.dx.compareTo(a.bounds.center.dx);
@@ -430,21 +679,43 @@ class _ComicTranslationPainter extends CustomPainter {
               final row = a.bounds.top.compareTo(b.bounds.top);
               return row != 0 ? row : a.bounds.left.compareTo(b.bounds.left);
             });
-      final separator = orientation == ComicTextOrientation.vertical ? '' : ' ';
+      final separator = orientation == ComicTextOrientation.vertical ||
+              const {'zh', 'ja', 'ko'}.contains(
+                artifact.targetLanguage.split(RegExp('[-_]')).first,
+              )
+          ? ''
+          : ' ';
+      final regionIds = regions.map((region) => region.region.ocrRegionId).toList()
+        ..sort();
+      final bubbleGroupId = regions.first.region.bubbleGroupId;
       return _TranslationLayoutBlock(
+        key: bubbleGroupId == null
+            ? 'regions:${regionIds.join(',')}'
+            : 'bubble:$bubbleGroupId',
         regions: regions,
         orientation: orientation,
         text: regions
             .map((region) => region.region.translatedText.trim())
+            .where((text) => text.isNotEmpty)
             .join(separator),
+        independent: false,
+        useBubbleBounds: true,
       );
     }).toList();
   }
+
+  bool get _usesBubbleLayout =>
+      artifact.sourceLanguage.split(RegExp('[-_]')).first.toLowerCase() == 'ko';
 
   bool _sameTextBlock(
     _TranslationLayoutRegion a,
     _TranslationLayoutRegion b,
   ) {
+    final aGroup = a.region.bubbleGroupId;
+    final bGroup = b.region.bubbleGroupId;
+    if (aGroup != null || bGroup != null) {
+      return aGroup != null && aGroup == bGroup;
+    }
     if (a.region.orientation != b.region.orientation) return false;
     final aBubble = a.region.bubblePolygon;
     final bBubble = b.region.bubblePolygon;
@@ -530,13 +801,22 @@ class _ComicTranslationPainter extends CustomPainter {
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
+  String? blockAt(Offset position) {
+    for (final region in _hitRegions.reversed) {
+      if (region.path.contains(position)) return region.blockKey;
+    }
+    return null;
+  }
+
   @override
   bool shouldRepaint(covariant _ComicTranslationPainter oldDelegate) =>
       oldDelegate.artifact != artifact ||
       oldDelegate.fit != fit ||
       oldDelegate.alignment != alignment ||
       oldDelegate.background != background ||
-      oldDelegate.foreground != foreground;
+      oldDelegate.foreground != foreground ||
+      oldDelegate.hasCleanOverlay != hasCleanOverlay ||
+      oldDelegate.hiddenBlockKey != hiddenBlockKey;
 }
 
 class _TranslationLayoutRegion {
@@ -547,15 +827,28 @@ class _TranslationLayoutRegion {
 }
 
 class _TranslationLayoutBlock {
+  final String key;
   final List<_TranslationLayoutRegion> regions;
   final ComicTextOrientation orientation;
   final String text;
+  final bool independent;
+  final bool useBubbleBounds;
 
   const _TranslationLayoutBlock({
+    required this.key,
     required this.regions,
     required this.orientation,
     required this.text,
+    required this.independent,
+    required this.useBubbleBounds,
   });
+}
+
+class _TranslationHitRegion {
+  final String blockKey;
+  final Path path;
+
+  const _TranslationHitRegion(this.blockKey, this.path);
 }
 
 class _VerticalTextLayout {
