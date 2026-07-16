@@ -577,29 +577,7 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
     final buttons = [
       // 播放速度按钮
       _buildSpeedButton(context),
-      Tooltip(
-        message: 'Comic translation'.tl,
-        child: IconButton(
-          color: context.reader.translationSession.enabled
-              ? context.colorScheme.primary
-              : null,
-          icon: const Icon(Icons.translate),
-          onPressed: () {
-            final session = context.reader.translationSession;
-            if (!session.enabled && !session.backendReady) {
-              showToast(
-                message: 'Comic translation model is not installed'.tl,
-                context: context,
-                seconds: 2,
-              );
-              return;
-            }
-            session.setEnabled(!session.enabled);
-            context.reader.reportTranslationPage(context.reader.page);
-            update();
-          },
-        ),
-      ),
+      _buildTranslationButton(),
       Tooltip(
         message: "Collect the image".tl,
         child: IconButton(
@@ -778,6 +756,75 @@ class _ReaderScaffoldState extends State<_ReaderScaffold> {
           child: child,
         ),
       ),
+    );
+  }
+
+  Widget _buildTranslationButton() {
+    final reader = context.reader;
+    final session = reader.translationSession;
+    final identities = reader.images == null
+        ? const <ComicTranslationPageIdentity>[]
+        : reader._translationImagesForPage(reader.page);
+    Widget buildButton(ComicTranslationPageState? state) {
+      final phase = state?.phase;
+      final processing = phase == ComicTranslationPhase.recognizing ||
+          phase == ComicTranslationPhase.translating;
+      final failed = phase == ComicTranslationPhase.failed;
+      final message = switch (phase) {
+        ComicTranslationPhase.recognizing => 'Recognizing comic text'.tl,
+        ComicTranslationPhase.translating => 'Translating comic text'.tl,
+        ComicTranslationPhase.waitingForImage => 'Waiting for image download'.tl,
+        ComicTranslationPhase.failed => 'Translation failed; tap to retry'.tl,
+        _ => 'Comic translation'.tl,
+      };
+      return Tooltip(
+        message: message,
+        child: IconButton(
+          color: session.enabled ? context.colorScheme.primary : null,
+          icon: Stack(
+            alignment: Alignment.center,
+            children: [
+              const Icon(Icons.translate),
+              if (processing)
+                const SizedBox.square(
+                  dimension: 28,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              if (failed)
+                const Positioned(
+                  right: 0,
+                  top: 0,
+                  child: Icon(Icons.error, size: 12),
+                ),
+            ],
+          ),
+          onPressed: () {
+            if (failed && identities.isNotEmpty) {
+              session.retry(identities.first);
+              return;
+            }
+            if (!session.enabled && !session.backendReady) {
+              showToast(
+                message: session.engines.ocrEngine == null
+                    ? 'Comic translation model is not installed'.tl
+                    : 'Translation backend is not configured'.tl,
+                context: context,
+                seconds: 2,
+              );
+              return;
+            }
+            session.setEnabled(!session.enabled);
+            reader.reportTranslationPage(reader.page);
+            update();
+          },
+        ),
+      );
+    }
+
+    if (!session.enabled || identities.isEmpty) return buildButton(null);
+    return ValueListenableBuilder<ComicTranslationPageState>(
+      valueListenable: session.listenable(identities.first),
+      builder: (context, state, _) => buildButton(state),
     );
   }
 

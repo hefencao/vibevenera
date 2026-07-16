@@ -290,6 +290,7 @@ final class ComicTranslationSession {
           orientation: region.orientation,
           kind: region.kind,
           readingOrder: region.readingOrder,
+          backgroundArgb: region.backgroundArgb,
           frameSpan: region.frameSpan,
         );
       }).toList();
@@ -298,6 +299,7 @@ final class ComicTranslationSession {
         ocrDigest: ocr.digest,
         engineId: translator.id,
         modelVersion: translator.modelVersion,
+        sourceLanguage: ocr.sourceLanguage,
         targetLanguage: targetLanguage,
         contextDigest: contextDigest,
         imageWidth: ocr.imageWidth,

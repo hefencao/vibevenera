@@ -12,9 +12,9 @@
 
 ## OCR 候选顺序
 
-1. **PP-OCRv6 small**：支持日文的移动端主候选；
+1. **PP-OCRv6 small**：支持日文、韩文等多语言的移动端主候选；
 2. **PP-OCRv5 mobile**：兼容性及日文准确率对照；
-3. 韩文 recognition pack：仅在韩文样本需要时加载；
+3. 韩文 recognition pack：仅在 PP-OCRv6 small 的韩漫实测准确率不足时再引入；
 4. **PP-OCRv6 tiny**：先用于体积/速度对照；日文覆盖和漫画竖排准确率需实测。
 
 官方 Android 部署文档给出的模型目录结构为：
@@ -35,9 +35,11 @@ OCR MethodChannel 只传文件路径和结构化结果。图片采样、OpenCV �
 Android worker 执行，不占用 platform/UI 线程；输入长边按 1600 进行分析。动态 WebP/GIF
 仍不会进入该 runtime。
 
-真机 benchmark 会显示模型加载、输入解析、OCR、翻译 P50/P95 和每轮 RSS 变化。模型约
-29.7 MiB 只是磁盘权重大小，运行峰值还包含 ONNX session、OpenCV Mat、检测 tensor 和文字
-crop，必须在目标设备实测，不能由参数量直接推断。
+benchmark 可明确选择日文、韩文、中文或英文源语言。它会显示模型加载、检测/识别各阶段、
+OCR/翻译 P50/P95、OCR 原文及每轮
+RSS 变化，并区分模型加载、边界采样最大值和释放后保留内存。模型约 29.7 MiB 只是磁盘权重大小，
+运行峰值还包含 ONNX session、OpenCV Mat、检测 tensor 和文字 crop，必须在目标设备实测，
+不能由参数量直接推断。
 
 ## 远程翻译
 

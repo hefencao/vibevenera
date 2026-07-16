@@ -9,7 +9,10 @@ final class ComicTranslationBenchmarkSample {
   final Duration inputResolveTime;
   final Duration ocrTime;
   final Duration translationTime;
+  final ComicOcrRunMetrics? ocrMetrics;
   final int regionCount;
+  final List<String> sourceTexts;
+  final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
 
@@ -18,7 +21,10 @@ final class ComicTranslationBenchmarkSample {
     required this.inputResolveTime,
     required this.ocrTime,
     required this.translationTime,
+    required this.ocrMetrics,
     required this.regionCount,
+    required this.sourceTexts,
+    required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
   });
@@ -29,12 +35,20 @@ final class ComicTranslationBenchmarkResult {
   final Duration translationLoadTime;
   final bool translationMeasured;
   final List<ComicTranslationBenchmarkSample> samples;
+  final int rssBeforeLoad;
+  final int rssAfterLoad;
+  final int maxObservedRss;
+  final int rssAfterRelease;
 
   const ComicTranslationBenchmarkResult({
     required this.ocrLoadTime,
     required this.translationLoadTime,
     required this.translationMeasured,
     required this.samples,
+    required this.rssBeforeLoad,
+    required this.rssAfterLoad,
+    required this.maxObservedRss,
+    required this.rssAfterRelease,
   });
 }
 
@@ -60,14 +74,23 @@ final class ComicTranslationBenchmark {
             ..ocrEngine = engines.ocrEngine
             ..translationEngine = const _BenchmarkNoopTranslationEngine());
     final pair = await benchmarkEngines.acquire();
+    final rssBeforeLoad = ProcessInfo.currentRss;
+    late Duration ocrLoad;
+    late Duration translationLoad;
+    late int rssAfterLoad;
+    var maxObservedRss = rssBeforeLoad;
+    final samples = <ComicTranslationBenchmarkSample>[];
     try {
       final timer = Stopwatch()..start();
       await benchmarkEngines.loadOcr(pair);
-      final ocrLoad = timer.elapsed;
+      ocrLoad = timer.elapsed;
       timer.reset();
       await benchmarkEngines.loadTranslator(pair);
-      final translationLoad = timer.elapsed;
-      final samples = <ComicTranslationBenchmarkSample>[];
+      translationLoad = timer.elapsed;
+      rssAfterLoad = ProcessInfo.currentRss;
+      maxObservedRss = rssAfterLoad > maxObservedRss
+          ? rssAfterLoad
+          : maxObservedRss;
       for (final page in pages) {
         final rssBefore = ProcessInfo.currentRss;
         timer.reset();
@@ -90,30 +113,43 @@ final class ComicTranslationBenchmark {
         ));
         final ocrTime = timer.elapsed;
         timer.reset();
-        await pair.translator.translate(ComicTranslationRequest(
+        final translation = await pair.translator.translate(ComicTranslationRequest(
           ocr: artifact,
           targetLanguage: targetLanguage,
           previousPages: const [],
         ));
+        final rssAfter = ProcessInfo.currentRss;
+        if (rssAfter > maxObservedRss) maxObservedRss = rssAfter;
         samples.add(ComicTranslationBenchmarkSample(
           identity: page,
           inputResolveTime: inputTime,
           ocrTime: ocrTime,
           translationTime: timer.elapsed,
+          ocrMetrics: pair.ocr is ComicOcrEngineDiagnostics
+              ? (pair.ocr as ComicOcrEngineDiagnostics).lastRunMetrics
+              : null,
           regionCount: artifact.regions.length,
+          sourceTexts: artifact.regions.map((region) => region.text).toList(),
+          translatedTexts: artifact.regions
+              .map((region) => translation.translations[region.id]!)
+              .toList(),
           rssBefore: rssBefore,
-          rssAfter: ProcessInfo.currentRss,
+          rssAfter: rssAfter,
         ));
       }
-      return ComicTranslationBenchmarkResult(
-        ocrLoadTime: ocrLoad,
-        translationLoadTime: translationLoad,
-        translationMeasured: translationMeasured,
-        samples: samples,
-      );
     } finally {
       await benchmarkEngines.release(pair);
     }
+    return ComicTranslationBenchmarkResult(
+      ocrLoadTime: ocrLoad,
+      translationLoadTime: translationLoad,
+      translationMeasured: translationMeasured,
+      samples: samples,
+      rssBeforeLoad: rssBeforeLoad,
+      rssAfterLoad: rssAfterLoad,
+      maxObservedRss: maxObservedRss,
+      rssAfterRelease: ProcessInfo.currentRss,
+    );
   }
 }
 

@@ -17,10 +17,7 @@ package com.paddle.ocr.preprocess
 import android.graphics.Bitmap
 import com.paddle.ocr.util.BitmapUtils
 import com.paddle.ocr.util.ImageUtils
-import org.opencv.core.Core
-import org.opencv.core.CvType
 import org.opencv.core.Mat
-import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 
 data class DetPreprocessResult(
@@ -70,27 +67,19 @@ object DetPreprocessor {
 
         val h = resized.rows()
         val w = resized.cols()
-        val floatMat = Mat(h, w, CvType.CV_32FC3)
-        resized.convertTo(floatMat, CvType.CV_32F)
-
-        val channels = mutableListOf<Mat>()
-        Core.split(floatMat, channels)
-        for (c in 0..2) {
-            Core.multiply(channels[c], Scalar(scale), channels[c])
-            Core.subtract(channels[c], Scalar(mean[c]), channels[c])
-            Core.divide(channels[c], Scalar(std[c]), channels[c])
-        }
-        resized.release()
-        floatMat.release()
-
         val channelSize = h * w
+        val pixels = ByteArray(channelSize * 3)
+        resized.get(0, 0, pixels)
+        resized.release()
+
         val tensorData = FloatArray(3 * channelSize)
-        for (c in 0..2) {
-            val chan = channels[c]
-            val buf = FloatArray(channelSize)
-            chan.get(0, 0, buf)
-            System.arraycopy(buf, 0, tensorData, c * channelSize, channelSize)
-            chan.release()
+        for (i in 0 until channelSize) {
+            val pixel = i * 3
+            for (c in 0..2) {
+                val value = pixels[pixel + c].toInt() and 0xff
+                tensorData[c * channelSize + i] =
+                    ((value * scale - mean[c]) / std[c]).toFloat()
+            }
         }
 
         return DetPreprocessResult(

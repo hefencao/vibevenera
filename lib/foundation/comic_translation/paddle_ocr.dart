@@ -6,19 +6,24 @@ import 'engine.dart';
 import 'model_manager.dart';
 import 'models.dart';
 
-final class AndroidPaddleComicOcrEngine implements ComicOcrEngine {
+final class AndroidPaddleComicOcrEngine
+    implements ComicOcrEngine, ComicOcrEngineDiagnostics {
   static const _channel = MethodChannel('venera/comic_translation_ocr');
   static const _analysisSide = 1600;
 
   final ComicTranslationModelManager models;
+  ComicOcrRunMetrics? _lastRunMetrics;
 
-  const AndroidPaddleComicOcrEngine(this.models);
+  AndroidPaddleComicOcrEngine(this.models);
+
+  @override
+  ComicOcrRunMetrics? get lastRunMetrics => _lastRunMetrics;
 
   @override
   String get id => 'paddleocr-android';
 
   @override
-  String get modelVersion => ComicTranslationModelManager.bundle.version;
+  String get modelVersion => '${ComicTranslationModelManager.bundle.version}:mask-v1';
 
   @override
   bool get supportsAnimatedPosterFrame => false;
@@ -41,6 +46,14 @@ final class AndroidPaddleComicOcrEngine implements ComicOcrEngine {
     );
     final width = value['width'] as int;
     final height = value['height'] as int;
+    _lastRunMetrics = ComicOcrRunMetrics(
+      detectionPreprocess: Duration(milliseconds: value['detPreprocessMs'] as int),
+      detectionInference: Duration(milliseconds: value['detInferenceMs'] as int),
+      detectionPostprocess: Duration(milliseconds: value['detPostprocessMs'] as int),
+      recognitionPreprocess: Duration(milliseconds: value['recPreprocessMs'] as int),
+      recognitionInference: Duration(milliseconds: value['recInferenceMs'] as int),
+      recognitionPostprocess: Duration(milliseconds: value['recPostprocessMs'] as int),
+    );
     final regions = (value['regions'] as List).map((raw) {
       final region = Map<String, dynamic>.from(raw as Map);
       final points = (region['points'] as List)
@@ -68,6 +81,7 @@ final class AndroidPaddleComicOcrEngine implements ComicOcrEngine {
             : ComicTextOrientation.horizontal,
         kind: ComicTextKind.unknown,
         readingOrder: int.parse((region['id'] as String).substring(1)),
+        backgroundArgb: region['backgroundArgb'] as int,
       );
     }).toList();
     return ComicOcrArtifact(

@@ -54,7 +54,8 @@ object BitmapUtils {
     }
 
     private fun bitmapToMat(bitmap: Bitmap, colorConversionCode: Int): Mat {
-        val bmp = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        val bmp = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
+        else bitmap.copy(Bitmap.Config.ARGB_8888, false)
         val rgba = Mat(bmp.height, bmp.width, CvType.CV_8UC4)
         val dst = Mat()
         return try {
@@ -65,7 +66,7 @@ object BitmapUtils {
             dst.release()
             throw t
         } finally {
-            bmp.recycle()
+            if (bmp !== bitmap) bmp.recycle()
             rgba.release()
         }
     }

@@ -53,8 +53,9 @@ final class OpenAiCompatibleComicTranslationEngine
             {
               'role': 'system',
               'content':
-                  'Translate comic text into ${request.targetLanguage}. '
+                  'Translate comic text ${request.ocr.sourceLanguage == 'auto' ? '' : 'from ${request.ocr.sourceLanguage} '}into ${request.targetLanguage}. '
                   'Use prior pages only as context. Preserve names and tone. '
+                  'Use natural target-language writing without romanization and keep each region concise. '
                   'Return one JSON object: {"translations":{"regionId":"text"}}. '
                   'Every input regionId must appear exactly once.',
             },

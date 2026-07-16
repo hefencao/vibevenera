@@ -52,6 +52,34 @@ final class ComicTranslationResult {
   const ComicTranslationResult(this.translations);
 }
 
+final class ComicOcrRunMetrics {
+  final Duration detectionPreprocess;
+  final Duration detectionInference;
+  final Duration detectionPostprocess;
+  final Duration recognitionPreprocess;
+  final Duration recognitionInference;
+  final Duration recognitionPostprocess;
+
+  const ComicOcrRunMetrics({
+    required this.detectionPreprocess,
+    required this.detectionInference,
+    required this.detectionPostprocess,
+    required this.recognitionPreprocess,
+    required this.recognitionInference,
+    required this.recognitionPostprocess,
+  });
+
+  Duration get detection =>
+      detectionPreprocess + detectionInference + detectionPostprocess;
+
+  Duration get recognition =>
+      recognitionPreprocess + recognitionInference + recognitionPostprocess;
+}
+
+abstract interface class ComicOcrEngineDiagnostics {
+  ComicOcrRunMetrics? get lastRunMetrics;
+}
+
 abstract interface class ComicOcrEngine {
   String get id;
 

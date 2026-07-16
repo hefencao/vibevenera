@@ -85,6 +85,7 @@ final class ComicOcrRegion {
   final ComicTextOrientation orientation;
   final ComicTextKind kind;
   final int readingOrder;
+  final int? backgroundArgb;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicOcrRegion({
@@ -95,6 +96,7 @@ final class ComicOcrRegion {
     required this.orientation,
     required this.kind,
     required this.readingOrder,
+    this.backgroundArgb,
     this.frameSpan,
   });
 
@@ -110,6 +112,7 @@ final class ComicOcrRegion {
     ),
     kind: ComicTextKind.values.byName(json['kind'] as String),
     readingOrder: json['readingOrder'] as int,
+    backgroundArgb: json['backgroundArgb'] as int?,
     frameSpan: json['frameSpan'] == null
         ? null
         : AnimatedFrameSpan.fromJson(
@@ -125,6 +128,7 @@ final class ComicOcrRegion {
     'orientation': orientation.name,
     'kind': kind.name,
     'readingOrder': readingOrder,
+    if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }
@@ -196,6 +200,7 @@ final class ComicTranslatedRegion {
   final ComicTextOrientation orientation;
   final ComicTextKind kind;
   final int readingOrder;
+  final int? backgroundArgb;
   final AnimatedFrameSpan? frameSpan;
 
   const ComicTranslatedRegion({
@@ -206,6 +211,7 @@ final class ComicTranslatedRegion {
     required this.orientation,
     required this.kind,
     required this.readingOrder,
+    this.backgroundArgb,
     this.frameSpan,
   });
 
@@ -222,6 +228,7 @@ final class ComicTranslatedRegion {
         ),
         kind: ComicTextKind.values.byName(json['kind'] as String),
         readingOrder: json['readingOrder'] as int,
+        backgroundArgb: json['backgroundArgb'] as int?,
         frameSpan: json['frameSpan'] == null
             ? null
             : AnimatedFrameSpan.fromJson(
@@ -237,6 +244,7 @@ final class ComicTranslatedRegion {
     'orientation': orientation.name,
     'kind': kind.name,
     'readingOrder': readingOrder,
+    if (backgroundArgb != null) 'backgroundArgb': backgroundArgb,
     if (frameSpan != null) 'frameSpan': frameSpan!.toJson(),
   };
 }
@@ -246,6 +254,7 @@ final class ComicTranslationArtifact {
   final String ocrDigest;
   final String engineId;
   final String modelVersion;
+  final String sourceLanguage;
   final String targetLanguage;
   final String contextDigest;
   final int imageWidth;
@@ -259,6 +268,7 @@ final class ComicTranslationArtifact {
     required this.ocrDigest,
     required this.engineId,
     required this.modelVersion,
+    required this.sourceLanguage,
     required this.targetLanguage,
     required this.contextDigest,
     required this.imageWidth,
@@ -274,6 +284,7 @@ final class ComicTranslationArtifact {
         ocrDigest: json['ocrDigest'] as String,
         engineId: json['engineId'] as String,
         modelVersion: json['modelVersion'] as String,
+        sourceLanguage: json['sourceLanguage'] as String? ?? 'auto',
         targetLanguage: json['targetLanguage'] as String,
         contextDigest: json['contextDigest'] as String,
         imageWidth: json['imageWidth'] as int,
@@ -296,6 +307,7 @@ final class ComicTranslationArtifact {
     'ocrDigest': ocrDigest,
     'engineId': engineId,
     'modelVersion': modelVersion,
+    'sourceLanguage': sourceLanguage,
     'targetLanguage': targetLanguage,
     'contextDigest': contextDigest,
     'imageWidth': imageWidth,

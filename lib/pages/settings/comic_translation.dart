@@ -345,6 +345,8 @@ class _ComicTranslationBenchmarkPageState
   Object? error;
   bool running = false;
   int runs = 3;
+  String sourceLanguage = 'ja';
+  String targetLanguage = 'zh-CN';
 
   @override
   Widget build(BuildContext context) {
@@ -372,6 +374,38 @@ class _ComicTranslationBenchmarkPageState
                 DropdownMenuItem(value: 10, child: Text('10')),
               ],
               onChanged: running ? null : (value) => setState(() => runs = value!),
+            ),
+          ),
+          ListTile(
+            title: Text('Source language'.tl),
+            trailing: DropdownButton<String>(
+              value: sourceLanguage,
+              items: [
+                DropdownMenuItem(value: 'auto', child: Text('Automatic'.tl)),
+                DropdownMenuItem(value: 'ja', child: Text('Japanese'.tl)),
+                DropdownMenuItem(value: 'ko', child: Text('Korean'.tl)),
+                DropdownMenuItem(value: 'zh', child: Text('Chinese'.tl)),
+                DropdownMenuItem(value: 'en', child: Text('English'.tl)),
+              ],
+              onChanged: running
+                  ? null
+                  : (value) => setState(() => sourceLanguage = value!),
+            ),
+          ),
+          ListTile(
+            title: Text('Target language'.tl),
+            trailing: DropdownButton<String>(
+              value: targetLanguage,
+              items: const [
+                DropdownMenuItem(value: 'zh-CN', child: Text('简体中文')),
+                DropdownMenuItem(value: 'zh-TW', child: Text('繁體中文')),
+                DropdownMenuItem(value: 'ko-KR', child: Text('한국어')),
+                DropdownMenuItem(value: 'ja-JP', child: Text('日本語')),
+                DropdownMenuItem(value: 'en-US', child: Text('English')),
+              ],
+              onChanged: running
+                  ? null
+                  : (value) => setState(() => targetLanguage = value!),
             ),
           ),
           FilledButton.icon(
@@ -405,15 +439,15 @@ class _ComicTranslationBenchmarkPageState
                 'Translation P50/P95: ${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.50)}ms / '
                 '${_percentile(result!.samples.map((e) => e.translationTime).toList(), 0.95)}ms',
               ),
+            Text(
+              'RSS load/observed max/retained: '
+              '${_rssDelta(result!.rssAfterLoad, result!.rssBeforeLoad)} / '
+              '${_rssDelta(result!.maxObservedRss, result!.rssBeforeLoad)} / '
+              '${_rssDelta(result!.rssAfterRelease, result!.rssBeforeLoad)}',
+            ),
             const SizedBox(height: 8),
             for (var i = 0; i < result!.samples.length; i++)
-              Text(
-                '#${i + 1} input=${result!.samples[i].inputResolveTime.inMilliseconds}ms '
-                'ocr=${result!.samples[i].ocrTime.inMilliseconds}ms '
-                '${result!.translationMeasured ? 'translation=${result!.samples[i].translationTime.inMilliseconds}ms ' : ''}'
-                'regions=${result!.samples[i].regionCount} '
-                'rssΔ=${((result!.samples[i].rssAfter - result!.samples[i].rssBefore) / 1048576).toStringAsFixed(1)}MB',
-              ).paddingVertical(4),
+              _buildSample(result!.samples[i], i),
           ],
         ],
       ),
@@ -454,8 +488,8 @@ class _ComicTranslationBenchmarkPageState
     try {
       final value = await ComicTranslationBenchmark().run(
         pages: pages,
-        sourceLanguage: 'auto',
-        targetLanguage: 'zh-CN',
+        sourceLanguage: sourceLanguage,
+        targetLanguage: targetLanguage,
       );
       if (mounted) setState(() => result = value);
     } catch (value) {
@@ -468,5 +502,43 @@ class _ComicTranslationBenchmarkPageState
   int _percentile(List<Duration> values, double percentile) {
     values.sort();
     return values[((values.length - 1) * percentile).round()].inMilliseconds;
+  }
+
+  String _rssDelta(int value, int baseline) =>
+      '${((value - baseline) / 1048576).toStringAsFixed(1)}MB';
+
+  Widget _buildSample(ComicTranslationBenchmarkSample sample, int index) {
+    final metrics = sample.ocrMetrics;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '#${index + 1} input=${sample.inputResolveTime.inMilliseconds}ms '
+          'ocr=${sample.ocrTime.inMilliseconds}ms '
+          '${result!.translationMeasured ? 'translation=${sample.translationTime.inMilliseconds}ms ' : ''}'
+          'regions=${sample.regionCount} '
+          'rssΔ=${_rssDelta(sample.rssAfter, sample.rssBefore)}',
+        ),
+        if (metrics != null)
+          Text(
+            'det=${metrics.detection.inMilliseconds}ms '
+            '(${metrics.detectionPreprocess.inMilliseconds}/'
+            '${metrics.detectionInference.inMilliseconds}/'
+            '${metrics.detectionPostprocess.inMilliseconds}) · '
+            'rec=${metrics.recognition.inMilliseconds}ms '
+            '(${metrics.recognitionPreprocess.inMilliseconds}/'
+            '${metrics.recognitionInference.inMilliseconds}/'
+            '${metrics.recognitionPostprocess.inMilliseconds})',
+            style: ts.s12,
+          ),
+        if (sample.sourceTexts.isNotEmpty)
+          SelectableText('OCR: ${sample.sourceTexts.join(' | ')}', style: ts.s12),
+        if (result!.translationMeasured && sample.translatedTexts.isNotEmpty)
+          SelectableText(
+            '${'Translation'.tl}: ${sample.translatedTexts.join(' | ')}',
+            style: ts.s12,
+          ),
+      ],
+    ).paddingVertical(6);
   }
 }

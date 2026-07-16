@@ -50,6 +50,7 @@ void main() {
     );
     final firstState = await _waitFor(first, identity);
     expect(firstState.artifact!.regions.single.translatedText, '你好');
+    expect(firstState.artifact!.regions.single.backgroundArgb, 0xFFFFFFFF);
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
     first.dispose();
@@ -264,6 +265,7 @@ final class _OcrEngine implements ComicOcrEngine {
           orientation: ComicTextOrientation.vertical,
           kind: ComicTextKind.dialogue,
           readingOrder: 0,
+          backgroundArgb: 0xFFFFFFFF,
         ),
       ],
     );

@@ -80,7 +80,13 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - overlay 有独立 `RepaintBoundary`；
 - 动图 Texture 更新不重绘文字；
 - artifact 通过每页 `ValueListenable` 发布，不调用 Reader `setState`；
-- 当前 MVP 跳过拟声词，只绘制对白、旁白和未分类文字的半透明覆盖层。
+- 相邻且主轴重叠的 OCR 行/竖列会合并为同一排版区块；翻译文字在区块内重新换行，
+  同一区块只使用一个字体大小；字号上限来自原文字行高或竖列宽度，不再按译文长度放大。
+- 竖排区块保持从右到左分列，中文、日文和韩文字体按目标语言 locale 选择 fallback。
+- OCR 同时采样每个文字区的主背景色；原文字用紧致字形遮罩覆盖，译文以同色描边，
+  字形以外完全透明，不再绘制大面积圆角矩形色块。
+- 当前仍是字形近似遮罩，不是像素级分割或修补；复杂艺术字、渐变底色仍需后续 mask/
+  inpainting artifact。MVP 继续跳过拟声词。
 
 后续气泡 mask、轮廓排版与 LaMa 修补属于 layout/render artifact，不修改 OCR artifact。
 
@@ -103,15 +109,20 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 `ComicTranslationBenchmark` 已提供统一测量入口，记录：
 
 - OCR/翻译模型加载耗时；
-- 输入解析、OCR、翻译分段耗时；
-- 区域数量；
-- 每页推理前后 RSS。
+- 输入解析、检测预处理/推理/后处理、识别预处理/推理/后处理和翻译耗时；
+- 区域数量、OCR 原文和翻译结果；
+- 模型加载、边界采样最大值、释放后 RSS，以及每页推理前后 RSS。
+
+真机结果显示高性能设备的 OCR P50 约 0.5 秒，旧设备约 2.4 秒。任务仍保持单路后台
+执行，不为追求吞吐增加并发；1600 长边保留为准确率基线。首轮 RSS 上升后趋于稳定不是
+逐页泄漏，但瞬时占用仍偏高，因此检测预处理改为从 8-bit Mat 直接生成 CHW tensor，移除
+float Mat、通道 Mat 和逐通道数组的重复副本；Bitmap 已是 ARGB8888 时也不再复制。
 
 候选顺序：
 
 1. PP-OCRv6 small det/rec：日文漫画的移动端主候选；
 2. PP-OCRv5 mobile det/rec：兼容性和日文准确率基线；
-3. 韩文独立 recognition pack；
+3. PP-OCRv6 small 内置韩文基线；仅在真机漫画样本明显不足时再增加韩文独立 pack；
 4. 本地 Marian/Bergamot 与显式远程翻译后端。
 
 PP-OCRv6 tiny 先只作为体积/速度基线；其日文覆盖和漫画竖排准确率必须以实际模型包验证，

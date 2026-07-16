@@ -2,6 +2,8 @@ package com.github.wgh136.venera
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.PointF
 import android.os.Handler
 import android.os.Looper
 import com.paddle.ocr.EngineConfig
@@ -18,6 +20,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.sqrt
 
 class ComicTranslationOcrPlugin(
     context: Context,
@@ -83,7 +88,10 @@ class ComicTranslationOcrPlugin(
         }
         val bitmap = BitmapFactory.decodeFile(
             file.path,
-            BitmapFactory.Options().apply { inSampleSize = sample },
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+            },
         ) ?: error("Unsupported image: ${file.path}")
         return try {
             val value = ocr!!.recognize(bitmap)
@@ -93,11 +101,18 @@ class ComicTranslationOcrPlugin(
                 "detectionMs" to value.detectionTimeMs,
                 "recognitionMs" to value.recognitionTimeMs,
                 "totalMs" to value.totalTimeMs,
+                "detPreprocessMs" to value.detPreprocessMs,
+                "detInferenceMs" to value.detInferenceMs,
+                "detPostprocessMs" to value.detPostprocessMs,
+                "recPreprocessMs" to value.recPreprocessMs,
+                "recInferenceMs" to value.recInferenceMs,
+                "recPostprocessMs" to value.recPostprocessMs,
                 "regions" to value.results.mapIndexed { index, region ->
                     mapOf(
                         "id" to "r$index",
                         "text" to region.text,
                         "confidence" to region.confidence.toDouble(),
+                        "backgroundArgb" to estimateBackground(bitmap, region.box.points),
                         "points" to region.box.points.map { listOf(it.x.toDouble(), it.y.toDouble()) },
                     )
                 },
@@ -105,6 +120,38 @@ class ComicTranslationOcrPlugin(
         } finally {
             bitmap.recycle()
         }
+    }
+
+    private fun estimateBackground(bitmap: android.graphics.Bitmap, points: List<PointF>): Int {
+        val left = floor(points.minOf { it.x }.toDouble()).toInt().coerceIn(0, bitmap.width - 1)
+        val top = floor(points.minOf { it.y }.toDouble()).toInt().coerceIn(0, bitmap.height - 1)
+        val right = ceil(points.maxOf { it.x }.toDouble()).toInt().coerceIn(left + 1, bitmap.width)
+        val bottom = ceil(points.maxOf { it.y }.toDouble()).toInt().coerceIn(top + 1, bitmap.height)
+        val step = sqrt(((right - left) * (bottom - top) / 1024.0).coerceAtLeast(1.0))
+            .toInt().coerceAtLeast(1)
+        val count = IntArray(4096)
+        val red = LongArray(4096)
+        val green = LongArray(4096)
+        val blue = LongArray(4096)
+        for (y in top until bottom step step) {
+            for (x in left until right step step) {
+                val color = bitmap.getPixel(x, y)
+                val r = Color.red(color)
+                val g = Color.green(color)
+                val b = Color.blue(color)
+                val bucket = (r shr 4 shl 8) or (g shr 4 shl 4) or (b shr 4)
+                count[bucket]++
+                red[bucket] += r.toLong()
+                green[bucket] += g.toLong()
+                blue[bucket] += b.toLong()
+            }
+        }
+        val bucket = count.indices.maxBy { count[it] }
+        return Color.rgb(
+            (red[bucket] / count[bucket]).toInt(),
+            (green[bucket] / count[bucket]).toInt(),
+            (blue[bucket] / count[bucket]).toInt(),
+        )
     }
 
     private suspend fun unload() {
