@@ -41,6 +41,7 @@ object BubbleSegmenter {
 
     data class SegmentationResult(
         val regions: List<RegionSegmentation>,
+        val sourceIndices: List<Int>,
         val cleanOverlay: Bitmap?,
     )
 
@@ -52,8 +53,12 @@ object BubbleSegmenter {
         val bounds: Rect,
     )
 
-    fun segment(bitmap: Bitmap, boxes: List<OCRBox>): SegmentationResult {
-        if (boxes.isEmpty()) return SegmentationResult(emptyList(), null)
+    fun segment(
+        bitmap: Bitmap,
+        boxes: List<OCRBox>,
+        retainedIndices: ((List<RegionSegmentation>) -> List<Int>)? = null,
+    ): SegmentationResult {
+        if (boxes.isEmpty()) return SegmentationResult(emptyList(), emptyList(), null)
         val image = BitmapUtils.bitmapToBGRMat(bitmap)
         val known = mutableListOf<BubbleCandidate>()
         return try {
@@ -81,9 +86,14 @@ object BubbleSegmenter {
                     sourceMaskPolygons = masks.polygons,
                 )
             }
+            val selected = retainedIndices?.invoke(regions) ?: regions.indices.toList()
+            val selectedRegions = selected.map { regions[it] }
             SegmentationResult(
-                regions,
-                cleanOverlay(image, boxes, regions),
+                selectedRegions,
+                selected,
+                if (selected.isEmpty()) null else {
+                    cleanOverlay(image, selected.map { boxes[it] }, selectedRegions)
+                },
             )
         } finally {
             image.release()
@@ -335,45 +345,53 @@ object BubbleSegmenter {
             val maxDistance = Core.minMaxLoc(distance).maxVal
             var coreCenters = emptyList<Point>()
             if (maxDistance >= 4.0) {
-                Imgproc.threshold(
-                    distance,
-                    cores,
-                    maxDistance * 0.68,
-                    255.0,
-                    Imgproc.THRESH_BINARY,
-                )
-                cores.convertTo(cores, CvType.CV_8UC1)
-                val count = Imgproc.connectedComponentsWithStats(
-                    cores, labels, stats, centroids, 8, CvType.CV_32S,
-                )
-                val minCoreArea = max(9.0, candidate.area * 0.005)
-                coreCenters = (1 until count).mapNotNull { label ->
-                    if (stats.get(label, Imgproc.CC_STAT_AREA)[0] < minCoreArea) {
-                        null
-                    } else {
-                        Point(
-                            centroids.get(label, 0)[0],
-                            centroids.get(label, 1)[0],
-                        )
+                val minCoreArea = max(9.0, candidate.area * 0.0015)
+                for (level in 82 downTo 26 step 4) {
+                    Imgproc.threshold(
+                        distance,
+                        cores,
+                        maxDistance * level / 100.0,
+                        255.0,
+                        Imgproc.THRESH_BINARY,
+                    )
+                    cores.convertTo(cores, CvType.CV_8UC1)
+                    val count = Imgproc.connectedComponentsWithStats(
+                        cores, labels, stats, centroids, 8, CvType.CV_32S,
+                    )
+                    val centers = (1 until count).mapNotNull { label ->
+                        if (stats.get(label, Imgproc.CC_STAT_AREA)[0] < minCoreArea) {
+                            null
+                        } else {
+                            Point(
+                                centroids.get(label, 0)[0],
+                                centroids.get(label, 1)[0],
+                            )
+                        }
+                    }
+                    val used = boxes.mapNotNull { box ->
+                        val point = center(box)
+                        centers.indices.minByOrNull { index ->
+                            val dx = point.x - bounds.x - centers[index].x
+                            val dy = point.y - bounds.y - centers[index].y
+                            dx * dx + dy * dy
+                        }
+                    }.distinct()
+                    if (used.size >= 2) {
+                        coreCenters = centers
+                        break
                     }
                 }
             }
-            val textCenters = textGroupCenters(boxes)
-            if (textCenters.size < 2) return null
-            var used = textCenters.mapNotNull { point ->
+            val solidity = polygonSolidity(polygon)
+            val used = boxes.mapNotNull { box ->
+                val point = center(box)
                 coreCenters.indices.minByOrNull { index ->
                     val dx = point.x - bounds.x - coreCenters[index].x
                     val dy = point.y - bounds.y - coreCenters[index].y
                     dx * dx + dy * dy
                 }
             }.distinct()
-            if (used.size < 2 && polygonSolidity(polygon) < 0.98) {
-                coreCenters = textCenters.map {
-                    Point(it.x - bounds.x.toDouble(), it.y - bounds.y.toDouble())
-                }
-                used = coreCenters.indices.toList()
-            }
-            if (used.size < 2) return null
+            if (used.size < 2 || solidity >= 0.98) return null
 
             val lobeMasks = used.associateWith {
                 Mat.zeros(bounds.height, bounds.width, CvType.CV_8UC1)
@@ -411,51 +429,6 @@ object BubbleSegmenter {
             labels.release()
             stats.release()
             centroids.release()
-        }
-    }
-
-    private fun textGroupCenters(boxes: List<OCRBox>): List<Point> {
-        val parent = IntArray(boxes.size) { it }
-        fun root(value: Int): Int {
-            var current = value
-            while (parent[current] != current) {
-                parent[current] = parent[parent[current]]
-                current = parent[current]
-            }
-            return current
-        }
-        val rects = boxes.map { box ->
-            val left = box.points.minOf { it.x }.toDouble()
-            val top = box.points.minOf { it.y }.toDouble()
-            val right = box.points.maxOf { it.x }.toDouble()
-            val bottom = box.points.maxOf { it.y }.toDouble()
-            doubleArrayOf(left, top, right, bottom)
-        }
-        for (i in rects.indices) for (j in i + 1 until rects.size) {
-            val a = rects[i]
-            val b = rects[j]
-            val aw = a[2] - a[0]
-            val ah = a[3] - a[1]
-            val bw = b[2] - b[0]
-            val bh = b[3] - b[1]
-            val vertical = ah > aw * 1.2 && bh > bw * 1.2
-            val horizontal = aw > ah * 1.2 && bw > bh * 1.2
-            val sameGroup = if (vertical) {
-                val overlap = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-                val gap = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
-                overlap / min(ah, bh) >= 0.30 && gap <= max(aw, bw) * 2.2
-            } else if (horizontal) {
-                val overlap = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-                val gap = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
-                overlap / min(aw, bw) >= 0.30 && gap <= max(ah, bh) * 2.2
-            } else false
-            if (sameGroup) parent[root(j)] = root(i)
-        }
-        return boxes.indices.groupBy(::root).values.map { indices ->
-            Point(
-                indices.map { center(boxes[it]).x }.average(),
-                indices.map { center(boxes[it]).y }.average(),
-            )
         }
     }
 
@@ -673,7 +646,7 @@ object BubbleSegmenter {
                     if (areaRatio !in 0.75..36.0 ||
                         pixelArea / contourArea < 0.55 ||
                         compactness < 0.18 || extent < 0.42 ||
-                        solidity < 0.70 || oversizedRectangle ||
+                        solidity < 0.62 || oversizedRectangle ||
                         Imgproc.pointPolygonTest(contour2f, localCenter, false) < 0
                     ) return null
                     val approximation = MatOfPoint2f()

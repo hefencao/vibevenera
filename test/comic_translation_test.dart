@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/comic_translation/benchmark.dart';
 import 'package:venera/foundation/comic_translation/engine.dart';
+import 'package:venera/foundation/comic_translation/grouping.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
 import 'package:venera/foundation/comic_translation/policy.dart';
 import 'package:venera/foundation/comic_translation/remote_translation.dart';
@@ -134,6 +135,123 @@ void main() {
     expect(value['translations'], {'bubble:1': ['保留 {括号}']});
   });
 
+  test('open Japanese OCR regions cluster and sort by positional columns', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('left', '左', 0.42, 0.12, 0.08, 0.42, 0),
+      _positionedRegion('right-bottom', '下', 0.55, 0.34, 0.08, 0.2, 1),
+      _positionedRegion('right-top', '上', 0.55, 0.1, 0.08, 0.2, 2),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units, hasLength(1));
+    expect(units.single.regionIds, ['right-top', 'right-bottom', 'left']);
+    expect(units.single.sourceLines, ['上', '下', '左']);
+  });
+
+  test('different bubble groups remain separate despite close positions', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('a', '甲', 0.55, 0.1, 0.08, 0.3, 0,
+          bubbleGroupId: 1),
+      _positionedRegion('b', '乙', 0.45, 0.1, 0.08, 0.3, 1,
+          bubbleGroupId: 2),
+    ]);
+    expect(ComicTranslationUnit.fromOcr(artifact), hasLength(2));
+  });
+
+  test('staggered columns in one bubble use normalized cross-axis distance', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('right', '右列', 0.58, 0.08, 0.08, 0.22, 0,
+          bubbleGroupId: 7),
+      _positionedRegion('left', '左列', 0.34, 0.64, 0.08, 0.22, 1,
+          bubbleGroupId: 7),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units, hasLength(1));
+    expect(units.single.regionIds, ['right', 'left']);
+  });
+
+  test('connected bubble lobes separated on the reading axis stay separate', () {
+    const bubble = [
+      NormalizedPoint(0.3, 0.04),
+      NormalizedPoint(0.72, 0.04),
+      NormalizedPoint(0.72, 0.76),
+      NormalizedPoint(0.3, 0.76),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion('upper-right', '上右', 0.58, 0.08, 0.08, 0.18, 0,
+          bubbleGroupId: 7, bubblePolygon: bubble),
+      _positionedRegion('upper-left', '上左', 0.48, 0.1, 0.08, 0.18, 1,
+          bubbleGroupId: 7, bubblePolygon: bubble),
+      _positionedRegion('lower-right', '下右', 0.54, 0.25, 0.08, 0.18, 2,
+          bubbleGroupId: 7, bubblePolygon: bubble),
+      _positionedRegion('lower-left', '下左', 0.44, 0.27, 0.08, 0.18, 3,
+          bubbleGroupId: 7, bubblePolygon: bubble),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units, hasLength(2));
+    expect(units.map((unit) => unit.regionIds.toSet().join(',')).toSet(), {
+      'upper-right,upper-left',
+      'lower-right,lower-left',
+    });
+  });
+
+  test('punctuation-only groups are not submitted for translation', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('noise', '……?!', 0.5, 0.2, 0.08, 0.2, 0),
+      _positionedRegion('fragment', '……ら', 0.2, 0.7, 0.08, 0.2, 1),
+    ]);
+    expect(ComicTranslationUnit.fromOcr(artifact), isEmpty);
+  });
+
+  test('sound effects are submitted only when explicitly enabled', () {
+    final artifact = _ocrArtifact([
+      _ocrRegion(
+        'sfx',
+        'ドン',
+        0,
+        1,
+        kind: ComicTextKind.soundEffect,
+      ),
+    ]);
+    expect(ComicTranslationUnit.fromOcr(artifact), isEmpty);
+    expect(
+      ComicTranslationUnit.fromOcr(
+        artifact,
+        translateSoundEffects: true,
+      ).single.sourceLines,
+      ['ドン'],
+    );
+  });
+
+  test('layout and translation resolver share group key and band order', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('left', '左', 0.42, 0.12, 0.08, 0.42, 0),
+      _positionedRegion('right-bottom', '下', 0.55, 0.34, 0.08, 0.2, 1),
+      _positionedRegion('right-top', '上', 0.55, 0.1, 0.08, 0.2, 2),
+    ]);
+    final grouping = ComicTextGrouping(
+      imageWidth: artifact.imageWidth,
+      imageHeight: artifact.imageHeight,
+      sourceLanguage: artifact.sourceLanguage,
+    );
+    final groups = grouping.resolve(artifact.regions.map((region) =>
+        ComicTextRegion(
+          value: region,
+          id: region.id,
+          text: region.text,
+          polygon: region.polygon,
+          orientation: region.orientation,
+          backgroundArgb: region.backgroundArgb,
+          bubbleGroupId: region.bubbleGroupId,
+          bubblePolygon: region.bubblePolygon,
+        )).toList());
+    expect(groups.single.key, ComicTranslationUnit.fromOcr(artifact).single.id);
+    expect(groups.single.bands.map((band) =>
+        band.regions.map((region) => region.id).toList()).toList(), [
+      ['right-top', 'right-bottom'],
+      ['left'],
+    ]);
+  });
+
   test('one bubble is translated jointly and split back into OCR columns', () async {
     final image = File('${temp.path}/grouped-page.bin');
     await image.writeAsBytes(List<int>.generate(257, (i) => i & 0xff));
@@ -174,9 +292,10 @@ void main() {
       current: [identity],
       interaction: ComicTranslationInteraction.idle,
     );
-    final artifact = (await _waitFor(session, identity)).artifact!;
+    final state = await _waitFor(session, identity);
+    final artifact = state.artifact!;
     final unit = translator.lastRequest!.units.single;
-    expect(unit.id, 'bubble:9');
+    expect(unit.id, 'regions:r0,r1,r2');
     expect(unit.regionIds, ['r0', 'r1', 'r2']);
     expect(unit.sourceLines, ['一', '二', '三']);
     final translated = {
@@ -189,6 +308,42 @@ void main() {
       'r1': '译二',
       'sfx': '',
     });
+    expect(state.cleanOverlayPng, isNull);
+    session.dispose();
+  });
+
+  test('one session uses the mean font scale for every text block', () async {
+    final image = File('${temp.path}/typography-page.bin');
+    await image.writeAsBytes(List<int>.generate(258, (i) => i & 0xff));
+    final identity = ComicTranslationPageIdentity(
+      imageKey: image.uri.toString(),
+      sourceKey: 'local',
+      comicId: 'typography-comic',
+      chapterId: 'chapter',
+      pageIndex: 0,
+      mediaKind: ComicTranslationMediaKind.staticImage,
+    );
+    final registry = ComicTranslationEngineRegistry()
+      ..ocrEngine = _OcrEngine(
+        version: 'typography',
+        regions: [
+          _ocrRegion('r0', '四个文字', 0, 4, left: 0.6),
+          _ocrRegion('r1', '一', 1, 4, left: 0.3),
+        ],
+      )
+      ..translationEngine = _TranslationEngine.lines(const ['中', '四个文字']);
+    final session = ComicTranslationSession(
+      enabled: true,
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      engines: registry,
+    );
+    session.reportPages(
+      current: [identity],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    await _waitFor(session, identity);
+    expect(session.fontScaleListenable.value, closeTo(1.085, 0.0001));
     session.dispose();
   });
 
@@ -485,4 +640,45 @@ ComicOcrRegion _ocrRegion(
   readingOrder: readingOrder,
   sourceMaskPolygons: const [],
   bubbleGroupId: bubbleGroupId,
+);
+
+ComicOcrArtifact _ocrArtifact(List<ComicOcrRegion> regions) => ComicOcrArtifact(
+  contentDigest: 'content',
+  engineId: 'test',
+  modelVersion: '1',
+  sourceLanguage: 'ja',
+  imageWidth: 1000,
+  imageHeight: 1000,
+  mediaKind: ComicTranslationMediaKind.staticImage,
+  animatedMode: AnimatedTranslationMode.posterFrame,
+  regions: regions,
+);
+
+ComicOcrRegion _positionedRegion(
+  String id,
+  String text,
+  double left,
+  double top,
+  double width,
+  double height,
+  int readingOrder, {
+  int? bubbleGroupId,
+  List<NormalizedPoint>? bubblePolygon,
+}) => ComicOcrRegion(
+  id: id,
+  polygon: [
+    NormalizedPoint(left, top),
+    NormalizedPoint(left + width, top),
+    NormalizedPoint(left + width, top + height),
+    NormalizedPoint(left, top + height),
+  ],
+  text: text,
+  confidence: 0.9,
+  orientation: ComicTextOrientation.vertical,
+  kind: ComicTextKind.dialogue,
+  readingOrder: readingOrder,
+  sourceMaskPolygons: const [],
+  backgroundArgb: 0xffffffff,
+  bubbleGroupId: bubbleGroupId,
+  bubblePolygon: bubblePolygon,
 );

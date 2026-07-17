@@ -35,6 +35,7 @@ import java.util.concurrent.Executors
 private const val MIN_EFFECTIVE_ANALYSIS_WIDTH = 512
 private const val MIN_ANALYSIS_WIDTH = 320
 private const val TILE_OVERLAP_ANALYSIS = 128
+private const val MIN_UNBUBBLED_SINGLE_CONFIDENCE = 0.72f
 
 class ComicTranslationOcrPlugin(
     context: Context,
@@ -377,10 +378,16 @@ class ComicTranslationOcrPlugin(
         val segmentation = BubbleSegmenter.segment(
             bitmap,
             results.map { it.box },
+            retainedIndices = { regions ->
+                results.indices.filter { index ->
+                    !isLowConfidenceUnbubbledSingleton(index, results, regions)
+                }
+            },
         )
         metrics.bubbleSegmentationMs += System.currentTimeMillis() - segmentationStart
+        val keptResults = segmentation.sourceIndices.map { results[it] }
         val scaleX = source.width().toFloat() / bitmap.width
-        val regions = results.mapIndexed { index, region ->
+        val regions = keptResults.mapIndexed { index, region ->
             val segmented = segmentation.regions[index]
             _RecognizedRegion(
                 text = region.text,
@@ -409,6 +416,31 @@ class ComicTranslationOcrPlugin(
                 scaleCleanOverlay(it, analysisSide)
             },
         )
+    }
+
+    private fun isLowConfidenceUnbubbledSingleton(
+        index: Int,
+        results: List<OCRResult>,
+        segmentation: List<BubbleSegmenter.RegionSegmentation>,
+    ): Boolean {
+        val region = results[index]
+        if (region.confidence >= MIN_UNBUBBLED_SINGLE_CONFIDENCE ||
+            segmentation[index].bubbleGroupId != null
+        ) return false
+        return results.indices.none { other ->
+            other != index && segmentation[other].bubbleGroupId == null &&
+                relatedTextBoxes(region.box, results[other].box)
+        }
+    }
+
+    private fun relatedTextBoxes(a: OCRBox, b: OCRBox): Boolean {
+        val first = ocrBounds(a)
+        val second = ocrBounds(b)
+        val firstSize = maxOf(first.width(), first.height())
+        val secondSize = maxOf(second.width(), second.height())
+        val gapX = maxOf(first.left, second.left) - minOf(first.right, second.right)
+        val gapY = maxOf(first.top, second.top) - minOf(first.bottom, second.bottom)
+        return maxOf(gapX, gapY) <= minOf(firstSize, secondSize) * 1.5f
     }
 
     private fun scaleCleanOverlay(bitmap: Bitmap, maxSide: Int): Bitmap {

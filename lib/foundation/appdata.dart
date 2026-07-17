@@ -256,10 +256,13 @@ class Settings with ChangeNotifier {
     'comicTranslationSourceLanguage': 'auto',
     'comicTranslationTargetLanguage': 'system',
     'comicTranslationContextPages': 2,
+    'comicTranslationSoundEffects': false,
     'comicTranslationBackend': 'none',
     'comicTranslationRemoteEndpoint': 'https://api.openai.com/v1/chat/completions',
     'comicTranslationRemoteModel': '',
     'comicTranslationAdditionalPrompt': '',
+    'comicTranslationRemoteProfiles': <dynamic>[],
+    'comicTranslationRemoteProfile': '',
   };
 
   operator [](String key) {

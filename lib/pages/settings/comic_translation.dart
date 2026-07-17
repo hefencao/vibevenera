@@ -11,6 +11,9 @@ class ComicTranslationBackendPage extends StatefulWidget {
 class _ComicTranslationBackendPageState
     extends State<ComicTranslationBackendPage> {
   late String backend;
+  late String activeProfileId;
+  late List<ComicTranslationRemoteProfile> profiles;
+  late final TextEditingController profileName;
   late final TextEditingController endpoint;
   late final TextEditingController model;
   late final TextEditingController additionalPrompt;
@@ -20,20 +23,42 @@ class _ComicTranslationBackendPageState
   @override
   void initState() {
     backend = appdata.settings['comicTranslationBackend'] as String;
+    profiles = (appdata.settings['comicTranslationRemoteProfiles'] as List)
+        .map((value) => ComicTranslationRemoteProfile.fromJson(
+              Map<String, dynamic>.from(value as Map),
+            ))
+        .toList();
+    if (profiles.isEmpty) {
+      profiles.add(ComicTranslationRemoteProfile(
+        id: 'default',
+        name: appdata.settings['comicTranslationRemoteModel'] as String,
+        endpoint: appdata.settings['comicTranslationRemoteEndpoint'] as String,
+        model: appdata.settings['comicTranslationRemoteModel'] as String,
+        additionalPrompt:
+            appdata.settings['comicTranslationAdditionalPrompt'] as String,
+      ));
+    }
+    activeProfileId = appdata.settings['comicTranslationRemoteProfile'] as String;
+    if (!profiles.any((profile) => profile.id == activeProfileId)) {
+      activeProfileId = profiles.first.id;
+    }
+    final profile = _activeProfile;
+    profileName = TextEditingController(text: profile.name);
     endpoint = TextEditingController(
-      text: appdata.settings['comicTranslationRemoteEndpoint'] as String,
+      text: profile.endpoint,
     );
     model = TextEditingController(
-      text: appdata.settings['comicTranslationRemoteModel'] as String,
+      text: profile.model,
     );
     additionalPrompt = TextEditingController(
-      text: appdata.settings['comicTranslationAdditionalPrompt'] as String,
+      text: profile.additionalPrompt,
     );
     super.initState();
   }
 
   @override
   void dispose() {
+    profileName.dispose();
     endpoint.dispose();
     model.dispose();
     additionalPrompt.dispose();
@@ -151,6 +176,50 @@ class _ComicTranslationBackendPageState
                 ),
               ),
               if (backend == 'openaiCompatible') ...[
+                ListTile(
+                  title: Text('Saved remote model'.tl),
+                  trailing: DropdownButton<String>(
+                    value: activeProfileId,
+                    items: profiles.map((profile) => DropdownMenuItem(
+                      value: profile.id,
+                      child: SizedBox(
+                        width: 150,
+                        child: Text(
+                          profile.name.isNotEmpty
+                              ? profile.name
+                              : profile.model.isNotEmpty
+                                  ? profile.model
+                                  : 'Remote model'.tl,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    )).toList(),
+                    onChanged: working ? null : (value) => _selectProfile(value!),
+                  ),
+                ),
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  children: [
+                    TextButton.icon(
+                      onPressed: working ? null : _newProfile,
+                      icon: const Icon(Icons.add),
+                      label: Text('Save as new'.tl),
+                    ),
+                    TextButton.icon(
+                      onPressed: working ? null : _deleteProfile,
+                      icon: const Icon(Icons.delete_outline),
+                      label: Text('Delete profile'.tl),
+                    ),
+                  ],
+                ).paddingHorizontal(16),
+                TextField(
+                  controller: profileName,
+                  decoration: InputDecoration(
+                    labelText: 'Profile name'.tl,
+                    border: const OutlineInputBorder(),
+                  ),
+                ).paddingHorizontal(16).paddingVertical(6),
                 TextField(
                   controller: endpoint,
                   decoration: InputDecoration(
@@ -184,7 +253,8 @@ class _ComicTranslationBackendPageState
                   autocorrect: false,
                   decoration: InputDecoration(
                     labelText: 'API key'.tl,
-                    hintText: ComicTranslationSecrets.instance.hasApiKey
+                    hintText: ComicTranslationSecrets.instance
+                            .hasApiKey(activeProfileId)
                         ? 'Configured; leave empty to keep it'.tl
                         : null,
                     border: const OutlineInputBorder(),
@@ -202,7 +272,8 @@ class _ComicTranslationBackendPageState
                 alignment: WrapAlignment.end,
                 spacing: 8,
                 children: [
-                  if (ComicTranslationSecrets.instance.hasApiKey)
+                  if (ComicTranslationSecrets.instance
+                      .hasApiKey(activeProfileId))
                     TextButton(
                       onPressed: working ? null : _clearApiKey,
                       child: Text('Clear API key'.tl),
@@ -233,6 +304,105 @@ class _ComicTranslationBackendPageState
         ),
       ],
     );
+  }
+
+  ComicTranslationRemoteProfile get _activeProfile =>
+      profiles.firstWhere((profile) => profile.id == activeProfileId);
+
+  ComicTranslationRemoteProfile _profileFromFields(String id) =>
+      ComicTranslationRemoteProfile(
+        id: id,
+        name: profileName.text.trim().isEmpty
+            ? model.text.trim()
+            : profileName.text.trim(),
+        endpoint: endpoint.text.trim(),
+        model: model.text.trim(),
+        additionalPrompt: additionalPrompt.text.trim(),
+      );
+
+  void _updateActiveProfile() {
+    final index = profiles.indexWhere((profile) => profile.id == activeProfileId);
+    profiles[index] = _profileFromFields(activeProfileId);
+  }
+
+  void _applyProfile(ComicTranslationRemoteProfile profile) {
+    profileName.text = profile.name;
+    endpoint.text = profile.endpoint;
+    model.text = profile.model;
+    additionalPrompt.text = profile.additionalPrompt;
+    apiKey.clear();
+  }
+
+  Future<void> _selectProfile(String id) async {
+    setState(() => working = true);
+    final oldId = activeProfileId;
+    _updateActiveProfile();
+    if (apiKey.text.isNotEmpty) {
+      await ComicTranslationSecrets.instance.setApiKey(oldId, apiKey.text);
+    }
+    activeProfileId = id;
+    _applyProfile(_activeProfile);
+    final profile = _activeProfile;
+    appdata.settings['comicTranslationRemoteProfiles'] =
+        profiles.map((profile) => profile.toJson()).toList();
+    appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
+    appdata.settings['comicTranslationRemoteEndpoint'] = profile.endpoint;
+    appdata.settings['comicTranslationRemoteModel'] = profile.model;
+    appdata.settings['comicTranslationAdditionalPrompt'] =
+        profile.additionalPrompt;
+    await appdata.saveData();
+    ComicTranslationRuntime.instance.configure();
+    if (mounted) setState(() => working = false);
+  }
+
+  Future<void> _newProfile() async {
+    final error = _validate();
+    if (error != null) {
+      context.showMessage(message: error);
+      return;
+    }
+    final newApiKey = apiKey.text;
+    _updateActiveProfile();
+    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    final current = _profileFromFields(id);
+    final profile = ComicTranslationRemoteProfile(
+      id: id,
+      name: current.name.isEmpty
+          ? '${'Remote model'.tl} ${profiles.length + 1}'
+          : '${current.name} ${profiles.length + 1}',
+      endpoint: current.endpoint,
+      model: current.model,
+      additionalPrompt: current.additionalPrompt,
+    );
+    profiles.add(profile);
+    activeProfileId = id;
+    _applyProfile(profile);
+    apiKey.text = newApiKey;
+    setState(() {});
+    await _save();
+  }
+
+  Future<void> _deleteProfile() async {
+    final id = activeProfileId;
+    profiles.removeWhere((profile) => profile.id == id);
+    await ComicTranslationSecrets.instance.removeProfile(id);
+    if (profiles.isEmpty) {
+      profiles.add(const ComicTranslationRemoteProfile(
+        id: 'default',
+        name: '',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        model: '',
+        additionalPrompt: '',
+      ));
+    }
+    activeProfileId = profiles.first.id;
+    _applyProfile(_activeProfile);
+    appdata.settings['comicTranslationRemoteProfiles'] =
+        profiles.map((profile) => profile.toJson()).toList();
+    appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
+    await appdata.saveData();
+    ComicTranslationRuntime.instance.configure();
+    if (mounted) setState(() {});
   }
 
   String? _validate() {
@@ -283,13 +453,21 @@ class _ComicTranslationBackendPageState
       return false;
     }
     setState(() => working = true);
+    _updateActiveProfile();
+    final profile = _activeProfile;
     appdata.settings['comicTranslationBackend'] = backend;
-    appdata.settings['comicTranslationRemoteEndpoint'] = endpoint.text.trim();
-    appdata.settings['comicTranslationRemoteModel'] = model.text.trim();
+    appdata.settings['comicTranslationRemoteProfiles'] =
+        profiles.map((profile) => profile.toJson()).toList();
+    appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
+    appdata.settings['comicTranslationRemoteEndpoint'] = profile.endpoint;
+    appdata.settings['comicTranslationRemoteModel'] = profile.model;
     appdata.settings['comicTranslationAdditionalPrompt'] =
-        additionalPrompt.text.trim();
+        profile.additionalPrompt;
     if (apiKey.text.isNotEmpty) {
-      await ComicTranslationSecrets.instance.setApiKey(apiKey.text);
+      await ComicTranslationSecrets.instance.setApiKey(
+        activeProfileId,
+        apiKey.text,
+      );
       apiKey.clear();
     }
     await appdata.saveData();
@@ -300,7 +478,7 @@ class _ComicTranslationBackendPageState
 
   Future<void> _clearApiKey() async {
     setState(() => working = true);
-    await ComicTranslationSecrets.instance.setApiKey('');
+    await ComicTranslationSecrets.instance.setApiKey(activeProfileId, '');
     ComicTranslationRuntime.instance.configure();
     if (mounted) setState(() => working = false);
   }
@@ -338,8 +516,13 @@ class _ComicTranslationBackendPageState
         previousPages: const [],
       ));
       if (!mounted) return;
+      final metrics = translator is ComicTextTranslationEngineDiagnostics
+          ? (translator as ComicTextTranslationEngineDiagnostics).lastRunMetrics
+          : null;
       context.showMessage(
-        message: '${timer.elapsedMilliseconds}ms · ${result.translations['test']}',
+        message: '${timer.elapsedMilliseconds}ms'
+            '${metrics == null ? '' : ' · ${metrics.batchDurations.length} batch'}'
+            ' · ${result.translations['test']}',
       );
     } catch (value) {
       if (mounted) context.showMessage(message: value.toString());
@@ -362,11 +545,19 @@ class _ComicTranslationBenchmarkPageState
   String? imagePath;
   ComicTranslationBenchmarkResult? result;
   Object? error;
+  List<String> rawResponses = const [];
+  bool showRawResponses = false;
   bool running = false;
   int runs = 3;
   int analysisSide = 1600;
   String sourceLanguage = 'ja';
   String targetLanguage = 'zh-CN';
+
+  @override
+  void initState() {
+    super.initState();
+    imagePath = appdata.implicitData['comicTranslationBenchmarkImage'] as String?;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -474,6 +665,25 @@ class _ComicTranslationBenchmarkPageState
             ).paddingVertical(12),
           if (error != null)
             SelectableText(error.toString()).paddingVertical(12),
+          if (rawResponses.isNotEmpty) ...[
+            TextButton.icon(
+              onPressed: () => setState(() {
+                showRawResponses = !showRawResponses;
+              }),
+              icon: Icon(showRawResponses
+                  ? Icons.visibility_off_outlined
+                  : Icons.visibility_outlined),
+              label: Text((showRawResponses
+                  ? 'Hide raw response'
+                  : 'Show raw response').tl),
+            ),
+            if (showRawResponses)
+              SelectableText(rawResponses
+                  .asMap()
+                  .entries
+                  .map((entry) => 'Batch ${entry.key + 1}:\n${entry.value}')
+                  .join('\n\n')),
+          ],
           if (result != null) ...[
             const Divider(),
             Text('OCR load: ${result!.ocrLoadTime.inMilliseconds}ms'),
@@ -508,6 +718,8 @@ class _ComicTranslationBenchmarkPageState
       ext: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
     );
     if (selected != null && mounted) {
+      appdata.implicitData['comicTranslationBenchmarkImage'] = selected.path;
+      appdata.writeImplicitData();
       setState(() {
         imagePath = selected.path;
         result = null;
@@ -521,6 +733,8 @@ class _ComicTranslationBenchmarkPageState
       running = true;
       result = null;
       error = null;
+      rawResponses = const [];
+      showRawResponses = false;
     });
     final uri = Uri.file(imagePath!).toString();
     final pages = List.generate(
@@ -541,12 +755,33 @@ class _ComicTranslationBenchmarkPageState
         targetLanguage: targetLanguage,
         maxAnalysisSide: analysisSide,
       );
-      if (mounted) setState(() => result = value);
+      final responses = _lastRawResponses();
+      if (mounted) {
+        setState(() {
+          result = value;
+          rawResponses = responses;
+        });
+      }
     } catch (value) {
-      if (mounted) setState(() => error = value);
+      final responses = _lastRawResponses();
+      if (mounted) {
+        setState(() {
+          error = value;
+          rawResponses = responses;
+        });
+      }
     } finally {
       if (mounted) setState(() => running = false);
     }
+  }
+
+  List<String> _lastRawResponses() {
+    final engine = ComicTranslationEngineRegistry.instance.translationEngine;
+    if (engine is! ComicTextTranslationEngineDiagnostics) return const [];
+    final diagnostics = engine as ComicTextTranslationEngineDiagnostics;
+    return diagnostics.lastRawResponses
+        .where((value) => value.isNotEmpty)
+        .toList();
   }
 
   int _percentile(List<Duration> values, double percentile) {
@@ -559,6 +794,7 @@ class _ComicTranslationBenchmarkPageState
 
   Widget _buildSample(ComicTranslationBenchmarkSample sample, int index) {
     final metrics = sample.ocrMetrics;
+    final translationMetrics = sample.translationMetrics;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -594,8 +830,17 @@ class _ComicTranslationBenchmarkPageState
             '${metrics.cleanOverlayEncode.inMilliseconds}ms',
             style: ts.s12,
           ),
+        if (translationMetrics != null)
+          Text(
+            'remote=${translationMetrics.elapsed.inMilliseconds}ms · '
+            'batches=${translationMetrics.batchDurations.length} '
+            '[${translationMetrics.batchDurations.map((value) => value.inMilliseconds).join(', ')}]ms · '
+            'units=${translationMetrics.unitCount} · '
+            'chars=${translationMetrics.sourceCharacters}',
+            style: ts.s12,
+          ),
         SelectableText(
-          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
+          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
           style: ts.s12,
         ),
         SelectableText(

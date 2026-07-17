@@ -24,7 +24,7 @@ final class AndroidPaddleComicOcrEngine
 
   @override
   String get modelVersion =>
-      '${ComicTranslationModelManager.bundle.version}:bubble-v7:pixel-mask-v3';
+      '${ComicTranslationModelManager.bundle.version}:bubble-v11:pixel-mask-v4';
 
   @override
   bool get supportsAnimatedPosterFrame => false;
@@ -116,12 +116,19 @@ final class AndroidPaddleComicOcrEngine
           xs.reduce((a, b) => a < b ? a : b);
       final boxHeight = ys.reduce((a, b) => a > b ? a : b) -
           ys.reduce((a, b) => a < b ? a : b);
+      final verticalRatio = input.sourceLanguage
+                  .split(RegExp('[-_]'))
+                  .first
+                  .toLowerCase() ==
+              'ja'
+          ? 0.95
+          : 1.05;
       return ComicOcrRegion(
         id: region['id'] as String,
         polygon: points,
         text: region['text'] as String,
         confidence: (region['confidence'] as num).toDouble(),
-        orientation: boxHeight > boxWidth * 1.3
+        orientation: boxHeight > boxWidth * verticalRatio
             ? ComicTextOrientation.vertical
             : ComicTextOrientation.horizontal,
         kind: ComicTextKind.unknown,

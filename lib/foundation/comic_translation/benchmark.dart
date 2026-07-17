@@ -10,12 +10,15 @@ final class ComicTranslationBenchmarkSample {
   final Duration ocrTime;
   final Duration translationTime;
   final ComicOcrRunMetrics? ocrMetrics;
+  final ComicTextTranslationRunMetrics? translationMetrics;
   final int regionCount;
   final int bubbleCount;
   final int sourceMaskCount;
   final List<String> sourceTexts;
   final List<double> sourceConfidences;
   final List<int?> bubbleGroupIds;
+  final List<String?> translationUnitIds;
+  final List<int?> translationUnitOrders;
   final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
@@ -26,12 +29,15 @@ final class ComicTranslationBenchmarkSample {
     required this.ocrTime,
     required this.translationTime,
     required this.ocrMetrics,
+    required this.translationMetrics,
     required this.regionCount,
     required this.bubbleCount,
     required this.sourceMaskCount,
     required this.sourceTexts,
     required this.sourceConfidences,
     required this.bubbleGroupIds,
+    required this.translationUnitIds,
+    required this.translationUnitOrders,
     required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
@@ -130,6 +136,14 @@ final class ComicTranslationBenchmark {
         );
         final translation = await pair.translator.translate(request);
         final translatedRegions = request.expandUnitTranslations(translation);
+        final unitIds = <String, String>{};
+        final unitOrders = <String, int>{};
+        for (final unit in request.units) {
+          for (var i = 0; i < unit.regionIds.length; i++) {
+            unitIds[unit.regionIds[i]] = unit.id;
+            unitOrders[unit.regionIds[i]] = i;
+          }
+        }
         final rssAfter = ProcessInfo.currentRss;
         if (rssAfter > maxObservedRss) maxObservedRss = rssAfter;
         samples.add(ComicTranslationBenchmarkSample(
@@ -140,6 +154,11 @@ final class ComicTranslationBenchmark {
           ocrMetrics: pair.ocr is ComicOcrEngineDiagnostics
               ? (pair.ocr as ComicOcrEngineDiagnostics).lastRunMetrics
               : null,
+          translationMetrics:
+              pair.translator is ComicTextTranslationEngineDiagnostics
+                  ? (pair.translator as ComicTextTranslationEngineDiagnostics)
+                      .lastRunMetrics
+                  : null,
           regionCount: artifact.regions.length,
           bubbleCount: artifact.regions
               .map((region) => region.bubbleGroupId)
@@ -155,6 +174,10 @@ final class ComicTranslationBenchmark {
               artifact.regions.map((region) => region.confidence).toList(),
           bubbleGroupIds:
               artifact.regions.map((region) => region.bubbleGroupId).toList(),
+          translationUnitIds:
+              artifact.regions.map((region) => unitIds[region.id]).toList(),
+          translationUnitOrders:
+              artifact.regions.map((region) => unitOrders[region.id]).toList(),
           translatedTexts: artifact.regions
               .map((region) => translatedRegions[region.id]!)
               .toList(),

@@ -1,6 +1,6 @@
 # Comic Translation Architecture
 
-> 当前架构，更新于 2026-07-16。漫画翻译是 Reader 图片管线的旁路消费者，
+> 当前架构，更新于 2026-07-17。漫画翻译是 Reader 图片管线的旁路消费者，
 > 不属于下载、WebP/GIF 解码或 present 管线。
 
 ## 1. 边界
@@ -21,9 +21,11 @@ ComicTranslationSession                            页面策略/串行调度
 设置中的“翻译模型与 API”是模型、远程后端和 benchmark 的统一入口。远程翻译当前提供
 OpenAI-compatible Chat Completions adapter；endpoint、model 可配置，API key 单独写入
 本机 `comic_translation_secrets.json`，不进入 appdata、数据同步或翻译 artifact。
-同一 `bubbleGroupId` 的 OCR 行/列会先合并为一个翻译 unit，远程模型联合理解整个气泡，再返回与
+OCR 行/列先按 bubble、背景和文字尺寸归一化后的横/竖轴距离合并为翻译 unit，远程模型联合理解整个气泡，再返回与
 `regionIds/sourceLines` 等长且一一对应的译文数组。译文分别写回原 region，不再只放在 anchor region。
-当前 overlay 不渲染的 `soundEffect` 不进入 unit 或远程上下文。
+纯标点/无意义字符不进入远程请求。拟声词默认不翻译，用户显式开启后才进入 unit；该选项参与
+translation cache key。Reader 将 clean overlay 裁剪到实际有译文的 region mask；跳过的拟声词等区域保留原文，
+不会因一个跳过区块而放弃其他区域的原生修复。
 协议和用户追加提示词的版本摘要纳入 translation cache key。OpenAI-compatible client 在 translator
 load/unload 生命周期内复用连接，不再逐页重建。
 
@@ -100,11 +102,31 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - overlay 有独立 `RepaintBoundary`；
 - 动图 Texture 更新不重绘文字；
 - artifact 通过每页 `ValueListenable` 发布，不调用 Reader `setState`；
-- 气泡候选先发现和去重，再给所有 OCR 行分配稳定 `bubbleGroupId`。页漫（日文及 `auto`/其他）按每个
-  OCR 行/列的原 polygon 独立定位，保留原 orientation，共享/连通气泡不得把单列扩成整气泡或改成横排。
-  条漫（韩文）保留按 group id 的整气泡布局，利用更大的气泡安全区和字号；无气泡时才用主轴重叠合并。
-- 联通气泡先按相邻同行/同列文字形成文本组；只有存在多个文本组时，才用较高水位的距离核心或明显凹陷
-  触发 Voronoi 拆分。单个气泡里的相邻多列不会仅因轮廓不规则被拆开。
+- OCR detector 产生的 region 是文字边界而不是语义分组。Dart 侧共享分组器综合气泡 ID/轮廓、背景色、
+  OCR 方向、尺寸和空间邻接建立翻译 unit；不同且不重叠的气泡是硬边界，空气泡信息由保守位置聚类补足。
+- 分组内重新建立竖排列 band 或横排行 band，再按竖排右至左/列内上至下、横排上至下/行内左至右排序。
+  engine 和 overlay 使用同一分组结果，联合翻译逐 region 写回；source band 只是排版先验，不是译文的强制
+  容器。bubble 的安全内接区域才是硬边界，OCR box 仅提供源字号、源墨迹面积、原列/行数和原位置。
+- 每个 bubble block 枚举保持句序的连续 band 合并方案；每种方案同时评估贴近原 band 的 anchored lane 与在
+  bubble 内重新分配的 distributed lane。对每个方案以目标字体真实 glyph/paragraph 测量候选字号、横排换行数
+  或竖排换列数，最小化“目标墨迹面积相对源面积及字符数变化”“源字号偏差”“列/行拓扑偏差”和“位置偏差”的加权
+  代价。这样会优先尊重原排版，但在译文长度或气泡空间需要时允许换行、换列或合并句子，而不是把译文硬塞进 OCR 框
+  或无条件铺满气泡。解析出的 plan 按显示矩形缓存在 painter，滚动重绘不重新测量。
+- 联通气泡只将 OCR 区块中心分配到已经分离的距离核心，不再使用文字位置聚类创造拆分。气泡候选降低最低
+  凸包实度以接纳凹形轮廓，普通近凸气泡仍不执行 Voronoi 拆分。
+- 排版方向以 OCR polygon 的宽高关系重新确认，竖向区块不会因为识别方向阈值过高而进入横排。
+- Reader session 汇总同一漫画已完成区块的源/目标长度缩放值作为字号先验；它不是字号上限。
+  源字号按 `sqrt(OCR box area / source character count)` 估算，同一 band 的碎片先合并成一句译文，再参与
+  候选排版评分，避免包含两列文字的宽 OCR box 被误当成双倍字号。
+- 远程配置支持保存多组 endpoint/model/prompt/API key 并即时切换；API key 仍只写入本机 secrets 文件。
+- 一页远程翻译按完整气泡 unit 分批，每批最多 16 个 unit/960 个源字符，并发 2 批；普通漫画页通常只发一个请求，单个 unit 不拆分。
+  不限制 completion token，避免兼容接口的隐藏推理占满预算后返回空正文。benchmark 记录每批耗时、unit 数、字符数和原始响应，
+  用于区分连接延迟与大请求的模型生成/排队延迟。
+- 当前翻译协议要求整批 JSON 与逐 region 一一对应，且实测慢模型约 94% completion token 是正文前的隐藏推理；仅打开 SSE
+  不能让这些模型在一秒内产生可显示译文。流式显示需要后端支持按 unit 输出 NDJSON/SSE，并在 session 增加 partial artifact，
+  因此不以破坏原子缓存和排版一致性的方式直接设置 `stream=true`。完整 OCR/translation artifact 已按内容、模型、语言和上下文缓存；
+  短句级缓存会忽略人物、语气和上下文，暂不作为正确性缓存。内建 prompt 保留输出协议所需规则但已压缩；不设置固定
+  `max_tokens`，避免推理模型把预算消耗在隐藏 reasoning 后返回空或不完整 JSON。
 - 长条页分 tile 时先给 group id 加 tile namespace，合并结果后再以背景色和重叠轮廓对跨 tile 的
   同一气泡去重，避免一个跨分块气泡被拆成两段。
 - 竖排区块保持从右到左分列；排版按目标字体的实际 glyph 宽高测量，不以源文字数或
@@ -117,11 +139,12 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   OpenCV Telea inpainting，并输出与分析图同尺度、其余像素透明的 clean overlay；Reader 先合成
   clean overlay 再画译文，因此渐变和纹理不再被单色块替换。没有可靠像素 mask 时以 OCR quad
   作为修复 mask，而不是让原文完整残留。未膨胀的强前景像素仍用于采样译文字色。
+- 原生 OCR 在 bubble 分割后剔除“低置信度、无 bubble、且与其他文字不构成空间组”的孤立 region；它们既不进入
+  OCR artifact/远程请求，也不写入 clean overlay，避免眼睛、线稿等误识别被擦除或翻译。
 - OCR 主检测后会用轻量全局轮廓扫描寻找“未包含任何 OCR 中心、内部存在文字笔画”的浅色闭合
   气泡，只对这些候选 crop 做一次二次 OCR；正常页没有候选时不会增加 ONNX 推理。该路径补回
   完全漏检的常见白色气泡，但不覆盖彩色/无边框气泡、框外旁白或艺术字。benchmark 显示
   proposal 时间、候选/补回数量和 clean-overlay PNG 大小，便于直接发现误检与性能退化。
-  MVP 继续跳过拟声词。
 
 后续 learned balloon detector 仍用于覆盖彩色、开放轮廓和复杂艺术气泡；当前 clean patch 是
 传统 inpainting，不是生成式语义补全。

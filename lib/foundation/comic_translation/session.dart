@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:venera/foundation/cache_manager.dart';
 
 import 'engine.dart';
+import 'grouping.dart';
 import 'input_resolver.dart';
 import 'models.dart';
 import 'policy.dart';
@@ -44,10 +46,14 @@ final class ComicTranslationSession {
   final Map<String, ComicTranslationPageIdentity> _identities = {};
   final Map<String, _QueuedTranslation> _queue = {};
   final Map<String, Map<int, ComicTranslationArtifact>> _readyPages = {};
+  final Map<String, List<double>> _fontScaleSamples = {};
+  final ValueNotifier<double> _fontScale = ValueNotifier(1);
 
   bool get enabled => _enabled;
 
   bool get backendReady => engines.ready;
+
+  ValueListenable<double> get fontScaleListenable => _fontScale;
 
   ValueListenable<ComicTranslationPageState> listenable(
     ComicTranslationPageIdentity identity,
@@ -270,10 +276,12 @@ final class ComicTranslationSession {
           entry.translatedTexts,
         ]).toList())))
         .toString();
+    final translationModelVersion =
+        '${translator.modelVersion}:sfx=${policy.translateSoundEffects}';
     var translation = await ComicTranslationStore.instance.findTranslation(
       ocrDigest: ocr.digest,
       engineId: translator.id,
-      modelVersion: translator.modelVersion,
+      modelVersion: translationModelVersion,
       targetLanguage: targetLanguage,
       contextDigest: contextDigest,
     );
@@ -289,6 +297,7 @@ final class ComicTranslationSession {
         ocr: ocr,
         targetLanguage: targetLanguage,
         previousPages: context,
+        translateSoundEffects: policy.translateSoundEffects,
       );
       final result = await translator.translate(request);
       final translatedRegions = request.expandUnitTranslations(result);
@@ -313,7 +322,7 @@ final class ComicTranslationSession {
         contentDigest: input.contentDigest,
         ocrDigest: ocr.digest,
         engineId: translator.id,
-        modelVersion: translator.modelVersion,
+        modelVersion: translationModelVersion,
         sourceLanguage: ocr.sourceLanguage,
         targetLanguage: targetLanguage,
         contextDigest: contextDigest,
@@ -325,8 +334,10 @@ final class ComicTranslationSession {
       );
       await ComicTranslationStore.instance.storeTranslation(translation);
     }
+    if (_disposed) return;
     _readyPages.putIfAbsent(identity.chapterId, () => {})[identity.pageIndex] =
         translation;
+    _updateFontScale(identity.key, translation);
     _setState(
       identity,
       ComicTranslationPageState(
@@ -335,6 +346,28 @@ final class ComicTranslationSession {
         cleanOverlayPng: ocr.cleanOverlayPng,
       ),
     );
+  }
+
+  void _updateFontScale(
+    String key,
+    ComicTranslationArtifact artifact,
+  ) {
+    _fontScaleSamples[key] = artifact.regions
+        .where((region) =>
+            region.kind != ComicTextKind.soundEffect &&
+            region.sourceText.isNotEmpty &&
+            region.translatedText.isNotEmpty)
+        .map((region) => math.sqrt(
+              region.sourceText.runes.length /
+                  region.translatedText.runes.length,
+            ).clamp(0.92, 1.10))
+        .toList();
+    final samples = _fontScaleSamples.values
+        .expand((values) => values)
+        .toList();
+    _fontScale.value = samples.isEmpty
+        ? 1
+        : samples.reduce((sum, value) => sum + value) / samples.length;
   }
 
   List<ComicTranslationContextEntry> _translationContext(
@@ -349,12 +382,29 @@ final class ComicTranslationSession {
     return pages.map((page) {
       final artifact = chapter[page]!;
       final regions = artifact.regions
-          .where((region) => region.kind != ComicTextKind.soundEffect)
+          .where((region) => region.translatedText.trim().isNotEmpty)
           .toList();
+      final grouping = ComicTextGrouping(
+        imageWidth: artifact.imageWidth,
+        imageHeight: artifact.imageHeight,
+        sourceLanguage: artifact.sourceLanguage,
+      );
+      final ordered = grouping.resolve(regions.map((region) => ComicTextRegion(
+        value: region,
+        id: region.ocrRegionId,
+        text: region.sourceText,
+        polygon: region.polygon,
+        orientation: region.orientation,
+        backgroundArgb: region.backgroundArgb,
+        bubbleGroupId: region.bubbleGroupId,
+        bubblePolygon: region.bubblePolygon,
+      )).toList()).expand((group) =>
+          group.regions.map((region) => region.value)).toList();
       return ComicTranslationContextEntry(
         pageIndex: page,
-        sourceTexts: regions.map((region) => region.sourceText).toList(),
-        translatedTexts: regions.map((region) => region.translatedText).toList(),
+        sourceTexts: ordered.map((region) => region.sourceText).toList(),
+        translatedTexts:
+            ordered.map((region) => region.translatedText).toList(),
       );
     }).toList();
   }
@@ -378,6 +428,7 @@ final class ComicTranslationSession {
     for (final state in _states.values) {
       state.dispose();
     }
+    _fontScale.dispose();
     if (!_running) unawaited(_releaseEngines());
   }
 

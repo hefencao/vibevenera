@@ -275,6 +275,18 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             useDeviceSettings: useDeviceSpecificSettings,
           ),
         ),
+        SliverAnimatedVisibility(
+          visible: _settingValue('enableComicTranslation') == true,
+          child: _SwitchSetting(
+            title: 'Translate sound effects'.tl,
+            subtitle: 'May erase large artwork when recognition is inaccurate'.tl,
+            settingKey: 'comicTranslationSoundEffects',
+            onChanged: () => widget.onChanged?.call('comicTranslation'),
+            comicId: widget.comicId,
+            comicSource: widget.comicSource,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
         const Divider().toSliver(),
         if (widget.comicId == null)
           ListTile(

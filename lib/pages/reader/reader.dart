@@ -23,6 +23,7 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/comic_translation/grouping.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
 import 'package:venera/foundation/comic_translation/policy.dart';
 import 'package:venera/foundation/comic_translation/session.dart';
@@ -552,6 +553,11 @@ class _ReaderState extends State<Reader>
       ) as String,
       targetLanguage: targetLanguage,
       policy: ComicTranslationPolicy(
+        translateSoundEffects: appdata.settings.getReaderSetting(
+          cid,
+          type.sourceKey,
+          'comicTranslationSoundEffects',
+        ) as bool,
         contextPages: appdata.settings.getReaderSetting(
           cid,
           type.sourceKey,

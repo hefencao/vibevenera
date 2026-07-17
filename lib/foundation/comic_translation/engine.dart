@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'grouping.dart';
 import 'models.dart';
 
 final class ComicOcrInput {
@@ -43,59 +45,147 @@ final class ComicTranslationUnit {
     required this.sourceLines,
   });
 
-  static List<ComicTranslationUnit> fromOcr(ComicOcrArtifact ocr) {
-    final regions = [...ocr.regions]
-      ..sort((a, b) {
-        final order = a.readingOrder.compareTo(b.readingOrder);
-        return order == 0 ? a.id.compareTo(b.id) : order;
-      });
-    final groups = <String, List<ComicOcrRegion>>{};
-    for (final region in regions) {
-      if (region.kind == ComicTextKind.soundEffect) continue;
-      final id = region.bubbleGroupId == null
-          ? region.id
-          : 'bubble:${region.bubbleGroupId}';
-      groups.putIfAbsent(id, () => []).add(region);
-    }
-    return groups.entries.map((entry) {
-      final regions = entry.value;
-      final vertical = regions
-          .where((region) =>
-              region.orientation == ComicTextOrientation.vertical)
-          .length;
-      if (vertical * 2 > regions.length) {
-        regions.sort((a, b) {
-          final column = _centerX(b).compareTo(_centerX(a));
-          return column != 0 ? column : _top(a).compareTo(_top(b));
-        });
-      } else if (vertical * 2 < regions.length) {
-        regions.sort((a, b) {
-          final row = _top(a).compareTo(_top(b));
-          return row != 0 ? row : _left(a).compareTo(_left(b));
-        });
-      }
+  static List<ComicTranslationUnit> fromOcr(
+    ComicOcrArtifact ocr, {
+    bool translateSoundEffects = false,
+  }) {
+    final regions = ocr.regions
+        .where((region) =>
+            translateSoundEffects || region.kind != ComicTextKind.soundEffect)
+        .toList();
+    final grouping = ComicTextGrouping(
+      imageWidth: ocr.imageWidth,
+      imageHeight: ocr.imageHeight,
+      sourceLanguage: ocr.sourceLanguage,
+    );
+    final groups = grouping.resolve(regions.map((region) => ComicTextRegion(
+      value: region,
+      id: region.id,
+      text: region.text,
+      polygon: region.polygon,
+      orientation: region.orientation,
+      backgroundArgb: region.backgroundArgb,
+      bubbleGroupId: region.bubbleGroupId,
+      bubblePolygon: region.bubblePolygon,
+    )).toList());
+    final bodyThickness = _dominantBodyThickness(ocr, regions);
+    return groups.where((group) {
+      final members = group.regions.map((region) => region.value).toList();
+      return _hasMeaningfulText(members) &&
+          (translateSoundEffects ||
+              !_likelySoundEffect(ocr, members, bodyThickness));
+    }).map((group) {
+      final regions = group.regions.map((region) => region.value).toList();
       return ComicTranslationUnit(
-        id: entry.key,
+        id: group.key,
         regionIds: regions.map((region) => region.id).toList(),
         sourceLines: regions.map((region) => region.text).toList(),
       );
     }).toList();
   }
 
-  static double _left(ComicOcrRegion region) => region.polygon
-      .map((point) => point.x)
-      .reduce((value, next) => value < next ? value : next);
-
-  static double _top(ComicOcrRegion region) => region.polygon
-      .map((point) => point.y)
-      .reduce((value, next) => value < next ? value : next);
-
-  static double _centerX(ComicOcrRegion region) {
-    final xs = region.polygon.map((point) => point.x);
-    final left = xs.reduce((value, next) => value < next ? value : next);
-    final right = xs.reduce((value, next) => value > next ? value : next);
-    return (left + right) / 2;
+  static bool _hasMeaningfulText(List<ComicOcrRegion> regions) {
+    final runes = regions
+        .expand((region) => region.text.trim().runes)
+        .toList();
+    final meaningful = runes.where(_isMeaningfulRune).length;
+    return meaningful > 0 && !(meaningful == 1 && runes.length >= 3);
   }
+
+  static bool _likelySoundEffect(
+    ComicOcrArtifact ocr,
+    List<ComicOcrRegion> regions,
+    double bodyThickness,
+  ) {
+    if (regions.any((region) => region.kind == ComicTextKind.soundEffect)) {
+      return true;
+    }
+    if (regions.any((region) =>
+        region.bubbleGroupId != null || region.bubblePolygon != null)) {
+      return false;
+    }
+    final meaningful = regions
+        .expand((region) => region.text.runes)
+        .where(_isMeaningfulRune)
+        .toList();
+    if (meaningful.length > 12) return false;
+    final thickness = regions
+        .map((region) => _fontThickness(ocr, region))
+        .reduce(math.max);
+    final large = thickness >= bodyThickness * 1.55;
+    final oblique = regions.any(_isOblique);
+    final language =
+        ocr.sourceLanguage.split(RegExp('[-_]')).first.toLowerCase();
+    final katakana = meaningful
+        .where((rune) => rune >= 0x30a0 && rune <= 0x30ff)
+        .length;
+    return oblique || large ||
+        (language == 'ja' &&
+            meaningful.length <= 8 &&
+            katakana / meaningful.length >= 0.7);
+  }
+
+  static double _dominantBodyThickness(
+    ComicOcrArtifact ocr,
+    List<ComicOcrRegion> regions,
+  ) {
+    final values = regions
+        .where((region) => _hasMeaningfulText([region]))
+        .map((region) => _fontThickness(ocr, region))
+        .where((value) => value > 0)
+        .toList()
+      ..sort();
+    if (values.isEmpty) return 1;
+    var bestStart = 0;
+    var bestEnd = 1;
+    for (var start = 0; start < values.length; start++) {
+      var end = start + 1;
+      while (end < values.length && values[end] <= values[start] * 1.35) {
+        end++;
+      }
+      if (end - start > bestEnd - bestStart) {
+        bestStart = start;
+        bestEnd = end;
+      }
+    }
+    final cluster = values.sublist(bestStart, bestEnd);
+    return cluster[cluster.length ~/ 2];
+  }
+
+  static double _fontThickness(ComicOcrArtifact ocr, ComicOcrRegion region) {
+    final xs = region.polygon.map((point) => point.x * ocr.imageWidth);
+    final ys = region.polygon.map((point) => point.y * ocr.imageHeight);
+    final width = xs.reduce(math.max) - xs.reduce(math.min);
+    final height = ys.reduce(math.max) - ys.reduce(math.min);
+    final characters = region.text
+        .replaceAll(RegExp(r'\s'), '')
+        .runes
+        .length
+        .clamp(1, 1000);
+    return math.sqrt(width * height / characters);
+  }
+
+  static bool _isOblique(ComicOcrRegion region) {
+    if (region.polygon.length < 2) return false;
+    final edge = region.polygon[1];
+    final start = region.polygon.first;
+    final dx = edge.x - start.x;
+    final dy = edge.y - start.y;
+    return dx.abs() > 0.0001 && (dy / dx).abs() > 0.18;
+  }
+
+  static bool _isMeaningfulRune(int rune) =>
+      rune >= 0x30 && rune <= 0x39 ||
+      rune >= 0x41 && rune <= 0x5a ||
+      rune >= 0x61 && rune <= 0x7a ||
+      rune >= 0xc0 && rune <= 0x2af ||
+      rune >= 0x370 && rune <= 0x52f ||
+      rune >= 0x3040 && rune <= 0x30ff ||
+      rune >= 0x31f0 && rune <= 0x31ff ||
+      rune >= 0x3400 && rune <= 0x9fff ||
+      rune >= 0xac00 && rune <= 0xd7af ||
+      rune >= 0xf900 && rune <= 0xfaff ||
+      rune >= 0xff10 && rune <= 0xff5a;
 }
 
 final class ComicTranslationRequest {
@@ -109,8 +199,12 @@ final class ComicTranslationRequest {
     required this.ocr,
     required this.targetLanguage,
     required this.previousPages,
+    bool translateSoundEffects = false,
     this.glossary = const {},
-  }) : units = ComicTranslationUnit.fromOcr(ocr);
+  }) : units = ComicTranslationUnit.fromOcr(
+          ocr,
+          translateSoundEffects: translateSoundEffects,
+        );
 
   Map<String, String> expandUnitTranslations(
     ComicTranslationResult result,
@@ -144,6 +238,26 @@ final class ComicTranslationResult {
   final Map<String, List<String>> translations;
 
   const ComicTranslationResult(this.translations);
+}
+
+final class ComicTextTranslationRunMetrics {
+  final Duration elapsed;
+  final List<Duration> batchDurations;
+  final int unitCount;
+  final int sourceCharacters;
+
+  const ComicTextTranslationRunMetrics({
+    required this.elapsed,
+    required this.batchDurations,
+    required this.unitCount,
+    required this.sourceCharacters,
+  });
+}
+
+abstract interface class ComicTextTranslationEngineDiagnostics {
+  ComicTextTranslationRunMetrics? get lastRunMetrics;
+
+  List<String> get lastRawResponses;
 }
 
 final class ComicOcrRunMetrics {
