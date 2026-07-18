@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:venera/network/app_dio.dart';
 
 import 'engine.dart';
+import 'models.dart';
 
 final class OpenAiCompatibleComicTranslationEngine
     implements ComicTextTranslationEngine, ComicTextTranslationEngineDiagnostics {
@@ -31,7 +32,7 @@ final class OpenAiCompatibleComicTranslationEngine
   String get id => 'openai-compatible:${sha256.convert(utf8.encode(endpoint))}';
 
   @override
-  String get modelVersion => '$model:bubble-unit-lines-v6:'
+  String get modelVersion => '$model:bubble-unit-lines-v22:'
       '${sha256.convert(utf8.encode(additionalPrompt.trim()))}';
 
   @override
@@ -130,6 +131,7 @@ final class OpenAiCompatibleComicTranslationEngine
     final systemPrompt = [
       'Translate comic OCR ${request.ocr.sourceLanguage == 'auto' ? '' : 'from ${request.ocr.sourceLanguage} '}to ${request.targetLanguage}; use prior pages only as context and preserve names and tone.',
       'Each unit is one balloon. Translate its ordered sourceLines jointly, then return one concise natural string per regionId in the same order without romanization or repeated full translations.',
+      'Preserve source punctuation and ellipses exactly. Where the translation needs an additional sentence or clause break absent from sourceLines, use only $comicTranslationBreakMarker as the separator and do not add ordinary punctuation.',
       if (preference.isNotEmpty)
         'Preference: $preference Do not change unit boundaries or output format.',
       'Return JSON only: {"translations":{"unitId":["text per region"]}}. Include every unitId exactly once; arrays must contain exactly sourceLines.length non-empty strings. A one-line unit may use one string.',

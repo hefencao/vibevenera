@@ -277,7 +277,8 @@ final class ComicTranslationSession {
         ]).toList())))
         .toString();
     final translationModelVersion =
-        '${translator.modelVersion}:sfx=${policy.translateSoundEffects}';
+        'artifact-v2:${translator.modelVersion}:'
+        'sfx=${policy.translateSoundEffects}';
     var translation = await ComicTranslationStore.instance.findTranslation(
       ocrDigest: ocr.digest,
       engineId: translator.id,
@@ -301,11 +302,37 @@ final class ComicTranslationSession {
       );
       final result = await translator.translate(request);
       final translatedRegions = request.expandUnitTranslations(result);
+      final memberships = <String, ({
+        String unitId,
+        int unitOrder,
+        int bandIndex,
+        ComicTextOrientation orientation,
+      })>{};
+      for (final unit in request.units) {
+        final orders = <String, int>{
+          for (var i = 0; i < unit.regionIds.length; i++) unit.regionIds[i]: i,
+        };
+        for (var band = 0; band < unit.bandRegionIds.length; band++) {
+          for (final regionId in unit.bandRegionIds[band]) {
+            memberships[regionId] = (
+              unitId: unit.id,
+              unitOrder: orders[regionId]!,
+              bandIndex: band,
+              orientation: unit.orientation,
+            );
+          }
+        }
+      }
       final regions = ocr.regions.map((region) {
+        final membership = memberships[region.id];
         return ComicTranslatedRegion(
           ocrRegionId: region.id,
           sourceText: region.text,
           translatedText: translatedRegions[region.id]!,
+          translationUnitId: membership?.unitId,
+          translationUnitOrder: membership?.unitOrder,
+          translationBandIndex: membership?.bandIndex,
+          translationOrientation: membership?.orientation,
           polygon: region.polygon,
           orientation: region.orientation,
           kind: region.kind,
@@ -343,7 +370,7 @@ final class ComicTranslationSession {
       ComicTranslationPageState(
         ComicTranslationPhase.ready,
         artifact: translation,
-        cleanOverlayPng: ocr.cleanOverlayPng,
+        cleanOverlayPng: policy.useCleanOverlay ? ocr.cleanOverlayPng : null,
       ),
     );
   }
@@ -359,7 +386,10 @@ final class ComicTranslationSession {
             region.translatedText.isNotEmpty)
         .map((region) => math.sqrt(
               region.sourceText.runes.length /
-                  region.translatedText.runes.length,
+                  region.translatedText
+                      .replaceAll(comicTranslationBreakMarker, '')
+                      .runes
+                      .length,
             ).clamp(0.92, 1.10))
         .toList();
     final samples = _fontScaleSamples.values
@@ -394,6 +424,7 @@ final class ComicTranslationSession {
         id: region.ocrRegionId,
         text: region.sourceText,
         polygon: region.polygon,
+        sourceMaskPolygons: region.sourceMaskPolygons,
         orientation: region.orientation,
         backgroundArgb: region.backgroundArgb,
         bubbleGroupId: region.bubbleGroupId,

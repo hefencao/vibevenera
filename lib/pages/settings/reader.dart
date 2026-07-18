@@ -287,6 +287,18 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             useDeviceSettings: useDeviceSpecificSettings,
           ),
         ),
+        SliverAnimatedVisibility(
+          visible: _settingValue('enableComicTranslation') == true,
+          child: _SwitchSetting(
+            title: 'Use clean translation overlay'.tl,
+            subtitle: 'Improves source text removal but may increase page transition raster cost'.tl,
+            settingKey: 'comicTranslationCleanOverlay',
+            onChanged: () => widget.onChanged?.call('comicTranslation'),
+            comicId: widget.comicId,
+            comicSource: widget.comicSource,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
         const Divider().toSliver(),
         if (widget.comicId == null)
           ListTile(

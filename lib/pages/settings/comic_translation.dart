@@ -581,6 +581,7 @@ class _ComicTranslationBenchmarkPageState
             trailing: DropdownButton<int>(
               value: runs,
               items: const [
+                DropdownMenuItem(value: 1, child: Text('1')),
                 DropdownMenuItem(value: 3, child: Text('3')),
                 DropdownMenuItem(value: 10, child: Text('10')),
               ],
@@ -840,11 +841,21 @@ class _ComicTranslationBenchmarkPageState
             style: ts.s12,
           ),
         SelectableText(
-          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
+          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} b${sample.translationBandIndices[i] ?? '-'} ${sample.translationUnitOrientations[i]?.name ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
           style: ts.s12,
         ),
+        if (sample.splitDiagnostics.isNotEmpty)
+          SelectableText(
+            'Split diagnostics:\n${sample.splitDiagnostics.join('\n')}',
+            style: ts.s12,
+          ),
+        if (sample.mergeDiagnostics.isNotEmpty)
+          SelectableText(
+            'Merge diagnostics:\n${sample.mergeDiagnostics.join('\n')}',
+            style: ts.s12,
+          ),
         SelectableText(
-          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? 'Translation backend is not configured'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i]}').join('\n')}',
+          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? 'Translation backend is not configured'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
           style: ts.s12,
         ),
       ],

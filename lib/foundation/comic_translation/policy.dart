@@ -7,6 +7,7 @@ final class ComicTranslationPolicy {
   final int maxAnalysisSide;
   final int contextPages;
   final bool translateSoundEffects;
+  final bool useCleanOverlay;
 
   const ComicTranslationPolicy({
     this.dragSubmissionDelay = const Duration(milliseconds: 180),
@@ -15,6 +16,7 @@ final class ComicTranslationPolicy {
     this.maxAnalysisSide = 1600,
     this.contextPages = 2,
     this.translateSoundEffects = false,
+    this.useCleanOverlay = true,
   });
 
   int effectiveImagePreloadPages(int configured) =>

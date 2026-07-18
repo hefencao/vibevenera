@@ -558,6 +558,11 @@ class _ReaderState extends State<Reader>
           type.sourceKey,
           'comicTranslationSoundEffects',
         ) as bool,
+        useCleanOverlay: appdata.settings.getReaderSetting(
+          cid,
+          type.sourceKey,
+          'comicTranslationCleanOverlay',
+        ) as bool,
         contextPages: appdata.settings.getReaderSetting(
           cid,
           type.sourceKey,

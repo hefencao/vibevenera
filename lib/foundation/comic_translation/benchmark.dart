@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'engine.dart';
+import 'grouping.dart';
 import 'input_resolver.dart';
 import 'models.dart';
 
@@ -19,6 +20,10 @@ final class ComicTranslationBenchmarkSample {
   final List<int?> bubbleGroupIds;
   final List<String?> translationUnitIds;
   final List<int?> translationUnitOrders;
+  final List<int?> translationBandIndices;
+  final List<ComicTextOrientation?> translationUnitOrientations;
+  final List<String> splitDiagnostics;
+  final List<String> mergeDiagnostics;
   final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
@@ -38,6 +43,10 @@ final class ComicTranslationBenchmarkSample {
     required this.bubbleGroupIds,
     required this.translationUnitIds,
     required this.translationUnitOrders,
+    required this.translationBandIndices,
+    required this.translationUnitOrientations,
+    required this.splitDiagnostics,
+    required this.mergeDiagnostics,
     required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
@@ -138,12 +147,53 @@ final class ComicTranslationBenchmark {
         final translatedRegions = request.expandUnitTranslations(translation);
         final unitIds = <String, String>{};
         final unitOrders = <String, int>{};
+        final bandIndices = <String, int>{};
+        final unitOrientations = <String, ComicTextOrientation>{};
         for (final unit in request.units) {
+          for (var band = 0; band < unit.bandRegionIds.length; band++) {
+            for (final regionId in unit.bandRegionIds[band]) {
+              bandIndices[regionId] = band;
+            }
+          }
           for (var i = 0; i < unit.regionIds.length; i++) {
             unitIds[unit.regionIds[i]] = unit.id;
             unitOrders[unit.regionIds[i]] = i;
+            unitOrientations[unit.regionIds[i]] = unit.orientation;
           }
         }
+        final grouping = ComicTextGrouping(
+          imageWidth: artifact.imageWidth,
+          imageHeight: artifact.imageHeight,
+          sourceLanguage: artifact.sourceLanguage,
+        );
+        final splitDiagnostics = grouping.diagnoseSplitRelations(
+          artifact.regions.map((region) => ComicTextRegion(
+            value: region,
+            id: region.id,
+            text: region.text,
+            polygon: region.polygon,
+            sourceMaskPolygons: region.sourceMaskPolygons,
+            orientation: region.orientation,
+            backgroundArgb: region.backgroundArgb,
+            bubbleGroupId: region.bubbleGroupId,
+            bubblePolygon: region.bubblePolygon,
+          )).toList(),
+          unitIds,
+        );
+        final mergeDiagnostics = grouping.diagnoseMergeRelations(
+          artifact.regions.map((region) => ComicTextRegion(
+            value: region,
+            id: region.id,
+            text: region.text,
+            polygon: region.polygon,
+            sourceMaskPolygons: region.sourceMaskPolygons,
+            orientation: region.orientation,
+            backgroundArgb: region.backgroundArgb,
+            bubbleGroupId: region.bubbleGroupId,
+            bubblePolygon: region.bubblePolygon,
+          )).toList(),
+          unitIds,
+        );
         final rssAfter = ProcessInfo.currentRss;
         if (rssAfter > maxObservedRss) maxObservedRss = rssAfter;
         samples.add(ComicTranslationBenchmarkSample(
@@ -178,6 +228,12 @@ final class ComicTranslationBenchmark {
               artifact.regions.map((region) => unitIds[region.id]).toList(),
           translationUnitOrders:
               artifact.regions.map((region) => unitOrders[region.id]).toList(),
+          translationBandIndices:
+              artifact.regions.map((region) => bandIndices[region.id]).toList(),
+          translationUnitOrientations: artifact.regions
+              .map((region) => unitOrientations[region.id]).toList(),
+          splitDiagnostics: splitDiagnostics,
+          mergeDiagnostics: mergeDiagnostics,
           translatedTexts: artifact.regions
               .map((region) => translatedRegions[region.id]!)
               .toList(),

@@ -38,11 +38,15 @@ final class ComicTranslationUnit {
   final String id;
   final List<String> regionIds;
   final List<String> sourceLines;
+  final ComicTextOrientation orientation;
+  final List<List<String>> bandRegionIds;
 
   const ComicTranslationUnit({
     required this.id,
     required this.regionIds,
     required this.sourceLines,
+    required this.orientation,
+    required this.bandRegionIds,
   });
 
   static List<ComicTranslationUnit> fromOcr(
@@ -63,6 +67,7 @@ final class ComicTranslationUnit {
       id: region.id,
       text: region.text,
       polygon: region.polygon,
+      sourceMaskPolygons: region.sourceMaskPolygons,
       orientation: region.orientation,
       backgroundArgb: region.backgroundArgb,
       bubbleGroupId: region.bubbleGroupId,
@@ -80,6 +85,9 @@ final class ComicTranslationUnit {
         id: group.key,
         regionIds: regions.map((region) => region.id).toList(),
         sourceLines: regions.map((region) => region.text).toList(),
+        orientation: group.orientation,
+        bandRegionIds: group.bands.map((band) =>
+            band.regions.map((region) => region.id).toList()).toList(),
       );
     }).toList();
   }
@@ -216,7 +224,8 @@ final class ComicTranslationRequest {
     }
     final expanded = {for (final region in ocr.regions) region.id: ''};
     for (final unit in units) {
-      final lines = result.translations[unit.id]!;
+      final rawLines = result.translations[unit.id]!;
+      final lines = _normalizeUnitTranslation(unit, rawLines);
       if (lines.length != unit.regionIds.length) {
         throw StateError(
           'Translation unit ${unit.id} has ${lines.length} lines; '
@@ -232,6 +241,124 @@ final class ComicTranslationRequest {
     }
     return expanded;
   }
+
+  List<String> _normalizeUnitTranslation(
+    ComicTranslationUnit unit,
+    List<String> lines,
+  ) {
+    if (lines.length != unit.sourceLines.length) return lines;
+    final trimmed = lines.map((line) => line.trim()).toList();
+    final repeated = trimmed.length > 1 &&
+        trimmed.map(_letters).toSet().length == 1 &&
+        unit.sourceLines.map(_letters).toSet().length > 1 &&
+        trimmed.first.runes.length >= trimmed.length;
+    if (repeated) {
+      final text = _preservePunctuation(
+        unit.sourceLines.join(),
+        trimmed.first,
+      );
+      return _splitBySourceWeight(text, unit.sourceLines);
+    }
+    return List.generate(lines.length, (index) =>
+        _preservePunctuation(unit.sourceLines[index], trimmed[index]));
+  }
+
+  List<String> _splitBySourceWeight(String text, List<String> sources) {
+    final glyphs = text.runes.map(String.fromCharCode).toList();
+    final weights = sources.map((source) => math.max(1, _letters(source).length))
+        .toList();
+    final total = weights.reduce((a, b) => a + b);
+    var sourceTotal = 0;
+    var start = 0;
+    return List.generate(sources.length, (index) {
+      sourceTotal += weights[index];
+      final end = index == sources.length - 1
+          ? glyphs.length
+          : (glyphs.length * sourceTotal / total).round().clamp(
+              start + 1,
+              glyphs.length - sources.length + index + 1,
+            ).toInt();
+      final value = glyphs.sublist(start, end).join().trim();
+      start = end;
+      return value;
+    });
+  }
+
+  String _preservePunctuation(String source, String translation) {
+    final sourceGlyphs = source.trim().runes.map(String.fromCharCode).toList();
+    var trailingStart = sourceGlyphs.length;
+    while (trailingStart > 0 &&
+        _punctuationClass(sourceGlyphs[trailingStart - 1]) != null) {
+      trailingStart--;
+    }
+    final sourceMarks = <_SourcePunctuation>[];
+    for (var index = 0; index < sourceGlyphs.length; index++) {
+      final glyph = sourceGlyphs[index];
+      final category = _punctuationClass(glyph);
+      if (category != null) {
+        sourceMarks.add(_SourcePunctuation(
+          glyph,
+          category,
+          index >= trailingStart,
+        ));
+      }
+    }
+    final output = StringBuffer();
+    final remaining = <int, int>{};
+    for (final rune in translation.runes) {
+      final category = _punctuationClass(String.fromCharCode(rune));
+      if (category != null) remaining[category] = (remaining[category] ?? 0) + 1;
+    }
+    for (final rune in translation.runes) {
+      final glyph = String.fromCharCode(rune);
+      final category = _punctuationClass(glyph);
+      if (category == null) {
+        output.write(glyph);
+        continue;
+      }
+      remaining[category] = remaining[category]! - 1;
+      final available = sourceMarks
+          .where((mark) => !mark.used && mark.category == category)
+          .length;
+      if (remaining[category]! >= available) continue;
+      final match = sourceMarks.indexWhere(
+        (mark) => !mark.used && mark.category == category,
+      );
+      if (match < 0) continue;
+      sourceMarks[match].used = true;
+      output.write(sourceMarks[match].glyph);
+    }
+    final suffix = sourceMarks
+        .where((mark) => mark.trailing && !mark.used)
+        .map((mark) => mark.glyph)
+        .join();
+    return '${output.toString().trim()}$suffix';
+  }
+
+  String _letters(String value) => String.fromCharCodes(value.runes.where(
+    (rune) {
+      final glyph = String.fromCharCode(rune);
+      return glyph != comicTranslationBreakMarker &&
+          _punctuationClass(glyph) == null &&
+          glyph.trim().isNotEmpty;
+    },
+  ));
+
+  int? _punctuationClass(String glyph) {
+    if (const {'。', '.', '！', '!', '？', '?'}.contains(glyph)) return 0;
+    if (const {'…', '⋯', '︙', '⋮', '・'}.contains(glyph)) return 1;
+    if (const {'，', ',', '、', '；', ';', '：', ':'}.contains(glyph)) return 2;
+    return null;
+  }
+}
+
+final class _SourcePunctuation {
+  final String glyph;
+  final int category;
+  final bool trailing;
+  bool used = false;
+
+  _SourcePunctuation(this.glyph, this.category, this.trailing);
 }
 
 final class ComicTranslationResult {

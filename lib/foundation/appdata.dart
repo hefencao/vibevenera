@@ -257,6 +257,7 @@ class Settings with ChangeNotifier {
     'comicTranslationTargetLanguage': 'system',
     'comicTranslationContextPages': 2,
     'comicTranslationSoundEffects': false,
+    'comicTranslationCleanOverlay': true,
     'comicTranslationBackend': 'none',
     'comicTranslationRemoteEndpoint': 'https://api.openai.com/v1/chat/completions',
     'comicTranslationRemoteModel': '',

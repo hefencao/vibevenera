@@ -21,7 +21,7 @@ ComicTranslationSession                            页面策略/串行调度
 设置中的“翻译模型与 API”是模型、远程后端和 benchmark 的统一入口。远程翻译当前提供
 OpenAI-compatible Chat Completions adapter；endpoint、model 可配置，API key 单独写入
 本机 `comic_translation_secrets.json`，不进入 appdata、数据同步或翻译 artifact。
-OCR 行/列先按 bubble、背景和文字尺寸归一化后的横/竖轴距离合并为翻译 unit，远程模型联合理解整个气泡，再返回与
+OCR 行/列先以字号×字符数重建逻辑文字矩形，再结合 bubble、背景、主/副轴接触和归一化距离合并为翻译 unit。远程模型联合理解整个 unit，再返回与
 `regionIds/sourceLines` 等长且一一对应的译文数组。译文分别写回原 region，不再只放在 anchor region。
 纯标点/无意义字符不进入远程请求。拟声词默认不翻译，用户显式开启后才进入 unit；该选项参与
 translation cache key。Reader 将 clean overlay 裁剪到实际有译文的 region mask；跳过的拟声词等区域保留原文，
@@ -64,6 +64,10 @@ Translation key = OCR digest + translation engine/model + target language
                   + context digest
 ```
 
+查询 translation 时先命中完整 key；若 Reader 刚重建、当前还没有前页内存上下文，则回退到
+`OCR digest + engine/model + target language` 相同的最近 artifact。上下文参与首次翻译，但不应因
+Reader session 销毁后无法重建完全相同的运行时上下文而重复请求远程模型。
+
 因此 CDN authority 改变、版本迁移或页码偏移不会误使结果失效。OCR 与目标语言解耦；
 切换翻译语言只重做翻译。SQLite 保存结构化区域、文字和稀疏透明 clean-overlay PNG；后者只含
 文字 mask 内的修复像素，不保存整张原图，也不重复写入 translation artifact。
@@ -102,16 +106,24 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - overlay 有独立 `RepaintBoundary`；
 - 动图 Texture 更新不重绘文字；
 - artifact 通过每页 `ValueListenable` 发布，不调用 Reader `setState`；
-- OCR detector 产生的 region 是文字边界而不是语义分组。Dart 侧共享分组器综合气泡 ID/轮廓、背景色、
-  OCR 方向、尺寸和空间邻接建立翻译 unit；不同且不重叠的气泡是硬边界，空气泡信息由保守位置聚类补足。
-- 分组内重新建立竖排列 band 或横排行 band，再按竖排右至左/列内上至下、横排上至下/行内左至右排序。
-  engine 和 overlay 使用同一分组结果，联合翻译逐 region 写回；source band 只是排版先验，不是译文的强制
-  容器。bubble 的安全内接区域才是硬边界，OCR box 仅提供源字号、源墨迹面积、原列/行数和原位置。
+- OCR detector 产生的 region 是文字边界而不是语义分组。Dart 侧先估算
+  `sqrt(OCR area / character count)` 字号，使用 source mask 的副轴墨迹中心、OCR 主轴中心和
+  `font size × character count` 主轴长度重建逻辑矩形；不回退到带大量空白的 OCR 矩形做关系判定。
+- unit 关系分两个互补分支：`sameBand` 处理副轴重叠足够的同行/列碎片；
+  `adjacentBand = !sameBand` 处理相邻行/列，必须同时通过连续的加权距离、主轴重叠/端点接触和气泡边界检查。
+  两分支不得使用不同门槛将一段数值区间同时排除。合并边按距离排序，任意成员存在方向分离冲突时拒绝连通分量合并；
+  bubble ID 只提供容器语境，不强制合并。
+- unit 与 band 是两层语义：同一气泡的多列属于同一 unit，但仍是多个 band。band 仅在逻辑矩形副轴重叠
+  `>= 0.45` 或中心距离 `<= 0.55 × 主字号` 时合并。unit 内存在多字正文时，单字本身不对横/竖排投票，而是继承正文；
+  整个 unit 都是单字时仍使用矩形方向，无有效几何多数时再使用语言默认方向。
+- engine 将 unit id、region order、band index 和 unit orientation 写入 translation artifact，overlay 只消费该结果，
+  不在绘制阶段重新分组。source band 是排版先验，不是译文的强制容器；bubble 的安全内接区域才是硬边界。
 - 每个 bubble block 枚举保持句序的连续 band 合并方案；每种方案同时评估贴近原 band 的 anchored lane 与在
   bubble 内重新分配的 distributed lane。对每个方案以目标字体真实 glyph/paragraph 测量候选字号、横排换行数
   或竖排换列数，最小化“目标墨迹面积相对源面积及字符数变化”“源字号偏差”“列/行拓扑偏差”和“位置偏差”的加权
   代价。这样会优先尊重原排版，但在译文长度或气泡空间需要时允许换行、换列或合并句子，而不是把译文硬塞进 OCR 框
-  或无条件铺满气泡。解析出的 plan 按显示矩形缓存在 painter，滚动重绘不重新测量。
+  或无条件铺满气泡。若译文行/列数少于 source band，且候选通过缩小字号才不断行/列，两者作为联合惩罚，
+  避免将原本均衡的两列压成小字单列。解析出的 plan 按显示矩形缓存在 painter，滚动重绘不重新测量。
 - 联通气泡只将 OCR 区块中心分配到已经分离的距离核心，不再使用文字位置聚类创造拆分。气泡候选降低最低
   凸包实度以接纳凹形轮廓，普通近凸气泡仍不执行 Voronoi 拆分。
 - 排版方向以 OCR polygon 的宽高关系重新确认，竖向区块不会因为识别方向阈值过高而进入横排。
@@ -173,6 +185,9 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   逐区 group id/OCR 置信度、OCR 原文和翻译结果、气泡补检候选/补回数量及 clean patch 大小；
 - 模型加载、检测总输入像素及每个 tile 的 tensor shape、释放后 RSS，以及每页任务前后 RSS。
   RSS 均为整个进程的边界采样，不代表 OCR 推理瞬时峰值。
+- 每个 region 的 unit/order/band/orientation，以及 `Split diagnostics` 和 `Merge diagnostics`。
+  前者输出同一 native bubble 却分属不同 unit 的失败关系，后者输出实际促成同 unit 的 related 边，
+  包含逻辑矩形、字号、副轴距离/重叠、主轴接触、边界可靠性和方向冲突，用于在调参前确定真正生效的分支。
 
 真机结果显示高性能设备的 OCR P50 约 0.5 秒，旧设备约 2.4 秒。任务仍保持单路后台
 执行，不为追求吞吐增加并发。普通页默认以 1600 长边为准确率基线，但实际值来自每次

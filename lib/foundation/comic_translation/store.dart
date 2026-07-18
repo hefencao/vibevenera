@@ -117,6 +117,10 @@ final class ComicTranslationStore {
         targetLanguage,
         contextDigest,
       ),
+      ocrDigest,
+      engineId,
+      modelVersion,
+      targetLanguage,
     ]) as String?;
     return payload == null
         ? null
@@ -231,6 +235,10 @@ void _storeWorker(List<Object> init) async {
       updated_at INTEGER NOT NULL,
       accessed_at INTEGER NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS translation_artifacts_compatible_idx
+      ON translation_artifacts(
+        ocr_digest, engine_id, model_version, target_language, accessed_at
+      );
   ''');
   final commands = ReceivePort();
   ready.send(commands.sendPort);
@@ -306,14 +314,23 @@ Object? _executeStoreOperation(
       ''');
       return null;
     case 'findTranslation':
-      final rows = db.select(
-        'SELECT payload FROM translation_artifacts WHERE cache_key = ?;',
-        arguments,
+      var rows = db.select(
+        'SELECT payload, cache_key FROM translation_artifacts '
+        'WHERE cache_key = ?;',
+        [arguments[0]],
       );
+      if (rows.isEmpty) {
+        rows = db.select('''
+          SELECT payload, cache_key FROM translation_artifacts
+          WHERE ocr_digest = ? AND engine_id = ? AND model_version = ?
+            AND target_language = ?
+          ORDER BY accessed_at DESC LIMIT 1;
+        ''', arguments.sublist(1));
+      }
       if (rows.isEmpty) return null;
       db.execute(
         'UPDATE translation_artifacts SET accessed_at = ? WHERE cache_key = ?;',
-        [now, arguments[0]],
+        [now, rows.first[1]],
       );
       return rows.first[0] as String;
     case 'storeTranslation':

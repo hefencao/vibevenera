@@ -24,7 +24,7 @@ final class AndroidPaddleComicOcrEngine
 
   @override
   String get modelVersion =>
-      '${ComicTranslationModelManager.bundle.version}:bubble-v11:pixel-mask-v4';
+      '${ComicTranslationModelManager.bundle.version}:bubble-v12:pixel-mask-v4';
 
   @override
   bool get supportsAnimatedPosterFrame => false;

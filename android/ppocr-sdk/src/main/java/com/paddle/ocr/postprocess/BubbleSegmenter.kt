@@ -344,6 +344,7 @@ object BubbleSegmenter {
             Imgproc.distanceTransform(mask, distance, Imgproc.DIST_L2, 5)
             val maxDistance = Core.minMaxLoc(distance).maxVal
             var coreCenters = emptyList<Point>()
+            var coreLevel = 0
             if (maxDistance >= 4.0) {
                 val minCoreArea = max(9.0, candidate.area * 0.0015)
                 for (level in 82 downTo 26 step 4) {
@@ -378,6 +379,7 @@ object BubbleSegmenter {
                     }.distinct()
                     if (used.size >= 2) {
                         coreCenters = centers
+                        coreLevel = level
                         break
                     }
                 }
@@ -392,6 +394,10 @@ object BubbleSegmenter {
                 }
             }.distinct()
             if (used.size < 2 || solidity >= 0.98) return null
+            val concavity = ((1.0 - solidity - 0.02) / 0.14).coerceIn(0.0, 1.0)
+            val concavityWeight = concavity * concavity
+            val coreWeight = ((coreLevel - 26) / 56.0).coerceIn(0.0, 1.0)
+            if (concavityWeight * 0.72 + coreWeight * 0.28 < 0.30) return null
 
             val lobeMasks = used.associateWith {
                 Mat.zeros(bounds.height, bounds.width, CvType.CV_8UC1)

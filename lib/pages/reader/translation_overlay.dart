@@ -232,6 +232,8 @@ class _ComicTranslationPainter extends CustomPainter {
   final String? hiddenBlockKey;
   final List<_TranslationHitRegion> _hitRegions = [];
   final Map<String, _TranslationLayoutPlan> _layoutPlans = {};
+  final Map<String, _VerticalGlyphMetrics> _verticalMetrics = {};
+  List<_TranslationLayoutBlock>? _blocks;
   Rect? _layoutImageRect;
 
   _ComicTranslationPainter({
@@ -289,7 +291,10 @@ class _ComicTranslationPainter extends CustomPainter {
       if (!hasCleanOverlay) {
         for (final region in block.regions) {
           final paint = Paint()..color = _regionBackground(region.region);
-          for (final polygon in region.region.sourceMaskPolygons) {
+          final masks = region.region.sourceMaskPolygons.isEmpty
+              ? [region.region.polygon]
+              : region.region.sourceMaskPolygons;
+          for (final polygon in masks) {
             if (polygon.length < 3) continue;
             canvas.drawPath(
               Path()..addPolygon(_displayPolygon(polygon, imageRect), true),
@@ -341,10 +346,13 @@ class _ComicTranslationPainter extends CustomPainter {
         .toLowerCase();
     final separator = {'zh', 'ja', 'ko'}.contains(language) ? '' : ' ';
     return band
-        .map((region) => region.region.translatedText.trim())
+        .map((region) => _visibleTranslation(region.region.translatedText))
         .where((text) => text.isNotEmpty)
         .join(separator);
   }
+
+  String _visibleTranslation(String text) =>
+      text.replaceAll(comicTranslationBreakMarker, '').trim();
 
   double _dominantFontSize(List<double> sorted) {
     var bestStart = 0;
@@ -426,6 +434,9 @@ class _ComicTranslationPainter extends CustomPainter {
         final topologyPenalty =
             (measured.lineCount - block.bands.length).abs() /
                 (1 + math.max(0, lengthRatio - 1) * .25);
+        final missingBands = math.max(0, block.bands.length - measured.lineCount);
+        final unbrokenShrinkPenalty = missingBands *
+            math.max(0, math.log(preferredFont / fontSize));
         final extentPenalty = _extentPenalty(
           block.orientation,
           sourceBounds,
@@ -435,6 +446,7 @@ class _ComicTranslationPainter extends CustomPainter {
         final score = densityPenalty * .7 +
             fontPenalty * .2 +
             topologyPenalty * 1.3 +
+            unbrokenShrinkPenalty * 1.6 +
             measured.flowPenalty * .9 +
             measured.sentencePenalty * .8 +
             measured.orphanPenalty * 1.1 +
@@ -541,7 +553,16 @@ class _ComicTranslationPainter extends CustomPainter {
       final band = bands[i];
       for (var j = 0; j < band.length; j++) {
         final region = band[j].region;
-        offset += region.translatedText.trim().runes.length;
+        var visible = 0;
+        for (final rune in region.translatedText.trim().runes) {
+          final glyph = String.fromCharCode(rune);
+          if (glyph == comicTranslationBreakMarker) {
+            add(offset + visible, 1.55);
+          } else {
+            visible++;
+          }
+        }
+        offset += visible;
         if (j < band.length - 1) {
           add(offset, _endsStrongPunctuation(region.sourceText) ? 1.35 : .35);
           offset += _targetWordSeparator.runes.length;
@@ -642,12 +663,8 @@ class _ComicTranslationPainter extends CustomPainter {
     Rect? contentBounds;
     for (final lane in option.lanes) {
       if (block.orientation == ComicTextOrientation.vertical) {
-        final glyphs = lane.text.runes.map(String.fromCharCode).toList();
-        final metrics = _verticalGlyphMetrics(
-          glyphs,
-          const Color(0xff000000),
-          const Color(0xffffffff),
-        );
+        final glyphs = _verticalGlyphs(lane.text);
+        final metrics = _verticalGlyphMetrics(glyphs);
         final layout = _verticalLayout(lane, fontSize, metrics);
         if (!layout.fits) {
           return const _MeasuredTranslationLayout(
@@ -794,7 +811,12 @@ class _ComicTranslationPainter extends CustomPainter {
   }
 
   int _characters(String text) =>
-      text.replaceAll(RegExp(r'\s'), '').runes.length.clamp(1, 1000);
+      text
+          .replaceAll(comicTranslationBreakMarker, '')
+          .replaceAll(RegExp(r'\s'), '')
+          .runes
+          .length
+          .clamp(1, 1000);
 
   Rect _openBubbleBounds(
     Rect sourceBounds,
@@ -894,9 +916,9 @@ class _ComicTranslationPainter extends CustomPainter {
     Color fillColor,
     Color outline,
   ) {
-    final glyphs = lane.text.runes.map(String.fromCharCode).toList();
+    final glyphs = _verticalGlyphs(lane.text);
     if (glyphs.isEmpty) return;
-    final glyphMetrics = _verticalGlyphMetrics(glyphs, fillColor, outline);
+    final glyphMetrics = _verticalGlyphMetrics(glyphs);
     final layout = _verticalLayout(lane, fontSize, glyphMetrics);
     final startX = lane.bounds.center.dx +
         layout.columnLengths.length * layout.cellWidth / 2;
@@ -939,9 +961,7 @@ class _ComicTranslationPainter extends CustomPainter {
 
   _VerticalGlyphMetrics _verticalGlyphMetrics(
     List<String> glyphs,
-    Color fillColor,
-    Color outline,
-  ) {
+  ) => _verticalMetrics.putIfAbsent(glyphs.join(), () {
     const sampleSize = 100.0;
     var width = 0.0;
     var height = 0.0;
@@ -949,21 +969,27 @@ class _ComicTranslationPainter extends CustomPainter {
       final painter = _glyph(
         glyph,
         sampleSize,
-        fillColor: fillColor,
-        outline: outline,
+        fillColor: const Color(0xff000000),
+        outline: const Color(0xffffffff),
       );
       width = math.max(width, painter.width);
       height = math.max(height, painter.height);
     }
     return _VerticalGlyphMetrics(width / sampleSize, height / sampleSize);
-  }
+  });
+
+  List<String> _verticalGlyphs(String text) => text
+      .replaceAll(RegExp(r'(?:…+|⋯+|︙+|⋮+|・{2,}|\.{3,})'), '︙')
+      .runes
+      .map(String.fromCharCode)
+      .toList();
 
   _VerticalTextLayout _verticalLayout(
     _TranslationTextLane lane,
     double fontSize,
     _VerticalGlyphMetrics glyphMetrics,
   ) {
-    final glyphs = lane.text.runes.map(String.fromCharCode).toList();
+    final glyphs = _verticalGlyphs(lane.text);
     final cellWidth = fontSize * glyphMetrics.widthFactor * 1.08;
     final cellHeight = fontSize * glyphMetrics.heightFactor * 1.04;
     final rows = math.max(1, (lane.bounds.height / cellHeight).floor());
@@ -1225,36 +1251,34 @@ class _ComicTranslationPainter extends CustomPainter {
   }
 
   List<_TranslationLayoutBlock> _layoutBlocks() {
+    final cached = _blocks;
+    if (cached != null) return cached;
     final regions = artifact.regions
         .where((region) =>
             region.translatedText.trim().isNotEmpty &&
             region.polygon.isNotEmpty)
         .map((region) => _TranslationLayoutRegion(region, _normalizedBounds(region)))
         .toList();
-    final grouping = ComicTextGrouping(
-      imageWidth: artifact.imageWidth,
-      imageHeight: artifact.imageHeight,
-      sourceLanguage: artifact.sourceLanguage,
-    );
-    final groups = grouping.resolve(regions.map((region) => ComicTextRegion(
-      value: region,
-      id: region.region.ocrRegionId,
-      text: region.region.sourceText,
-      polygon: region.region.polygon,
-      orientation: region.region.orientation,
-      backgroundArgb: region.region.backgroundArgb,
-      bubbleGroupId: region.region.bubbleGroupId,
-      bubblePolygon: region.region.bubblePolygon,
-    )).toList());
-    return groups.map((group) {
-      final bands = group.bands
-          .map((band) => band.regions.map((region) => region.value).toList())
-          .toList();
+    final groups = <String, List<_TranslationLayoutRegion>>{};
+    for (final region in regions) {
+      groups.putIfAbsent(region.region.translationUnitId!, () => []).add(region);
+    }
+    return _blocks = groups.entries.map((entry) {
+      final regions = entry.value
+        ..sort((a, b) => a.region.translationUnitOrder!
+            .compareTo(b.region.translationUnitOrder!));
+      final bandMap = <int, List<_TranslationLayoutRegion>>{};
+      for (final region in regions) {
+        bandMap.putIfAbsent(region.region.translationBandIndex!, () => [])
+            .add(region);
+      }
+      final bands = bandMap.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
       return _TranslationLayoutBlock(
-        key: group.key,
-        regions: bands.expand((band) => band).toList(),
-        orientation: group.orientation,
-        bands: bands,
+        key: entry.key,
+        regions: regions,
+        orientation: regions.first.region.translationOrientation!,
+        bands: bands.map((entry) => entry.value).toList(),
       );
     }).toList();
   }
