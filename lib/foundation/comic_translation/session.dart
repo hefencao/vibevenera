@@ -13,6 +13,8 @@ import 'models.dart';
 import 'policy.dart';
 import 'store.dart';
 
+const _translationArtifactVersion = 'artifact-v3';
+
 final class ComicTranslationSession {
   final ComicTranslationPolicy policy;
   final ComicTranslationInputResolver inputResolver;
@@ -48,6 +50,8 @@ final class ComicTranslationSession {
   final Map<String, Map<int, ComicTranslationArtifact>> _readyPages = {};
   final ValueNotifier<double> _fontScale = ValueNotifier(1);
   bool _fontScaleResolved = false;
+  int _generation = 0;
+  Set<String> _retainedKeys = const {};
 
   bool get enabled => _enabled;
 
@@ -68,11 +72,13 @@ final class ComicTranslationSession {
   }
 
   void setEnabled(bool value) {
-    if (_enabled == value) return;
+    if (_enabled == value || _disposed) return;
     _enabled = value;
     if (!value) {
+      _generation++;
       _submissionTimer?.cancel();
       _queue.clear();
+      _retainedKeys = const {};
       for (final state in _states.values) {
         state.value = ComicTranslationPageState(
           ComicTranslationPhase.disabled,
@@ -99,11 +105,17 @@ final class ComicTranslationSession {
     List<ComicTranslationPageIdentity> near = const [],
     required ComicTranslationInteraction interaction,
   }) {
-    _current = current;
-    _near = near;
+    _current = List.unmodifiable(current);
+    _near = List.unmodifiable(near);
     _interaction = interaction;
-    if (!_enabled || _disposed || current.isEmpty) return;
     _submissionTimer?.cancel();
+    if (!_enabled || _disposed || current.isEmpty) {
+      _queue.clear();
+      _retainedKeys = const {};
+      return;
+    }
+    _retainedKeys = _retainedPageKeys();
+    _queue.removeWhere((key, _) => !_retainedKeys.contains(key));
     final delay = policy.submissionDelay(interaction);
     if (delay == Duration.zero) {
       _submitVisiblePages();
@@ -127,18 +139,24 @@ final class ComicTranslationSession {
 
   void _submitVisiblePages() {
     if (!_enabled || _disposed) return;
-    final retained = <String>{};
+    final near = _near.take(policy.prefetchPages).toList(growable: false);
+    _retainedKeys = _retainedPageKeys();
+    _queue.removeWhere((key, _) => !_retainedKeys.contains(key));
     for (final identity in _current) {
-      retained.add(identity.key);
       _enqueue(identity, policy.priority(distance: 0, current: true));
     }
-    for (var i = 0; i < _near.length && i < policy.prefetchPages; i++) {
-      final identity = _near[i];
-      retained.add(identity.key);
-      _enqueue(identity, policy.priority(distance: i + 1, current: false));
+    for (var i = 0; i < near.length; i++) {
+      _enqueue(
+        near[i],
+        policy.priority(distance: i + 1, current: false),
+      );
     }
-    _queue.removeWhere((key, _) => !retained.contains(key));
   }
+
+  Set<String> _retainedPageKeys() => {
+    for (final identity in _current) identity.key,
+    for (final identity in _near.take(policy.prefetchPages)) identity.key,
+  };
 
   void _enqueue(ComicTranslationPageIdentity identity, int priority) {
     _identities[identity.key] = identity;
@@ -152,7 +170,7 @@ final class ComicTranslationSession {
       );
       return;
     }
-    if (!engines.ready) {
+    if (_enginePair == null && !engines.ready) {
       state.value = const ComicTranslationPageState(
         ComicTranslationPhase.unavailable,
       );
@@ -195,16 +213,22 @@ final class ComicTranslationSession {
     if (_running || _disposed) return;
     _running = true;
     try {
-      while (_enabled && _queue.isNotEmpty) {
+      while (_enabled && !_disposed && _queue.isNotEmpty) {
         final item = _queue.values.reduce(
           (a, b) => a.priority >= b.priority ? a : b,
         );
         _queue.remove(item.identity.key);
+        final ticket = _ProcessTicket(
+          generation: _generation,
+          identityKey: item.identity.key,
+        );
+        if (!_isActive(ticket)) continue;
         try {
-          await _process(item.identity);
+          await _process(item.identity, ticket);
         } catch (error) {
-          _setState(
+          _setStateIfActive(
             item.identity,
+            ticket,
             ComicTranslationPageState(
               ComicTranslationPhase.failed,
               error: error,
@@ -214,15 +238,24 @@ final class ComicTranslationSession {
       }
     } finally {
       _running = false;
-      if (_disposed) unawaited(_releaseEngines());
+      if (_disposed) {
+        unawaited(_releaseEngines());
+      } else if (_enabled && _queue.isNotEmpty) {
+        unawaited(_pump());
+      }
     }
   }
 
-  Future<void> _process(ComicTranslationPageIdentity identity) async {
+  Future<void> _process(
+    ComicTranslationPageIdentity identity,
+    _ProcessTicket ticket,
+  ) async {
     final input = await inputResolver.resolve(identity);
+    if (!_isActive(ticket)) return;
     if (input == null) {
-      _setState(
+      _setStateIfActive(
         identity,
+        ticket,
         const ComicTranslationPageState(
           ComicTranslationPhase.waitingForImage,
         ),
@@ -230,8 +263,9 @@ final class ComicTranslationSession {
       return;
     }
     if (input.mediaKind == ComicTranslationMediaKind.animatedImage) {
-      _setState(
+      _setStateIfActive(
         identity,
+        ticket,
         const ComicTranslationPageState(
           ComicTranslationPhase.unsupportedMedia,
         ),
@@ -239,6 +273,7 @@ final class ComicTranslationSession {
       return;
     }
     final pair = _enginePair ??= await engines.acquire();
+    if (!_isActive(ticket)) return;
     final ocrEngine = pair.ocr;
     final translator = pair.translator;
     var ocr = await ComicTranslationStore.instance.findOcr(
@@ -248,26 +283,31 @@ final class ComicTranslationSession {
       sourceLanguage: sourceLanguage,
     );
     if (ocr == null) {
-      await engines.loadOcr(pair, sourceLanguage);
-      _setState(
+      _setStateIfActive(
         identity,
+        ticket,
         const ComicTranslationPageState(
           ComicTranslationPhase.recognizing,
         ),
       );
-      ocr = await ocrEngine.recognize(ComicOcrInput(
-        identity: identity,
-        filePath: input.file.path,
-        contentDigest: input.contentDigest,
-        sourceLanguage: sourceLanguage,
-        maxAnalysisSide: policy.maxAnalysisSide,
-        animatedMode: AnimatedTranslationMode.posterFrame,
-      ));
+      ocr = await engines.recognize(
+        pair,
+        sourceLanguage,
+        ComicOcrInput(
+          identity: identity,
+          filePath: input.file.path,
+          contentDigest: input.contentDigest,
+          sourceLanguage: sourceLanguage,
+          maxAnalysisSide: policy.maxAnalysisSide,
+          animatedMode: AnimatedTranslationMode.posterFrame,
+        ),
+      );
       if (ocr.contentDigest != input.contentDigest) {
         throw StateError('OCR result content digest does not match input');
       }
       await ComicTranslationStore.instance.storeOcr(ocr);
     }
+    if (!_isActive(ticket)) return;
     final context = _translationContext(identity.chapterId, identity.pageIndex);
     final contextDigest = sha256
         .convert(utf8.encode(jsonEncode(context.map((entry) => [
@@ -277,8 +317,14 @@ final class ComicTranslationSession {
         ]).toList())))
         .toString();
     final translationModelVersion =
-        'artifact-v2:${translator.modelVersion}:'
+        '$_translationArtifactVersion:${translator.modelVersion}:'
         'sfx=${policy.translateSoundEffects}';
+    final request = ComicTranslationRequest(
+      ocr: ocr,
+      targetLanguage: targetLanguage,
+      previousPages: context,
+      translateSoundEffects: policy.translateSoundEffects,
+    );
     var translation = await ComicTranslationStore.instance.findTranslation(
       ocrDigest: ocr.digest,
       engineId: translator.id,
@@ -286,21 +332,25 @@ final class ComicTranslationSession {
       targetLanguage: targetLanguage,
       contextDigest: contextDigest,
     );
+    // Bubble ids are only container hints. Persisted unit membership, order,
+    // bands and orientation must all match the current grouping contract.
+    if (translation != null) {
+      final compatible = _translationUnitsCompatible(
+        translation,
+        request.units,
+      );
+      if (!compatible) translation = null;
+    }
     if (translation == null) {
-      await engines.loadTranslator(pair);
-      _setState(
+      if (!_isActive(ticket)) return;
+      _setStateIfActive(
         identity,
+        ticket,
         const ComicTranslationPageState(
           ComicTranslationPhase.translating,
         ),
       );
-      final request = ComicTranslationRequest(
-        ocr: ocr,
-        targetLanguage: targetLanguage,
-        previousPages: context,
-        translateSoundEffects: policy.translateSoundEffects,
-      );
-      final result = await translator.translate(request);
+      final result = await engines.translate(pair, request);
       final translatedRegions = request.expandUnitTranslations(result);
       final memberships = <String, ({
         String unitId,
@@ -361,18 +411,80 @@ final class ComicTranslationSession {
       );
       await ComicTranslationStore.instance.storeTranslation(translation);
     }
-    if (_disposed) return;
+    // Once a remote request has completed, publish its immutable result even
+    // if page-retention bookkeeping changed while the request was in flight.
+    // Generation still prevents disabled/disposed sessions from being revived.
+    if (!_isCurrentGeneration(ticket)) return;
     _readyPages.putIfAbsent(identity.chapterId, () => {})[identity.pageIndex] =
         translation;
     _updateFontScale(translation);
-    _setState(
+    _setStateIfCurrentGeneration(
       identity,
+      ticket,
       ComicTranslationPageState(
         ComicTranslationPhase.ready,
         artifact: translation,
         cleanOverlayPng: policy.useCleanOverlay ? ocr.cleanOverlayPng : null,
       ),
     );
+  }
+
+
+  bool _translationUnitsCompatible(
+    ComicTranslationArtifact artifact,
+    List<ComicTranslationUnit> expectedUnits,
+  ) {
+    final translated = artifact.regions
+        .where((region) => region.translatedText.trim().isNotEmpty)
+        .toList(growable: false);
+    final expectedRegions = {
+      for (final unit in expectedUnits) ...unit.regionIds,
+    };
+    if (!setEquals(
+      translated.map((region) => region.ocrRegionId).toSet(),
+      expectedRegions,
+    )) {
+      return false;
+    }
+
+    String signature(Iterable<String> ids) {
+      final ordered = ids.toList()..sort();
+      return ordered.join('\x00');
+    }
+
+    final actualUnits = <String, Set<String>>{};
+    for (final region in translated) {
+      final unitId = region.translationUnitId;
+      if (unitId == null || unitId.isEmpty ||
+          region.translationUnitOrder == null ||
+          region.translationBandIndex == null ||
+          region.translationOrientation == null) {
+        return false;
+      }
+      actualUnits.putIfAbsent(unitId, () => <String>{})
+          .add(region.ocrRegionId);
+    }
+    final storedById = {
+      for (final region in translated) region.ocrRegionId: region,
+    };
+    for (final unit in expectedUnits) {
+      final expectedSignature = signature(unit.regionIds);
+      final bands = <String, int>{
+        for (var band = 0; band < unit.bandRegionIds.length; band++)
+          for (final id in unit.bandRegionIds[band]) id: band,
+      };
+      for (var order = 0; order < unit.regionIds.length; order++) {
+        final region = storedById[unit.regionIds[order]]!;
+        if (signature(actualUnits[region.translationUnitId]!) !=
+                expectedSignature ||
+            region.translationUnitOrder != order ||
+            region.translationBandIndex != bands[region.ocrRegionId] ||
+            region.translationOrientation != unit.orientation) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   void _updateFontScale(ComicTranslationArtifact artifact) {
@@ -382,13 +494,17 @@ final class ComicTranslationSession {
             region.kind != ComicTextKind.soundEffect &&
             region.sourceText.isNotEmpty &&
             region.translatedText.isNotEmpty)
-        .map((region) => math.sqrt(
-              region.sourceText.runes.length /
-                  region.translatedText
-                      .replaceAll(comicTranslationBreakMarker, '')
-                      .runes
-                      .length,
-            ).clamp(0.92, 1.10))
+        .map((region) {
+          final sourceLength = math.max(1, region.sourceText.runes.length);
+          final targetLength = math.max(
+            1,
+            region.translatedText
+                .replaceAll(comicTranslationBreakMarker, '')
+                .runes
+                .length,
+          );
+          return math.sqrt(sourceLength / targetLength).clamp(0.92, 1.10);
+        })
         .toList();
     _fontScale.value = samples.isEmpty
         ? 1
@@ -436,11 +552,35 @@ final class ComicTranslationSession {
     }).toList();
   }
 
+  bool _isCurrentGeneration(_ProcessTicket ticket) =>
+      !_disposed && _enabled && ticket.generation == _generation;
+
+  bool _isActive(_ProcessTicket ticket) =>
+      _isCurrentGeneration(ticket) &&
+      _retainedKeys.contains(ticket.identityKey);
+
+  void _setStateIfActive(
+    ComicTranslationPageIdentity identity,
+    _ProcessTicket ticket,
+    ComicTranslationPageState value,
+  ) {
+    if (!_isActive(ticket)) return;
+    _setState(identity, value);
+  }
+
+  void _setStateIfCurrentGeneration(
+    ComicTranslationPageIdentity identity,
+    _ProcessTicket ticket,
+    ComicTranslationPageState value,
+  ) {
+    if (!_isCurrentGeneration(ticket)) return;
+    _setState(identity, value);
+  }
+
   void _setState(
     ComicTranslationPageIdentity identity,
     ComicTranslationPageState value,
   ) {
-    if (!_enabled || _disposed) return;
     _states.putIfAbsent(
       identity.key,
       () => ValueNotifier(ComicTranslationPageState.disabled),
@@ -448,7 +588,10 @@ final class ComicTranslationSession {
   }
 
   void dispose() {
+    if (_disposed) return;
     _disposed = true;
+    _enabled = false;
+    _generation++;
     _submissionTimer?.cancel();
     unawaited(_cacheSubscription.cancel());
     _queue.clear();
@@ -465,6 +608,16 @@ final class ComicTranslationSession {
     final pair = _enginePair;
     if (pair != null) await engines.release(pair);
   }
+}
+
+final class _ProcessTicket {
+  final int generation;
+  final String identityKey;
+
+  const _ProcessTicket({
+    required this.generation,
+    required this.identityKey,
+  });
 }
 
 final class _QueuedTranslation {

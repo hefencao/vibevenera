@@ -18,16 +18,19 @@ ComicTranslationSession                            页面策略/串行调度
     └─ ComicTranslationStore                       内容寻址旁路缓存
 ```
 
-设置中的“翻译模型与 API”是模型、远程后端和 benchmark 的统一入口。远程翻译当前提供
-OpenAI-compatible Chat Completions adapter；endpoint、model 可配置，API key 单独写入
+设置中的“翻译模型与 API”是模型、远程后端和 benchmark 的统一入口。远程翻译提供
+OpenAI-compatible Chat Completions 和 DeepL adapter；配置 profile 带 backend 身份，避免把
+OpenAI endpoint/model 解释为 DeepL 配置。endpoint、model 可配置，API key 单独写入
 本机 `comic_translation_secrets.json`，不进入 appdata、数据同步或翻译 artifact。
 OCR 行/列先以字号×字符数重建逻辑文字矩形，再结合 bubble、背景、主/副轴接触和归一化距离合并为翻译 unit。远程模型联合理解整个 unit，再返回与
 `regionIds/sourceLines` 等长且一一对应的译文数组。译文分别写回原 region，不再只放在 anchor region。
 纯标点/无意义字符不进入远程请求。拟声词默认不翻译，用户显式开启后才进入 unit；该选项参与
 translation cache key。Reader 将 clean overlay 裁剪到实际有译文的 region mask；跳过的拟声词等区域保留原文，
 不会因一个跳过区块而放弃其他区域的原生修复。
-协议和用户追加提示词的版本摘要纳入 translation cache key。OpenAI-compatible client 在 translator
-load/unload 生命周期内复用连接，不再逐页重建。
+协议和用户追加提示词的版本摘要纳入 translation cache key。DeepL 每个气泡 unit 作为一个
+`text`，只在客户端保留 unit ID，按响应数组顺序映射回原 unit；一个气泡的 OCR 行联合翻译，
+再按保留的原文权重分配回 region。两种 client 都在 translator load/unload 生命周期内复用连接，
+不再逐页重建。
 
 跨页 batch 不应通过翻译模块另开图片下载连接。翻译开启时，翻译 policy 把图片管线的有效
 预载下限提高到 4，并最多向现有 session 提交后续 4 张静态图；输入解析器仍只消费已封口的
@@ -68,6 +71,11 @@ Translation key = OCR digest + translation engine/model + target language
 `OCR digest + engine/model + target language` 相同的最近 artifact。上下文参与首次翻译，但不应因
 Reader session 销毁后无法重建完全相同的运行时上下文而重复请求远程模型。
 
+translation artifact 同时持久化 unit 成员、顺序、band 和方向，overlay 的内存布局缓存不
+持久化。读取 artifact 时必须将这四项与当前 grouping 结果逐项核对；仅有相同 unit 成员并不
+足以复用旧排版元数据。该契约版本参与 translation model key，grouping/overlay 契约变化时
+旧 artifact 会失效。设置中的“清除缓存”同时清空翻译 SQLite，并 checkpoint/VACUUM 回收文件。
+
 因此 CDN authority 改变、版本迁移或页码偏移不会误使结果失效。OCR 与目标语言解耦；
 切换翻译语言只重做翻译。SQLite 保存结构化区域、文字和稀疏透明 clean-overlay PNG；后者只含
 文字 mask 内的修复像素，不保存整张原图，也不重复写入 translation artifact。
@@ -106,8 +114,9 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - overlay 有独立 `RepaintBoundary`；
 - 动图 Texture 更新不重绘文字；
 - artifact 通过每页 `ValueListenable` 发布，不调用 Reader `setState`；
-- OCR detector 产生的 region 是文字边界而不是语义分组。Dart 侧先估算
-  `sqrt(OCR area / character count)` 字号，使用 source mask 的副轴墨迹中心、OCR 主轴中心和
+- OCR detector 产生的 region 是文字边界而不是语义分组。Dart 侧以副轴墨迹宽度为基础；bubble
+  正文再结合 `主轴长度 / 字符数` 的字符步进估算字号，避免正常正文仅因字形较窄而被当作小字。两项按
+  几何均值平滑组合，不对输出字号做事后钳制。随后使用 source mask 的副轴墨迹中心、OCR 主轴中心和
   `font size × character count` 主轴长度重建逻辑矩形；不回退到带大量空白的 OCR 矩形做关系判定。
 - unit 关系分两个互补分支：`sameBand` 处理副轴重叠足够的同行/列碎片；
   `adjacentBand = !sameBand` 处理相邻行/列，必须同时通过连续的加权距离、主轴重叠/端点接触和气泡边界检查。
@@ -125,17 +134,28 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   或无条件铺满气泡。若译文行/列数少于 source band，且候选通过缩小字号才不断行/列，两者作为联合惩罚，
   避免将原本均衡的两列压成小字单列。排版枚举和 `TextPainter.layout` 不在 `CustomPainter.paint`
   内执行：overlay 获得显示尺寸后，以 idle scheduler 每次只执行一次字号测量；二分搜索、候选字号和 block
-  之间都可被下一帧或输入抢占，不将一个 block 换成 Paint 之外的 UI isolate 长任务。全部 plan 就绪后才显示 clean overlay
-  和译文。plan cache 在 clean-overlay 解码完成、查看原文及颜色变化导致 painter 重建时继续复用；只有 artifact、字号比例或显示矩形变化才重算。
+  之间都可被下一帧或输入抢占，不将一个 block 换成 Paint 之外的 UI isolate 长任务。最终 glyph/paragraph 的
+  `TextPainter`、offset、mask path 和 bubble geometry 同样在 idle task 中准备；同一 OCR region 的全部 mask polygon
+  先合并为一个 path，不按每个轮廓拆成独立 idle task。`paint` 只提交已缓存的绘制命令。
+  每个完整 block 发布后更新同一个 repaint notifier；文字 painter 和 clean-overlay clipper 同时监听它，clipper
+  直接读取已完成的 region id，因此无需页面 `setState` 就能渐进显示对应修复层和译文，也不会暴露半个 block。
+  plan cache 在 clean-overlay 解码完成、查看原文及颜色变化导致 painter 重建时继续复用；颜色变化只重建绘制命令，只有 artifact、字号比例或显示矩形变化才重算排版。
 - 联通气泡只将 OCR 区块中心分配到已经分离的距离核心，不再使用文字位置聚类创造拆分。气泡候选降低最低
   凸包实度以接纳凹形轮廓，普通近凸气泡仍不执行 Voronoi 拆分。
 - 排版方向以 OCR polygon 的宽高关系重新确认，竖向区块不会因为识别方向阈值过高而进入横排。
 - Reader session 以本次阅读首个完成的 current artifact 汇总源/目标长度缩放值，作为整个 session 稳定的
   字号先验；后续预翻译页不再改写该值，避免每完成一页就使所有可见 overlay 失效并重排。它不是字号上限。
-  源字号按 `sqrt(OCR box area / source character count)` 估算，同一 band 的碎片先合并成一句译文，再参与
+  源字号使用与 engine 相同的“副轴墨迹宽度 + 正文字符步进”估算，同一 band 的碎片先合并成一句译文，再参与
   候选排版评分，避免包含两列文字的宽 OCR box 被误当成双倍字号。
+- 未被 bubble 分割覆盖的文字不会再因“偏大”“倾斜”或“片假名”任一单项证据就被推断为拟声词；
+  自动排除至少需要两项证据同时成立，避免正文已经被 OCR 识别却在生成 translation unit 前消失。
+- bubble 轮廓只有在能形成有效内接排版区域时才作为硬裁剪；联通尾部、开放或错误合并的轮廓若把
+  内接矩形压缩到不可用，会改用原文区域锚定排版，而不是把已有译文 block 静默标记为 skipped。
+- 渐进准备的完成条件按当前 block key 逐项核对，并要求不存在进行中的 search/render；不能再用
+  `prepared.length + skipped.length` 推断整页完成。字号二分搜索先实际找到一个可容纳译文的下界，
+  不再假定 `2px` 必然可用；长条页中的窄气泡因此不会使 `_best` 为空、终止 idle 任务链并永久停在部分结果。
 - 远程配置支持保存多组 endpoint/model/prompt/API key 并即时切换；API key 仍只写入本机 secrets 文件。
-- 一页远程翻译按完整气泡 unit 分批，每批最多 16 个 unit/960 个源字符，并发 2 批；普通漫画页通常只发一个请求，单个 unit 不拆分。
+- OpenAI-compatible 一页翻译按完整气泡 unit 分批，每批最多 16 个 unit/960 个源字符，并发 2 批；普通漫画页通常只发一个请求，单个 unit 不拆分。
   不限制 completion token，避免兼容接口的隐藏推理占满预算后返回空正文。benchmark 记录每批耗时、unit 数、字符数和原始响应，
   用于区分连接延迟与大请求的模型生成/排队延迟。
 - 当前翻译协议要求整批 JSON 与逐 region 一一对应，且实测慢模型约 94% completion token 是正文前的隐藏推理；仅打开 SSE
@@ -143,6 +163,10 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   因此不以破坏原子缓存和排版一致性的方式直接设置 `stream=true`。完整 OCR/translation artifact 已按内容、模型、语言和上下文缓存；
   短句级缓存会忽略人物、语气和上下文，暂不作为正确性缓存。内建 prompt 保留输出协议所需规则但已压缩；不设置固定
   `max_tokens`，避免推理模型把预算消耗在隐藏 reasoning 后返回空或不完整 JSON。
+- DeepL 不要求模型生成 ID/JSON map：每批最多 50 个 `text`，并在编码后的请求体达到 DeepL
+  128 KiB 上限前分批。响应数量必须与请求数量完全相同，随后按索引建立现有
+  `ComicTranslationResult`。这消除了生成式 JSON 漏字段造成的整批失败，但不能补回 OCR 漏检、
+  无意义文本过滤或错误分组造成的缺失。
 - 长条页分 tile 时先给 group id 加 tile namespace，合并结果后再以背景色和重叠轮廓对跨 tile 的
   同一气泡去重，避免一个跨分块气泡被拆成两段。
 - 竖排区块保持从右到左分列；排版按目标字体的实际 glyph 宽高测量，不以源文字数或
@@ -155,8 +179,9 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   OpenCV Telea inpainting，并输出与分析图同尺度、其余像素透明的 clean overlay；Reader 先合成
   clean overlay 再画译文，因此渐变和纹理不再被单色块替换。没有可靠像素 mask 时以 OCR quad
   作为修复 mask，而不是让原文完整残留。未膨胀的强前景像素仍用于采样译文字色。
-- 原生 OCR 在 bubble 分割后剔除“低置信度、无 bubble、且与其他文字不构成空间组”的孤立 region；它们既不进入
-  OCR artifact/远程请求，也不写入 clean overlay，避免眼睛、线稿等误识别被擦除或翻译。
+- 原生 OCR 在 bubble 分割后仅剔除“低置信度、无 bubble、至多一个有效字符、且与其他文字不构成空间组”的
+  孤立 region；它们既不进入 OCR artifact/远程请求，也不写入 clean overlay，避免眼睛、线稿等误识别被擦除或翻译。
+  多字符对白不会因 bubble 漏分割而在此丢失；已检测到 bubble 的单字加标点短句也保留到翻译 unit。
 - OCR 主检测后会用轻量全局轮廓扫描寻找“未包含任何 OCR 中心、内部存在文字笔画”的浅色闭合
   气泡，只对这些候选 crop 做一次二次 OCR；正常页没有候选时不会增加 ONNX 推理。该路径补回
   完全漏检的常见白色气泡，但不覆盖彩色/无边框气泡、框外旁白或艺术字。benchmark 显示
@@ -222,6 +247,6 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 已完成：旁路模型、内容寻址数据库、独立调度、缓存完成事件、Reader overlay、设置入口、
 动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
-已提供 OpenAI-compatible 远程翻译 adapter。未完成：iOS/桌面 OCR runtime、本地文本翻译、
+已提供 OpenAI-compatible 和 DeepL 远程翻译 adapter。未完成：iOS/桌面 OCR runtime、本地文本翻译、
 learned balloon detector、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI 明确报告模型
 未安装，不进行网络回退。

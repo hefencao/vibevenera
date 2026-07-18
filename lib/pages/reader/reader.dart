@@ -24,6 +24,7 @@ import 'package:venera/foundation/cache_manager.dart';
 import 'package:venera/foundation/comic_source/comic_source.dart';
 import 'package:venera/foundation/comic_version_migration.dart';
 import 'package:venera/foundation/comic_type.dart';
+import 'package:venera/foundation/comic_translation/grouping.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
 import 'package:venera/foundation/comic_translation/policy.dart';
 import 'package:venera/foundation/comic_translation/session.dart';
@@ -72,6 +73,14 @@ part 'gesture.dart';
 part 'comic_image.dart';
 
 part 'translation_overlay.dart';
+
+part 'translation_layout.dart';
+
+part 'translation_layout_geometry.dart';
+
+part 'translation_layout_search.dart';
+
+part 'translation_text_layout.dart';
 
 part 'loading.dart';
 
@@ -221,6 +230,7 @@ class _ReaderState extends State<Reader>
   ComicTranslationInteraction _translationInteraction =
       ComicTranslationInteraction.idle;
   final _translationLayers = <_ReaderTranslationLayerState>{};
+  int _imageCacheRequest = 0;
 
   bool peekTranslationSourceAt(Offset globalPosition) {
     for (final layer in _translationLayers) {
@@ -481,9 +491,12 @@ class _ReaderState extends State<Reader>
     initReaderWindow();
   }
 
-  void setImageCacheSize() async {
-    var availableRAM = await MemoryInfo.getFreePhysicalMemorySize();
-    if (availableRAM == null) return;
+  Future<void> setImageCacheSize() async {
+    final request = ++_imageCacheRequest;
+    final availableRAM = await MemoryInfo.getFreePhysicalMemorySize();
+    if (!mounted || request != _imageCacheRequest || availableRAM == null) {
+      return;
+    }
     int maxImageCacheSize;
     if (availableRAM < 1 << 30) {
       maxImageCacheSize = 100 << 20;
@@ -503,6 +516,7 @@ class _ReaderState extends State<Reader>
 
   @override
   void dispose() {
+    _imageCacheRequest++;
     _stopAdaptiveClassification();
     AnimatedImageRegistry.revision.removeListener(
       _onTranslationAnimationLearned,
@@ -537,7 +551,8 @@ class _ReaderState extends State<Reader>
     final locale = App.locale;
     final targetLanguage = targetSetting == 'system'
         ? [locale.languageCode, locale.countryCode]
-            .whereType<String>()
+            .where((value) => value != null && value.isNotEmpty)
+            .cast<String>()
             .join('-')
         : targetSetting;
     return ComicTranslationSession(

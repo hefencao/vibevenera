@@ -427,6 +427,7 @@ class ComicTranslationOcrPlugin(
         if (region.confidence >= MIN_UNBUBBLED_SINGLE_CONFIDENCE ||
             segmentation[index].bubbleGroupId != null
         ) return false
+        if (region.text.count { it.isLetterOrDigit() } > 1) return false
         return results.indices.none { other ->
             other != index && segmentation[other].bubbleGroupId == null &&
                 relatedTextBoxes(region.box, results[other].box)

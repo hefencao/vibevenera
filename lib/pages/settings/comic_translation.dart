@@ -31,6 +31,7 @@ class _ComicTranslationBackendPageState
     if (profiles.isEmpty) {
       profiles.add(ComicTranslationRemoteProfile(
         id: 'default',
+        backend: 'openaiCompatible',
         name: appdata.settings['comicTranslationRemoteModel'] as String,
         endpoint: appdata.settings['comicTranslationRemoteEndpoint'] as String,
         model: appdata.settings['comicTranslationRemoteModel'] as String,
@@ -41,6 +42,12 @@ class _ComicTranslationBackendPageState
     activeProfileId = appdata.settings['comicTranslationRemoteProfile'] as String;
     if (!profiles.any((profile) => profile.id == activeProfileId)) {
       activeProfileId = profiles.first.id;
+    }
+    if (backend != 'none' && _activeProfile.backend != backend) {
+      activeProfileId = profiles
+          .where((profile) => profile.backend == backend)
+          .firstOrNull
+          ?.id ?? _addDefaultProfile(backend).id;
     }
     final profile = _activeProfile;
     profileName = TextEditingController(text: profile.name);
@@ -171,16 +178,20 @@ class _ComicTranslationBackendPageState
                       value: 'openaiCompatible',
                       child: Text('OpenAI-compatible API'.tl),
                     ),
+                    const DropdownMenuItem(
+                      value: 'deepl',
+                      child: Text('DeepL API'),
+                    ),
                   ],
-                  onChanged: (value) => setState(() => backend = value!),
+                  onChanged: working ? null : (value) => _changeBackend(value!),
                 ),
               ),
-              if (backend == 'openaiCompatible') ...[
+              if (backend != 'none') ...[
                 ListTile(
                   title: Text('Saved remote model'.tl),
                   trailing: DropdownButton<String>(
                     value: activeProfileId,
-                    items: profiles.map((profile) => DropdownMenuItem(
+                    items: _backendProfiles.map((profile) => DropdownMenuItem(
                       value: profile.id,
                       child: SizedBox(
                         width: 150,
@@ -223,29 +234,75 @@ class _ComicTranslationBackendPageState
                 TextField(
                   controller: endpoint,
                   decoration: InputDecoration(
-                    labelText: 'Chat Completions endpoint'.tl,
+                    labelText: backend == 'deepl'
+                        ? 'DeepL endpoint'.tl
+                        : 'Chat Completions endpoint'.tl,
                     border: const OutlineInputBorder(),
                   ),
                   keyboardType: TextInputType.url,
                 ).paddingHorizontal(16).paddingVertical(6),
-                TextField(
-                  controller: model,
-                  decoration: InputDecoration(
-                    labelText: 'Model'.tl,
-                    border: const OutlineInputBorder(),
+                if (backend == 'deepl')
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(
+                          'API Free uses api-free.deepl.com; API Pro uses api.deepl.com.'.tl,
+                          style: ts.s12,
+                        )),
+                        TextButton(
+                          onPressed: () => launchUrlString(
+                            'https://developers.deepl.com/docs/getting-started/auth',
+                          ),
+                          child: Text('DeepL API guide'.tl),
+                        ),
+                      ],
+                    ),
                   ),
-                ).paddingHorizontal(16).paddingVertical(6),
-                TextField(
-                  controller: additionalPrompt,
-                  minLines: 2,
-                  maxLines: 5,
-                  decoration: InputDecoration(
-                    labelText: 'Additional translation instructions'.tl,
-                    helperText:
-                        'Appended to the built-in format rules; use it for names, terminology and style.'.tl,
-                    border: const OutlineInputBorder(),
-                  ),
-                ).paddingHorizontal(16).paddingVertical(6),
+                if (backend == 'deepl')
+                  ListTile(
+                    title: Text('DeepL model'.tl),
+                    trailing: DropdownButton<String>(
+                      value: model.text,
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'latency_optimized',
+                          child: Text('Latency optimized'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'quality_optimized',
+                          child: Text('Quality optimized'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'prefer_quality_optimized',
+                          child: Text('Prefer quality'),
+                        ),
+                      ],
+                      onChanged: working
+                          ? null
+                          : (value) => setState(() => model.text = value!),
+                    ),
+                  )
+                else ...[
+                  TextField(
+                    controller: model,
+                    decoration: InputDecoration(
+                      labelText: 'Model'.tl,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ).paddingHorizontal(16).paddingVertical(6),
+                  TextField(
+                    controller: additionalPrompt,
+                    minLines: 2,
+                    maxLines: 5,
+                    decoration: InputDecoration(
+                      labelText: 'Additional translation instructions'.tl,
+                      helperText:
+                          'Appended to the built-in format rules; use it for names, terminology and style.'.tl,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ).paddingHorizontal(16).paddingVertical(6),
+                ],
                 TextField(
                   controller: apiKey,
                   obscureText: true,
@@ -272,7 +329,7 @@ class _ComicTranslationBackendPageState
                 alignment: WrapAlignment.end,
                 spacing: 8,
                 children: [
-                  if (ComicTranslationSecrets.instance
+                  if (backend != 'none' && ComicTranslationSecrets.instance
                       .hasApiKey(activeProfileId))
                     TextButton(
                       onPressed: working ? null : _clearApiKey,
@@ -282,7 +339,7 @@ class _ComicTranslationBackendPageState
                     onPressed: working ? null : _save,
                     child: Text('Save'.tl),
                   ),
-                  if (backend == 'openaiCompatible')
+                  if (backend != 'none')
                     FilledButton.tonal(
                       onPressed: working ? null : _testRemote,
                       child: Text('Save and test'.tl),
@@ -309,9 +366,31 @@ class _ComicTranslationBackendPageState
   ComicTranslationRemoteProfile get _activeProfile =>
       profiles.firstWhere((profile) => profile.id == activeProfileId);
 
+  List<ComicTranslationRemoteProfile> get _backendProfiles =>
+      profiles.where((profile) => profile.backend == backend).toList();
+
+  ComicTranslationRemoteProfile _addDefaultProfile(String value) {
+    final suffix = profiles.isEmpty
+        ? 'default'
+        : DateTime.now().microsecondsSinceEpoch.toString();
+    final profile = ComicTranslationRemoteProfile(
+      id: '${value}_$suffix',
+      backend: value,
+      name: value == 'deepl' ? 'DeepL' : '',
+      endpoint: value == 'deepl'
+          ? 'https://api-free.deepl.com/v2/translate'
+          : 'https://api.openai.com/v1/chat/completions',
+      model: value == 'deepl' ? 'latency_optimized' : '',
+      additionalPrompt: '',
+    );
+    profiles.add(profile);
+    return profile;
+  }
+
   ComicTranslationRemoteProfile _profileFromFields(String id) =>
       ComicTranslationRemoteProfile(
         id: id,
+        backend: backend,
         name: profileName.text.trim().isEmpty
             ? model.text.trim()
             : profileName.text.trim(),
@@ -333,6 +412,23 @@ class _ComicTranslationBackendPageState
     apiKey.clear();
   }
 
+  Future<void> _changeBackend(String value) async {
+    final oldId = activeProfileId;
+    if (backend != 'none') _updateActiveProfile();
+    if (apiKey.text.isNotEmpty) {
+      await ComicTranslationSecrets.instance.setApiKey(oldId, apiKey.text);
+    }
+    backend = value;
+    if (value != 'none') {
+      final profile = profiles
+          .where((profile) => profile.backend == value)
+          .firstOrNull ?? _addDefaultProfile(value);
+      activeProfileId = profile.id;
+      _applyProfile(profile);
+    }
+    if (mounted) setState(() {});
+  }
+
   Future<void> _selectProfile(String id) async {
     setState(() => working = true);
     final oldId = activeProfileId;
@@ -343,6 +439,7 @@ class _ComicTranslationBackendPageState
     activeProfileId = id;
     _applyProfile(_activeProfile);
     final profile = _activeProfile;
+    appdata.settings['comicTranslationBackend'] = backend;
     appdata.settings['comicTranslationRemoteProfiles'] =
         profiles.map((profile) => profile.toJson()).toList();
     appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
@@ -367,6 +464,7 @@ class _ComicTranslationBackendPageState
     final current = _profileFromFields(id);
     final profile = ComicTranslationRemoteProfile(
       id: id,
+      backend: backend,
       name: current.name.isEmpty
           ? '${'Remote model'.tl} ${profiles.length + 1}'
           : '${current.name} ${profiles.length + 1}',
@@ -386,17 +484,12 @@ class _ComicTranslationBackendPageState
     final id = activeProfileId;
     profiles.removeWhere((profile) => profile.id == id);
     await ComicTranslationSecrets.instance.removeProfile(id);
-    if (profiles.isEmpty) {
-      profiles.add(const ComicTranslationRemoteProfile(
-        id: 'default',
-        name: '',
-        endpoint: 'https://api.openai.com/v1/chat/completions',
-        model: '',
-        additionalPrompt: '',
-      ));
-    }
-    activeProfileId = profiles.first.id;
+    final replacement = profiles
+        .where((profile) => profile.backend == backend)
+        .firstOrNull ?? _addDefaultProfile(backend);
+    activeProfileId = replacement.id;
     _applyProfile(_activeProfile);
+    appdata.settings['comicTranslationBackend'] = backend;
     appdata.settings['comicTranslationRemoteProfiles'] =
         profiles.map((profile) => profile.toJson()).toList();
     appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
@@ -406,12 +499,21 @@ class _ComicTranslationBackendPageState
   }
 
   String? _validate() {
-    if (backend != 'openaiCompatible') return null;
+    if (backend == 'none') return null;
     final uri = Uri.tryParse(endpoint.text.trim());
     if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
       return 'Invalid API endpoint'.tl;
     }
-    if (model.text.trim().isEmpty) return 'Model cannot be empty'.tl;
+    if (backend == 'openaiCompatible' && model.text.trim().isEmpty) {
+      return 'Model cannot be empty'.tl;
+    }
+    if (backend == 'deepl' && !const {
+      'latency_optimized',
+      'quality_optimized',
+      'prefer_quality_optimized',
+    }.contains(model.text)) {
+      return 'Invalid DeepL model'.tl;
+    }
     return null;
   }
 
@@ -453,17 +555,19 @@ class _ComicTranslationBackendPageState
       return false;
     }
     setState(() => working = true);
-    _updateActiveProfile();
+    if (backend != 'none') _updateActiveProfile();
     final profile = _activeProfile;
     appdata.settings['comicTranslationBackend'] = backend;
     appdata.settings['comicTranslationRemoteProfiles'] =
         profiles.map((profile) => profile.toJson()).toList();
-    appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
-    appdata.settings['comicTranslationRemoteEndpoint'] = profile.endpoint;
-    appdata.settings['comicTranslationRemoteModel'] = profile.model;
-    appdata.settings['comicTranslationAdditionalPrompt'] =
-        profile.additionalPrompt;
-    if (apiKey.text.isNotEmpty) {
+    if (backend != 'none') {
+      appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
+      appdata.settings['comicTranslationRemoteEndpoint'] = profile.endpoint;
+      appdata.settings['comicTranslationRemoteModel'] = profile.model;
+      appdata.settings['comicTranslationAdditionalPrompt'] =
+          profile.additionalPrompt;
+    }
+    if (backend != 'none' && apiKey.text.isNotEmpty) {
       await ComicTranslationSecrets.instance.setApiKey(
         activeProfileId,
         apiKey.text,
@@ -486,10 +590,11 @@ class _ComicTranslationBackendPageState
   Future<void> _testRemote() async {
     if (!await _save() || !mounted) return;
     setState(() => working = true);
-    final translator = ComicTranslationEngineRegistry.instance.translationEngine!;
+    final engines = ComicTranslationEngineRegistry.instance;
+    final translator = engines.translationEngine!;
     final timer = Stopwatch()..start();
     try {
-      final result = await translator.translate(ComicTranslationRequest(
+      final result = await engines.translateConfigured(ComicTranslationRequest(
         ocr: const ComicOcrArtifact(
           contentDigest: 'connection-test',
           engineId: 'connection-test',

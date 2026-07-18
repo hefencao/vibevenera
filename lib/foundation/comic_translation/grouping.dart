@@ -2,6 +2,18 @@ import 'dart:math' as math;
 
 import 'models.dart';
 
+double comicTextFontSize({
+  required double crossExtent,
+  required double mainExtent,
+  required int characters,
+  required bool bodyContext,
+}) {
+  final advance = mainExtent / characters.clamp(1, 1000);
+  final areaSize = math.sqrt(math.max(1e-6, crossExtent * advance));
+  final stableExtent = bodyContext ? math.max(crossExtent, advance) : crossExtent;
+  return stableExtent * .72 + areaSize * .28;
+}
+
 final class ComicTextRegion<T> {
   final T value;
   final String id;

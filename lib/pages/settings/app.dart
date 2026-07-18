@@ -118,6 +118,7 @@ class _AppSettingsState extends State<AppSettings> {
               allowCancel: false,
             );
             await CacheManager().clear();
+            await App.comicTranslationStore.clear();
             ContentCache.instance.clear();
             loadingDialog.close();
             context.showMessage(message: "Cache cleared".tl);

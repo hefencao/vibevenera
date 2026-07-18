@@ -12,36 +12,60 @@ final class ComicTranslationStore {
   static final instance = ComicTranslationStore._();
 
   SendPort? _worker;
+  Future<void>? _initializing;
+  Future<void>? _closing;
 
   Future<void> init(String dataPath) async {
+    final closing = _closing;
+    if (closing != null) await closing;
     if (_worker != null) return;
+    await (_initializing ??= _start(dataPath).whenComplete(() {
+      _initializing = null;
+    }));
+  }
+
+  Future<void> _start(String dataPath) async {
     final ready = ReceivePort();
     final errors = ReceivePort();
-    await Isolate.spawn(
-      _storeWorker,
-      ['$dataPath/comic_translation.db', ready.sendPort],
-      onError: errors.sendPort,
-    );
-    _worker = await Future.any([
-      ready.first.then((value) => value as SendPort),
-      errors.first.then<SendPort>((value) {
-        final error = value as List;
-        throw StateError('${error[0]}\n${error[1]}');
-      }),
-    ]);
-    ready.close();
-    errors.close();
+    try {
+      await Isolate.spawn(
+        _storeWorker,
+        ['$dataPath/comic_translation.db', ready.sendPort],
+        onError: errors.sendPort,
+        errorsAreFatal: true,
+      );
+      _worker = await Future.any([
+        ready.first.then((value) => value as SendPort),
+        errors.first.then<SendPort>((value) {
+          final error = value as List;
+          throw StateError('${error[0]}\n${error[1]}');
+        }),
+      ]);
+    } finally {
+      ready.close();
+      errors.close();
+    }
   }
 
   Future<dynamic> _call(String operation, List<Object?> arguments) async {
-    final reply = ReceivePort();
-    _worker!.send([operation, arguments, reply.sendPort]);
-    final response = await reply.first as List;
-    reply.close();
-    if (response[0] == false) {
-      throw StateError('${response[1]}\n${response[2]}');
+    final worker = _worker;
+    if (worker == null) {
+      throw StateError('Comic translation store is not initialized');
     }
-    return response[1];
+    if (_closing != null && operation != 'close') {
+      throw StateError('Comic translation store is closing');
+    }
+    final reply = ReceivePort();
+    try {
+      worker.send([operation, arguments, reply.sendPort]);
+      final response = await reply.first as List;
+      if (response[0] == false) {
+        throw StateError('${response[1]}\n${response[2]}');
+      }
+      return response[1];
+    } finally {
+      reply.close();
+    }
   }
 
   Future<String?> findContentDigest({
@@ -150,9 +174,20 @@ final class ComicTranslationStore {
   Future<void> clear() => _call('clear', const []);
 
   Future<void> close() async {
+    final initializing = _initializing;
+    if (initializing != null) await initializing;
     if (_worker == null) return;
-    await _call('close', const []);
-    _worker = null;
+    await (_closing ??= _close().whenComplete(() {
+      _closing = null;
+    }));
+  }
+
+  Future<void> _close() async {
+    try {
+      await _call('close', const []);
+    } finally {
+      _worker = null;
+    }
   }
 
   static String _ocrKey(
@@ -198,6 +233,8 @@ void _storeWorker(List<Object> init) async {
   }
   db.execute('''
     PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS page_content (
       page_key TEXT PRIMARY KEY NOT NULL,
       source_key TEXT NOT NULL,
@@ -324,7 +361,7 @@ Object? _executeStoreOperation(
           SELECT payload, cache_key FROM translation_artifacts
           WHERE ocr_digest = ? AND engine_id = ? AND model_version = ?
             AND target_language = ?
-          ORDER BY accessed_at DESC LIMIT 1;
+          ORDER BY accessed_at DESC, updated_at DESC LIMIT 1;
         ''', arguments.sublist(1));
       }
       if (rows.isEmpty) return null;
@@ -353,6 +390,8 @@ Object? _executeStoreOperation(
         DELETE FROM ocr_artifacts;
         DELETE FROM translation_artifacts;
       ''');
+      db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
+      db.execute('VACUUM;');
       return null;
   }
   throw ArgumentError.value(operation, 'operation');

@@ -1,14 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/comic_translation/benchmark.dart';
+import 'package:venera/foundation/comic_translation/deepl_translation.dart';
 import 'package:venera/foundation/comic_translation/engine.dart';
 import 'package:venera/foundation/comic_translation/grouping.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
 import 'package:venera/foundation/comic_translation/policy.dart';
 import 'package:venera/foundation/comic_translation/remote_translation.dart';
+import 'package:venera/foundation/comic_translation/runtime.dart';
 import 'package:venera/foundation/comic_translation/session.dart';
 import 'package:venera/foundation/comic_translation/store.dart';
 
@@ -118,6 +122,67 @@ void main() {
     fallback.dispose();
   });
 
+  test('stale overlay layout metadata invalidates translation artifact',
+      () async {
+    final image = File('${temp.path}/stale-layout.bin');
+    await image.writeAsBytes(List<int>.filled(263, 7));
+    final identity = ComicTranslationPageIdentity(
+      imageKey: image.uri.toString(),
+      sourceKey: 'layout-cache',
+      comicId: 'layout-cache',
+      chapterId: '0',
+      pageIndex: 0,
+      mediaKind: ComicTranslationMediaKind.staticImage,
+    );
+    final ocr = _OcrEngine();
+    final translator = _TranslationEngine();
+    final registry = ComicTranslationEngineRegistry()
+      ..ocrEngine = ocr
+      ..translationEngine = translator;
+    final first = ComicTranslationSession(
+      enabled: true,
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      engines: registry,
+    );
+    first.reportPages(
+      current: [identity],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    final artifact = (await _waitFor(first, identity)).artifact!;
+    first.dispose();
+
+    final staleJson = artifact.toJson();
+    final staleRegion =
+        (staleJson['regions'] as List).single as Map<String, dynamic>;
+    final originalOrientation = artifact.regions.single.translationOrientation!;
+    staleRegion['translationOrientation'] =
+        (originalOrientation == ComicTextOrientation.vertical
+            ? ComicTextOrientation.horizontal
+            : ComicTextOrientation.vertical).name;
+    await ComicTranslationStore.instance.storeTranslation(
+      ComicTranslationArtifact.fromJson(staleJson),
+    );
+
+    final reopened = ComicTranslationSession(
+      enabled: true,
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      engines: registry,
+    );
+    reopened.reportPages(
+      current: [identity],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    final refreshed = (await _waitFor(reopened, identity)).artifact!;
+    expect(translator.calls, 2);
+    expect(
+      refreshed.regions.single.translationOrientation,
+      originalOrientation,
+    );
+    reopened.dispose();
+  });
+
   test('engine leases keep shared models loaded until the final user leaves', () async {
     final ocr = _OcrEngine();
     final translator = _TranslationEngine();
@@ -136,6 +201,123 @@ void main() {
     await registry.release(second);
     expect(ocr.unloads, 1);
     expect(translator.unloads, 1);
+  });
+
+  test('engine generations switch without waiting for older leases', () async {
+    final firstOcr = _OcrEngine(version: 'first');
+    final firstTranslator = _TranslationEngine();
+    final secondOcr = _OcrEngine(version: 'second');
+    final secondTranslator = _TranslationEngine();
+    final registry = ComicTranslationEngineRegistry()
+      ..configure(
+        ocrEngine: firstOcr,
+        translationEngine: firstTranslator,
+      );
+    final first = await registry.acquire();
+    await registry.loadOcr(first, 'ja');
+    await registry.loadTranslator(first);
+
+    registry.configure(
+      ocrEngine: secondOcr,
+      translationEngine: secondTranslator,
+    );
+    final second = await registry.acquire();
+    expect(second.ocr, same(secondOcr));
+    expect(second.translator, same(secondTranslator));
+    await registry.loadOcr(second, 'ko');
+    await registry.loadTranslator(second);
+    expect(firstOcr.unloads, 1);
+    expect(firstTranslator.unloads, 1);
+
+    await registry.loadOcr(first, 'ja');
+    await registry.loadTranslator(first);
+    expect(secondOcr.unloads, 1);
+    expect(secondTranslator.unloads, 1);
+    await registry.release(second);
+    await registry.loadOcr(first, 'ja');
+    await registry.loadTranslator(first);
+    expect(firstOcr.loads, 2);
+    expect(firstTranslator.loads, 2);
+    await registry.release(first);
+    expect(firstOcr.unloads, 2);
+    expect(firstTranslator.unloads, 2);
+  });
+
+  test('engine generations transfer unchanged loaded adapters', () async {
+    final ocr = _OcrEngine();
+    final firstTranslator = _TranslationEngine();
+    final secondTranslator = _TranslationEngine();
+    final registry = ComicTranslationEngineRegistry()
+      ..configure(
+        ocrEngine: ocr,
+        translationEngine: firstTranslator,
+      );
+    final first = await registry.acquire();
+    await registry.loadOcr(first, 'ja');
+    registry.configure(
+      ocrEngine: ocr,
+      translationEngine: secondTranslator,
+    );
+    final second = await registry.acquire();
+    await registry.loadOcr(second, 'ja');
+    expect(ocr.loads, 1);
+    expect(ocr.unloads, 0);
+    await registry.release(second);
+    expect(ocr.unloads, 0);
+    await registry.loadOcr(first, 'ja');
+    expect(ocr.loads, 1);
+    await registry.release(first);
+    expect(ocr.unloads, 1);
+  });
+
+  test('configured translator test does not require an OCR lease', () async {
+    final translator = _TranslationEngine();
+    final registry = ComicTranslationEngineRegistry()
+      ..configure(ocrEngine: null, translationEngine: translator);
+    final result = await registry.translateConfigured(ComicTranslationRequest(
+      ocr: _ocrArtifact([_ocrRegion('test', 'Hello', 0, 1)]),
+      targetLanguage: 'zh-CN',
+      previousPages: const [],
+    ));
+    expect(result.translations.values.single, ['你好']);
+    expect(translator.loads, 1);
+    expect(translator.calls, 1);
+    expect(translator.unloads, 1);
+  });
+
+  test('release waits for recognize calls already queued on the lease', () async {
+    final started = Completer<void>();
+    final gate = Completer<void>();
+    final ocr = _OcrEngine(recognizeStarted: started, recognizeGate: gate);
+    final registry = ComicTranslationEngineRegistry()
+      ..ocrEngine = ocr
+      ..translationEngine = _TranslationEngine();
+    final pair = await registry.acquire();
+    const input = ComicOcrInput(
+      identity: ComicTranslationPageIdentity(
+        imageKey: 'registry-test',
+        sourceKey: 'local',
+        comicId: 'registry-test',
+        chapterId: '0',
+        pageIndex: 0,
+        mediaKind: ComicTranslationMediaKind.staticImage,
+      ),
+      filePath: 'registry-test',
+      contentDigest: 'registry-test',
+      sourceLanguage: 'ja',
+      maxAnalysisSide: 1600,
+      animatedMode: AnimatedTranslationMode.posterFrame,
+    );
+    final first = registry.recognize(pair, 'ja', input);
+    await started.future;
+    final second = registry.recognize(pair, 'ja', input);
+    final release = registry.release(pair);
+    await Future<void>.delayed(Duration.zero);
+    gate.complete();
+    await Future.wait([first, second]);
+    await release;
+    expect(ocr.calls, 2);
+    expect(ocr.unloads, 1);
   });
 
   test('translation survives a new session with different live context', () async {
@@ -203,6 +385,109 @@ void main() {
         );
     expect(engine(' names ').modelVersion, engine('names').modelVersion);
     expect(engine('formal').modelVersion, isNot(engine('casual').modelVersion));
+  });
+
+  test('DeepL profile backend survives persistence and old profiles migrate', () {
+    const profile = ComicTranslationRemoteProfile(
+      id: 'deepl',
+      backend: 'deepl',
+      name: 'DeepL Free',
+      endpoint: 'https://api-free.deepl.com/v2/translate',
+      model: 'latency_optimized',
+      additionalPrompt: '',
+    );
+    expect(ComicTranslationRemoteProfile.fromJson(profile.toJson()).backend,
+        'deepl');
+    final legacy = Map<String, dynamic>.from(profile.toJson())
+      ..remove('backend');
+    expect(ComicTranslationRemoteProfile.fromJson(legacy).backend,
+        'openaiCompatible');
+  });
+
+  test('DeepL maps ordered translations without sending unit ids', () async {
+    final request = ComicTranslationRequest(
+      ocr: _ocrArtifact([
+        _positionedRegion('a0', '好き', 0.62, 0.1, 0.08, 0.18, 0,
+            bubbleGroupId: 1),
+        _positionedRegion('a1', 'です', 0.52, 0.1, 0.08, 0.18, 1,
+            bubbleGroupId: 1),
+        _positionedRegion('b0', '次へ', 0.25, 0.6, 0.08, 0.18, 2,
+            bubbleGroupId: 2),
+      ]),
+      targetLanguage: 'zh-CN',
+      previousPages: const [],
+    );
+    expect(request.units, hasLength(2));
+    final adapter = _DeepLAdapter({
+      'translations': const [
+        {'text': '非常\n喜欢'},
+        {'text': '下一页'},
+      ],
+    });
+    final client = Dio()..httpClientAdapter = adapter;
+    final engine = DeepLComicTranslationEngine(
+      endpoint: 'https://api-free.deepl.com/v2/translate',
+      modelType: 'latency_optimized',
+      apiKey: 'secret',
+      client: client,
+    );
+    final result = await engine.translate(request);
+    final body = adapter.request!.data as Map<String, dynamic>;
+    expect(body['text'], request.units
+        .map((unit) => unit.sourceLines.join('\n')).toList());
+    expect(jsonEncode(body), isNot(contains(request.units.first.id)));
+    expect(result.translations[request.units[0].id], ['非常', '喜欢']);
+    expect(result.translations[request.units[1].id], ['下一页']);
+    expect(
+      adapter.request!.headers['Authorization'],
+      'DeepL-Auth-Key secret',
+    );
+  });
+
+  test('DeepL rejects unknown model types instead of changing semantics', () {
+    final engine = DeepLComicTranslationEngine(
+      endpoint: 'https://api-free.deepl.com/v2/translate',
+      modelType: 'fast-ish',
+      apiKey: 'secret',
+    );
+    expect(() => engine.modelVersion, throwsStateError);
+  });
+
+  test('DeepL batches at 50 ordered texts', () async {
+    final request = ComicTranslationRequest(
+      ocr: _ocrArtifact(List.generate(51, (index) => _positionedRegion(
+        'r$index',
+        '原$index',
+        0.1,
+        0.1,
+        0.08,
+        0.18,
+        index,
+        bubbleGroupId: index,
+      ))),
+      targetLanguage: 'zh-CN',
+      previousPages: const [],
+    );
+    expect(request.units, hasLength(51));
+    final adapter = _DeepLAdapter.generated((options) {
+      final texts = (options.data as Map<String, dynamic>)['text'] as List;
+      return {
+        'translations': List.generate(
+          texts.length,
+          (index) => {'text': '译$index'},
+        ),
+      };
+    });
+    final engine = DeepLComicTranslationEngine(
+      endpoint: 'https://api-free.deepl.com/v2/translate',
+      apiKey: 'secret',
+      client: Dio()..httpClientAdapter = adapter,
+    );
+    final result = await engine.translate(request);
+    expect(adapter.requests.map((request) =>
+        ((request.data as Map<String, dynamic>)['text'] as List).length),
+        [50, 1]);
+    expect(result.translations, hasLength(51));
   });
 
   test('remote translation JSON tolerates wrapper text and braces in strings', () {
@@ -649,6 +934,87 @@ void main() {
     expect(ComicTranslationUnit.fromOcr(artifact), isEmpty);
   });
 
+  test('short dialogue inside a detected bubble is not discarded as noise', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion(
+        'short', '……ら', 0.5, 0.2, 0.08, 0.2, 0,
+        bubbleGroupId: 7,
+      ),
+    ]);
+    expect(ComicTranslationUnit.fromOcr(artifact).single.sourceLines, ['……ら']);
+  });
+
+  test('bubble body font uses line advance when glyph ink is narrow', () {
+    final outside = comicTextFontSize(
+      crossExtent: 4,
+      mainExtent: 40,
+      characters: 4,
+      bodyContext: false,
+    );
+    final body = comicTextFontSize(
+      crossExtent: 4,
+      mainExtent: 40,
+      characters: 4,
+      bodyContext: true,
+    );
+    expect(outside, closeTo(4.651, .001));
+    expect(body, closeTo(8.971, .001));
+  });
+
+  test('one inferred sound-effect cue does not discard ordinary dialogue', () {
+    const bubble = [
+      NormalizedPoint(0.55, 0.08),
+      NormalizedPoint(0.9, 0.08),
+      NormalizedPoint(0.9, 0.7),
+      NormalizedPoint(0.55, 0.7),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion(
+        'body-1', '今日はいい日', 0.8, 0.15, 0.04, 0.24, 0,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion(
+        'body-2', '散歩しよう', 0.7, 0.15, 0.04, 0.24, 1,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion(
+        'body-3', 'そうですね', 0.6, 0.15, 0.04, 0.24, 2,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion(
+        'missed-bubble', '普通の長い台詞', 0.12, 0.18, 0.08, 0.18, 3,
+      ),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units.expand((unit) => unit.regionIds), contains('missed-bubble'));
+  });
+
+  test('combined size and script evidence still filters inferred sound effect', () {
+    const bubble = [
+      NormalizedPoint(0.55, 0.08),
+      NormalizedPoint(0.9, 0.08),
+      NormalizedPoint(0.9, 0.7),
+      NormalizedPoint(0.55, 0.7),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion(
+        'body-1', '今日はいい日', 0.8, 0.15, 0.04, 0.24, 0,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion(
+        'body-2', '散歩しよう', 0.7, 0.15, 0.04, 0.24, 1,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion(
+        'body-3', 'そうですね', 0.6, 0.15, 0.04, 0.24, 2,
+        bubbleGroupId: 7, bubblePolygon: bubble,
+      ),
+      _positionedRegion('sfx', 'ドンドン', 0.12, 0.18, 0.1, 0.24, 3),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units.expand((unit) => unit.regionIds), isNot(contains('sfx')));
+  });
+
   test('sound effects are submitted only when explicitly enabled', () {
     final artifact = _ocrArtifact([
       _ocrRegion(
@@ -795,7 +1161,7 @@ void main() {
     session.dispose();
   });
 
-  test('multi-column translation requires one result per OCR column', () {
+  test('one translation result is split back by source column weight', () {
     final ocr = ComicOcrArtifact(
       contentDigest: 'digest',
       engineId: 'ocr',
@@ -806,7 +1172,7 @@ void main() {
       mediaKind: ComicTranslationMediaKind.staticImage,
       animatedMode: AnimatedTranslationMode.posterFrame,
       regions: [
-        _ocrRegion('right', '右', 0, 1, left: 0.7),
+        _ocrRegion('right', '右右右', 0, 1, left: 0.7),
         _ocrRegion('left', '左', 1, 1, left: 0.3),
       ],
     );
@@ -815,12 +1181,11 @@ void main() {
       targetLanguage: 'zh-CN',
       previousPages: const [],
     );
-    expect(
-      () => request.expandUnitTranslations(
-        const ComicTranslationResult({'bubble:1': ['只有一列']}),
-      ),
-      throwsA(isA<StateError>()),
-    );
+    final unit = request.units.single;
+    final expanded = request.expandUnitTranslations(ComicTranslationResult({
+      unit.id: const ['甲乙丙丁'],
+    }));
+    expect(unit.regionIds.map((id) => expanded[id]).toList(), ['甲乙丙', '丁']);
   });
 
   test('repeated full balloon translation is distributed only once', () {
@@ -1020,14 +1385,51 @@ Future<void> _waitForPhase(
   return completer.future;
 }
 
+final class _DeepLAdapter implements HttpClientAdapter {
+  final Object Function(RequestOptions request) response;
+  final List<RequestOptions> requests = [];
+
+  RequestOptions? get request => requests.lastOrNull;
+
+  _DeepLAdapter(Object response) : response = ((_) => response);
+
+  _DeepLAdapter.generated(this.response);
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(options);
+    return ResponseBody.fromString(
+      jsonEncode(response(options)),
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['application/json'],
+      },
+    );
+  }
+}
+
 final class _OcrEngine implements ComicOcrEngine {
   final String version;
   final List<ComicOcrRegion>? regions;
+  final Completer<void>? recognizeStarted;
+  final Completer<void>? recognizeGate;
   int calls = 0;
   int loads = 0;
   int unloads = 0;
 
-  _OcrEngine({this.version = '1', this.regions});
+  _OcrEngine({
+    this.version = '1',
+    this.regions,
+    this.recognizeStarted,
+    this.recognizeGate,
+  });
 
   @override
   String get id => 'test-ocr';
@@ -1044,6 +1446,8 @@ final class _OcrEngine implements ComicOcrEngine {
   @override
   Future<ComicOcrArtifact> recognize(ComicOcrInput input) async {
     calls++;
+    if (recognizeStarted?.isCompleted == false) recognizeStarted!.complete();
+    if (recognizeGate != null) await recognizeGate!.future;
     return ComicOcrArtifact(
       contentDigest: input.contentDigest,
       engineId: id,

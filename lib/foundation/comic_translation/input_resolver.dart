@@ -28,37 +28,47 @@ final class ResolvedComicTranslationInput {
 final class ComicTranslationInputResolver {
   const ComicTranslationInputResolver();
 
+  static final Map<String, Future<String>> _digestTasks = {};
+
   Future<ResolvedComicTranslationInput?> resolve(
     ComicTranslationPageIdentity identity,
   ) async {
     final file = await _findFile(identity);
     if (file == null) return null;
-    final stat = await file.stat();
-    final mediaKind = identity.mediaKind == ComicTranslationMediaKind.animatedImage
-        ? ComicTranslationMediaKind.animatedImage
-        : await Isolate.run(() => _detectMediaKind(file.path));
-    var digest = await ComicTranslationStore.instance.findContentDigest(
-      identity: identity,
-      fileSize: stat.size,
-      fileModified: stat.modified.millisecondsSinceEpoch,
-    );
-    if (digest == null) {
-      digest = await Isolate.run(() async =>
-          (await sha256.bind(File(file.path).openRead()).first).toString());
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final stat = await file.stat();
+      if (stat.type != FileSystemEntityType.file) return null;
+      final modified = stat.modified.millisecondsSinceEpoch;
+      final mediaKind =
+          identity.mediaKind == ComicTranslationMediaKind.animatedImage
+              ? ComicTranslationMediaKind.animatedImage
+              : await Isolate.run(() => _detectMediaKind(file.path));
+      var digest = await ComicTranslationStore.instance.findContentDigest(
+        identity: identity,
+        fileSize: stat.size,
+        fileModified: modified,
+      );
+      digest ??= await _digest(file, stat.size, modified);
+      final verified = await file.stat();
+      final verifiedModified = verified.modified.millisecondsSinceEpoch;
+      if (verified.size != stat.size || verifiedModified != modified) {
+        continue;
+      }
       await ComicTranslationStore.instance.storeContentDigest(
         identity: identity,
         fileSize: stat.size,
-        fileModified: stat.modified.millisecondsSinceEpoch,
-        contentDigest: digest!,
+        fileModified: modified,
+        contentDigest: digest,
+      );
+      return ResolvedComicTranslationInput(
+        file: file,
+        size: stat.size,
+        modifiedMilliseconds: modified,
+        contentDigest: digest,
+        mediaKind: mediaKind,
       );
     }
-    return ResolvedComicTranslationInput(
-      file: file,
-      size: stat.size,
-      modifiedMilliseconds: stat.modified.millisecondsSinceEpoch,
-      contentDigest: digest,
-      mediaKind: mediaKind,
-    );
+    throw StateError('Comic image changed while preparing translation input');
   }
 
   Future<File?> _findFile(ComicTranslationPageIdentity identity) async {
@@ -87,6 +97,20 @@ final class ComicTranslationInputResolver {
       alias.eid,
     );
   }
+
+  static Future<String> _digest(File file, int size, int modified) {
+    final key = '${file.path}\u0000$size\u0000$modified';
+    final existing = _digestTasks[key];
+    if (existing != null) return existing;
+    late final Future<String> task;
+    task = Isolate.run(() async =>
+        (await sha256.bind(File(file.path).openRead()).first).toString())
+      .whenComplete(() {
+        if (identical(_digestTasks[key], task)) _digestTasks.remove(key);
+      });
+    _digestTasks[key] = task;
+    return task;
+  }
 }
 
 ComicTranslationMediaKind _detectMediaKind(String path) {
@@ -94,7 +118,7 @@ ComicTranslationMediaKind _detectMediaKind(String path) {
   try {
     final length = file.lengthSync();
     if (length < 6) return ComicTranslationMediaKind.staticImage;
-    final header = file.readSync(12);
+    final header = file.readSync(_minInt(12, length));
     final signature = String.fromCharCodes(header.take(6));
     if (signature == 'GIF87a' || signature == 'GIF89a') {
       return ComicTranslationMediaKind.animatedImage;
@@ -108,15 +132,27 @@ ComicTranslationMediaKind _detectMediaKind(String path) {
     while (offset + 8 <= length) {
       file.setPositionSync(offset);
       final chunk = file.readSync(8);
+      if (chunk.length < 8) break;
       final type = String.fromCharCodes(chunk.sublist(0, 4));
       final size = ByteData.sublistView(chunk, 4).getUint32(0, Endian.little);
+      final dataStart = offset + 8;
+      if (size > length - dataStart) break;
       if (type == 'ANIM' || type == 'ANMF') {
         return ComicTranslationMediaKind.animatedImage;
       }
-      offset += 8 + size + (size.isOdd ? 1 : 0);
+      if (type == 'VP8X' && size > 0) {
+        file.setPositionSync(dataStart);
+        final flags = file.readByteSync();
+        if ((flags & 0x02) != 0) {
+          return ComicTranslationMediaKind.animatedImage;
+        }
+      }
+      offset = dataStart + size + (size.isOdd ? 1 : 0);
     }
     return ComicTranslationMediaKind.staticImage;
   } finally {
     file.closeSync();
   }
 }
+
+int _minInt(int a, int b) => a < b ? a : b;

@@ -128,14 +128,18 @@ final class ComicTranslationBenchmark {
         }
         final inputTime = timer.elapsed;
         timer.reset();
-        final artifact = await pair.ocr.recognize(ComicOcrInput(
-          identity: page,
-          filePath: resolved.file.path,
-          contentDigest: resolved.contentDigest,
-          sourceLanguage: sourceLanguage,
-          maxAnalysisSide: maxAnalysisSide,
-          animatedMode: AnimatedTranslationMode.posterFrame,
-        ));
+        final artifact = await benchmarkEngines.recognize(
+          pair,
+          sourceLanguage,
+          ComicOcrInput(
+            identity: page,
+            filePath: resolved.file.path,
+            contentDigest: resolved.contentDigest,
+            sourceLanguage: sourceLanguage,
+            maxAnalysisSide: maxAnalysisSide,
+            animatedMode: AnimatedTranslationMode.posterFrame,
+          ),
+        );
         final ocrTime = timer.elapsed;
         timer.reset();
         final request = ComicTranslationRequest(
@@ -143,7 +147,7 @@ final class ComicTranslationBenchmark {
           targetLanguage: targetLanguage,
           previousPages: const [],
         );
-        final translation = await pair.translator.translate(request);
+        final translation = await benchmarkEngines.translate(pair, request);
         final translatedRegions = request.expandUnitTranslations(translation);
         final unitIds = <String, String>{};
         final unitOrders = <String, int>{};

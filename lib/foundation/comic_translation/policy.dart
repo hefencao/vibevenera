@@ -17,7 +17,10 @@ final class ComicTranslationPolicy {
     this.contextPages = 2,
     this.translateSoundEffects = false,
     this.useCleanOverlay = true,
-  });
+  }) : assert(prefetchPages >= 0),
+       assert(imagePreloadPages >= 0),
+       assert(maxAnalysisSide > 0),
+       assert(contextPages >= 0);
 
   int effectiveImagePreloadPages(int configured) =>
       configured < imagePreloadPages ? imagePreloadPages : configured;
