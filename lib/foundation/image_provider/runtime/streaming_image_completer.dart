@@ -118,7 +118,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
 
   @override
   void didChangeAppLifecycleState(ui.AppLifecycleState state) {
-    if (state == ui.AppLifecycleState.resumed) _signalPlayback();
+    _signalPlayback();
   }
 
   /// 首帧到达时上报「挂载→首帧」延迟一次。这是用户感知「翻页卡」的真正指标：
@@ -296,7 +296,8 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   }
 
   void _signalPlayback() {
-    if (_canPreparePlayback &&
+    if (_isLifecycleActive &&
+        _canPreparePlayback &&
         _lease?.decode.holder.hasRenderedFrames == true) {
       unawaited(_prepareTexture());
     }
@@ -430,16 +431,21 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
   /// 无 setState。
   Future<void> _presentTextureFrame(NativeAddressFrameHandle frame) async {
     try {
-      final id = await _ensureTexture();
       while (!_disposed &&
-          _playbackGate(_lease?.decode.isCurrent == true) !=
-              _PlaybackGate.present) {
+          (!_isLifecycleActive ||
+              _playbackGate(_lease?.decode.isCurrent == true) !=
+                  _PlaybackGate.present)) {
         final revision = _playbackRevision;
         await _waitForPlaybackSignal(revision);
       }
       if (_disposed) {
         frame.dispose();
         _disposeTexture();
+        return;
+      }
+      final id = await _ensureTexture();
+      if (!_isLifecycleActive) {
+        frame.dispose();
         return;
       }
       final w = frame.width, h = frame.height;
@@ -466,6 +472,7 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
         _disposeTexture();
         return;
       }
+      if (!_isLifecycleActive) return;
       ImagePipelinePerf.count('framePresented');
       _reportFirstFrameLatency();
       WebPTextureRegistry.instance.publish(
@@ -512,7 +519,8 @@ final class _StreamingImageCompleter extends ImageStreamCompleter
 
   bool get _isLifecycleActive {
     final state = WidgetsBinding.instance.lifecycleState;
-    return state != ui.AppLifecycleState.paused &&
+    return state != ui.AppLifecycleState.inactive &&
+        state != ui.AppLifecycleState.paused &&
         state != ui.AppLifecycleState.hidden &&
         state != ui.AppLifecycleState.detached;
   }

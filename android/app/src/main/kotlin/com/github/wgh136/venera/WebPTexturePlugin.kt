@@ -132,7 +132,9 @@ class WebPTexturePlugin(flutterEngine: FlutterEngine) {
 
     private fun dispose(textureId: Long) {
         val entry = entries.remove(textureId) ?: return
-        blitExecutor.execute { entry.producer.release() }
+        blitExecutor.execute {
+            mainHandler.post { entry.producer.release() }
+        }
     }
 
     fun disposeAll() {
@@ -141,7 +143,9 @@ class WebPTexturePlugin(flutterEngine: FlutterEngine) {
         entries.clear()
         channel.setMethodCallHandler(null)
         blitExecutor.execute {
-            for (entry in retained) entry.producer.release()
+            mainHandler.post {
+                for (entry in retained) entry.producer.release()
+            }
         }
         blitExecutor.shutdown()
     }

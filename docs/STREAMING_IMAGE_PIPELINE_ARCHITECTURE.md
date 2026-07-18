@@ -218,6 +218,11 @@ Android 的 `ANativeWindow_lock + memcpy + unlockAndPost` 在专用串行 blit �
 只更新 Surface 而不调度 engine frame，会在 PageView 滚动停止后表现为 WebP 停播。
 MethodChannel 的完成回调仍切回主线程，native frame 地址保持到回调完成后才释放。
 
+Android 切换后台时保留 `SurfaceProducer` texture 及 download/decode session，由 Flutter embedding
+处理 Surface 的暂时不可用；不在 lifecycle 回调中批量 clear/recreate texture，否则会触发显示回退和
+provider 重新 resolve。真正移除 completer 时，先从 texture map 摘除 entry，等串行 blit 队列中已提交的
+native copy 结束，再切回 Android main thread 调用 `SurfaceProducer.release()`。
+
 目标页在越过 `onPageChanged` 中点前就进入 transition 资源角色：下载、解码、上传优先级
 高于普通 near，并按 current 缓冲水位取得 1～数帧的准备深度。Android native texture 的
 创建也与首次 blit 分离，目标页有 rendered frame 后可提前创建 texture，恢复播放时不再

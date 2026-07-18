@@ -24,6 +24,36 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
   _ReaderState? _reader;
   Uint8List? _cleanOverlayBytes;
   bool _cleanOverlayReady = false;
+  int _layoutGeneration = 0;
+  bool _layoutScheduled = false;
+  _ComicTranslationPainter? _layoutTaskPainter;
+  Size? _layoutTaskSize;
+
+  void _scheduleLayoutPreparation(
+    _ComicTranslationPainter painter,
+    Size size,
+  ) {
+    if (_layoutScheduled && identical(_layoutTaskPainter, painter) &&
+        _layoutTaskSize == size) {
+      return;
+    }
+    final generation = ++_layoutGeneration;
+    _layoutScheduled = true;
+    _layoutTaskPainter = painter;
+    _layoutTaskSize = size;
+    void scheduleNext() {
+      unawaited(SchedulerBinding.instance.scheduleTask<void>(() {
+        if (!mounted || generation != _layoutGeneration) return;
+        if (!painter.prepareNext(size)) {
+          scheduleNext();
+          return;
+        }
+        _layoutScheduled = false;
+        setState(() {});
+      }, Priority.idle));
+    }
+    scheduleNext();
+  }
 
   void _markCleanOverlayReady(Uint8List bytes) {
     if (_cleanOverlayReady || !identical(_cleanOverlayBytes, bytes)) return;
@@ -72,6 +102,10 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
     _sourcePeekTimer?.cancel();
     _hiddenBlockKey = null;
     _painter = null;
+    _layoutGeneration++;
+    _layoutScheduled = false;
+    _layoutTaskPainter = null;
+    _layoutTaskSize = null;
     _cleanOverlayBytes = null;
     _cleanOverlayReady = false;
   }
@@ -79,6 +113,7 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
   @override
   void dispose() {
     _sourcePeekTimer?.cancel();
+    _layoutGeneration++;
     _reader?._translationLayers.remove(this);
     super.dispose();
   }
@@ -125,14 +160,14 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
                       _cleanOverlayReady &&
                       _hiddenBlockKey == null;
                   final current = _painter;
-                  final painter = current != null &&
-                          current.artifact == artifact &&
-                          current.alignment == widget.alignment &&
+                  final layoutCompatible = current != null &&
+                      current.artifact == artifact &&
+                      current.alignment == widget.alignment &&
+                      current.fontScale == fontScale;
+                  final painter = layoutCompatible &&
                           current.background == background &&
                           current.foreground == foreground &&
-                          current.fontScale == fontScale &&
-                          current.hasCleanOverlay ==
-                              showCleanOverlay &&
+                          current.hasCleanOverlay == showCleanOverlay &&
                           current.hiddenBlockKey == _hiddenBlockKey
                       ? current
                       : _ComicTranslationPainter(
@@ -144,34 +179,44 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
                           fontScale: fontScale,
                           hasCleanOverlay: showCleanOverlay,
                           hiddenBlockKey: _hiddenBlockKey,
+                          layoutCache: layoutCompatible
+                              ? current.layoutCache
+                              : _TranslationLayoutCache(),
                         );
                   _painter = painter;
-                  return Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (cleanOverlayPng != null &&
-                          _hiddenBlockKey == null)
-                        ClipPath(
-                          clipper: _TranslationMaskClipper(
-                            artifact: artifact,
-                            alignment: widget.alignment,
+                  return LayoutBuilder(builder: (context, constraints) {
+                    final size = constraints.biggest;
+                    if (!painter.isPreparedFor(size)) {
+                      _scheduleLayoutPreparation(painter, size);
+                      return const SizedBox();
+                    }
+                    return Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (cleanOverlayPng != null &&
+                            _hiddenBlockKey == null)
+                          ClipPath(
+                            clipper: _TranslationMaskClipper(
+                              artifact: artifact,
+                              alignment: widget.alignment,
+                            ),
+                            child: Image.memory(
+                              cleanOverlayPng,
+                              fit: BoxFit.contain,
+                              alignment: widget.alignment,
+                              filterQuality: FilterQuality.medium,
+                              frameBuilder: (context, child, frame, _) {
+                                if (frame != null) {
+                                  _markCleanOverlayReady(cleanOverlayPng);
+                                }
+                                return child;
+                              },
+                            ),
                           ),
-                          child: Image.memory(
-                            cleanOverlayPng,
-                            fit: BoxFit.contain,
-                            alignment: widget.alignment,
-                            filterQuality: FilterQuality.medium,
-                            frameBuilder: (context, child, frame, _) {
-                              if (frame != null) {
-                                _markCleanOverlayReady(cleanOverlayPng);
-                              }
-                              return child;
-                            },
-                          ),
-                        ),
-                      CustomPaint(painter: painter),
-                    ],
-                  );
+                        CustomPaint(painter: painter),
+                      ],
+                    );
+                  });
                 },
               ),
             ),
@@ -221,6 +266,16 @@ class _TranslationMaskClipper extends CustomClipper<Path> {
       oldClipper.artifact != artifact || oldClipper.alignment != alignment;
 }
 
+class _TranslationLayoutCache {
+  final Map<String, _TranslationLayoutPlan> plans = {};
+  final Set<String> skipped = {};
+  final Map<String, _VerticalGlyphMetrics> verticalMetrics = {};
+  final Map<String, double> horizontalWidthFactors = {};
+  List<_TranslationLayoutBlock>? blocks;
+  Rect? imageRect;
+  _TranslationLayoutSearch? search;
+}
+
 class _ComicTranslationPainter extends CustomPainter {
   final ComicTranslationArtifact artifact;
   final BoxFit fit;
@@ -230,11 +285,15 @@ class _ComicTranslationPainter extends CustomPainter {
   final double fontScale;
   final bool hasCleanOverlay;
   final String? hiddenBlockKey;
+  final _TranslationLayoutCache layoutCache;
   final List<_TranslationHitRegion> _hitRegions = [];
-  final Map<String, _TranslationLayoutPlan> _layoutPlans = {};
-  final Map<String, _VerticalGlyphMetrics> _verticalMetrics = {};
-  List<_TranslationLayoutBlock>? _blocks;
-  Rect? _layoutImageRect;
+  Map<String, _TranslationLayoutPlan> get _layoutPlans => layoutCache.plans;
+  Map<String, _VerticalGlyphMetrics> get _verticalMetrics =>
+      layoutCache.verticalMetrics;
+  List<_TranslationLayoutBlock>? get _blocks => layoutCache.blocks;
+  set _blocks(List<_TranslationLayoutBlock>? value) => layoutCache.blocks = value;
+  Rect? get _layoutImageRect => layoutCache.imageRect;
+  set _layoutImageRect(Rect? value) => layoutCache.imageRect = value;
 
   _ComicTranslationPainter({
     required this.artifact,
@@ -245,45 +304,112 @@ class _ComicTranslationPainter extends CustomPainter {
     required this.fontScale,
     required this.hasCleanOverlay,
     required this.hiddenBlockKey,
+    required this.layoutCache,
   });
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    _hitRegions.clear();
+  Rect _imageRect(Size size) {
     final sourceSize = Size(
       artifact.imageWidth.toDouble(),
       artifact.imageHeight.toDouble(),
     );
     final fitted = applyBoxFit(fit, sourceSize, size);
-    final imageRect = alignment.inscribe(fitted.destination, Offset.zero & size);
-    if (_layoutImageRect != imageRect) {
-      _layoutImageRect = imageRect;
-      _layoutPlans.clear();
+    return alignment.inscribe(fitted.destination, Offset.zero & size);
+  }
+
+  void _syncLayoutSize(Size size) {
+    final imageRect = _imageRect(size);
+    if (_layoutImageRect == imageRect) return;
+    _layoutImageRect = imageRect;
+    _layoutPlans.clear();
+    layoutCache.skipped.clear();
+    layoutCache.search = null;
+  }
+
+  bool isPreparedFor(Size size) {
+    if (_layoutImageRect != _imageRect(size)) return false;
+    return _layoutPlans.length + layoutCache.skipped.length ==
+        _layoutBlocks().length;
+  }
+
+  bool prepareNext(Size size) {
+    _syncLayoutSize(size);
+    final imageRect = _layoutImageRect!;
+    final pending = layoutCache.search;
+    if (pending != null) {
+      if (!pending.step()) return false;
+      _layoutPlans[pending.block.key] = pending.plan!;
+      layoutCache.search = null;
+      return isPreparedFor(size);
     }
     for (final block in _layoutBlocks()) {
+      if (_layoutPlans.containsKey(block.key) ||
+          layoutCache.skipped.contains(block.key)) {
+        continue;
+      }
+      final geometry = _blockGeometry(block, imageRect);
+      if (geometry == null) {
+        layoutCache.skipped.add(block.key);
+      } else {
+        layoutCache.search = _TranslationLayoutSearch(
+          this,
+          block,
+          geometry.bounds,
+          geometry.regionBounds,
+          imageRect,
+          geometry.bubblePath != null,
+        );
+        return false;
+      }
+      return isPreparedFor(size);
+    }
+    return true;
+  }
+
+  _TranslationBlockGeometry? _blockGeometry(
+    _TranslationLayoutBlock block,
+    Rect imageRect,
+  ) {
+    final regionBounds = block.regions
+        .map((region) => _displayBounds(region.bounds, imageRect))
+        .toList();
+    final sourceBounds = regionBounds
+        .reduce((value, next) => value.expandToInclude(next));
+    final bubble = _blockBubble(block);
+    final bubblePoints = bubble == null
+        ? null
+        : _displayPolygon(bubble, imageRect);
+    final bubblePath = bubblePoints == null
+        ? null
+        : (Path()..addPolygon(bubblePoints, true));
+    final sourceFontSize = _sourceFontSize(block, regionBounds);
+    final bounds = bubblePath == null
+        ? _openBubbleBounds(sourceBounds, sourceFontSize, imageRect)
+        : _safeBubbleBounds(
+            bubblePath,
+            _bounds(bubblePoints!),
+            sourceBounds,
+            sourceFontSize,
+          ).intersect(imageRect);
+    if (bounds.width < 3 || bounds.height < 3) return null;
+    return _TranslationBlockGeometry(
+      regionBounds,
+      bounds,
+      bubblePath,
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    _hitRegions.clear();
+    _syncLayoutSize(size);
+    final imageRect = _layoutImageRect!;
+    for (final block in _layoutBlocks()) {
       if (block.key == hiddenBlockKey) continue;
-      final regionBounds = block.regions
-          .map((region) => _displayBounds(region.bounds, imageRect))
-          .toList();
-      final sourceBounds = regionBounds
-          .reduce((value, next) => value.expandToInclude(next));
-      final bubble = _blockBubble(block);
-      final bubblePoints = bubble == null
-          ? null
-          : _displayPolygon(bubble, imageRect);
-      final bubblePath = bubblePoints == null
-          ? null
-          : (Path()..addPolygon(bubblePoints, true));
-      final sourceFontSize = _sourceFontSize(block, regionBounds);
-      final bounds = bubblePath == null
-          ? _openBubbleBounds(sourceBounds, sourceFontSize, imageRect)
-          : _safeBubbleBounds(
-              bubblePath,
-              _bounds(bubblePoints!),
-              sourceBounds,
-              sourceFontSize,
-            ).intersect(imageRect);
-      if (bounds.width < 3 || bounds.height < 3) continue;
+      final geometry = _blockGeometry(block, imageRect);
+      final plan = _layoutPlans[block.key];
+      if (geometry == null || plan == null) continue;
+      final bounds = geometry.bounds;
+      final bubblePath = geometry.bubblePath;
       _hitRegions.add(_TranslationHitRegion(
         block.key,
         bubblePath ?? (Path()..addRect(bounds)),
@@ -305,13 +431,6 @@ class _ComicTranslationPainter extends CustomPainter {
       }
       canvas.save();
       if (bubblePath != null) canvas.clipPath(bubblePath);
-      final plan = _layoutPlans[block.key] ??= _resolveLayoutPlan(
-        block,
-        bounds,
-        regionBounds,
-        imageRect,
-        bubblePath != null,
-      );
       for (final lane in plan.lanes) {
         final region = lane.regions.first.region;
         final fill = _regionForeground(region);
@@ -385,82 +504,6 @@ class _ComicTranslationPainter extends CustomPainter {
       return math.sqrt(bounds.width * bounds.height / characters);
     })..sort();
     return _dominantFontSize(values);
-  }
-
-  _TranslationLayoutPlan _resolveLayoutPlan(
-    _TranslationLayoutBlock block,
-    Rect bounds,
-    List<Rect> regionBounds,
-    Rect imageRect,
-    bool insideBubble,
-  ) {
-    final options = _layoutOptions(
-      block,
-      bounds,
-      regionBounds,
-      imageRect,
-      insideBubble,
-    );
-    final sourceCharacters = block.regions.fold(
-      0,
-      (count, region) => count + _characters(region.region.sourceText),
-    );
-    final sourceArea = regionBounds.fold(
-      0.0,
-      (area, region) => area + region.width * region.height,
-    );
-    final sourceBounds = regionBounds
-        .reduce((value, next) => value.expandToInclude(next));
-    final preferredFont = _sourceFontSize(block, regionBounds) * fontScale;
-    _TranslationLayoutCandidate? best;
-    for (final option in options) {
-      final maximumFont = _maximumLayoutFont(block, option);
-      final minimumFont = math.min(maximumFont, math.max(2, preferredFont * .45));
-      for (var step = 0; step <= 24; step++) {
-        final fontSize = minimumFont +
-            (maximumFont - minimumFont) * step / 24;
-        final measured = _measureLayout(block, option, fontSize);
-        if (!measured.fits) continue;
-        final targetCharacters = option.lanes.fold(
-          0,
-          (count, lane) => count + _characters(lane.text),
-        );
-        final targetArea = sourceArea * targetCharacters / sourceCharacters;
-        final densityPenalty =
-            (math.log(measured.area / targetArea)).abs();
-        final fontPenalty =
-            (math.log(fontSize / preferredFont)).abs();
-        final lengthRatio = targetCharacters / sourceCharacters;
-        final topologyPenalty =
-            (measured.lineCount - block.bands.length).abs() /
-                (1 + math.max(0, lengthRatio - 1) * .25);
-        final missingBands = math.max(0, block.bands.length - measured.lineCount);
-        final unbrokenShrinkPenalty = missingBands *
-            math.max(0, math.log(preferredFont / fontSize));
-        final extentPenalty = _extentPenalty(
-          block.orientation,
-          sourceBounds,
-          option.lanes.single,
-          measured.contentBounds,
-        );
-        final score = densityPenalty * .7 +
-            fontPenalty * .2 +
-            topologyPenalty * 1.3 +
-            unbrokenShrinkPenalty * 1.6 +
-            measured.flowPenalty * .9 +
-            measured.sentencePenalty * .8 +
-            measured.orphanPenalty * 1.1 +
-            extentPenalty * .9 +
-            option.positionPenalty * .35;
-        if (best == null || score < best.score) {
-          best = _TranslationLayoutCandidate(
-            _TranslationLayoutPlan(option.lanes, fontSize),
-            score,
-          );
-        }
-      }
-    }
-    return best!.plan;
   }
 
   List<_TranslationLayoutOption> _layoutOptions(
@@ -629,27 +672,6 @@ class _ComicTranslationPainter extends CustomPainter {
     return {'zh', 'ja', 'ko'}.contains(language) ? '' : ' ';
   }
 
-  double _maximumLayoutFont(
-    _TranslationLayoutBlock block,
-    _TranslationLayoutOption option,
-  ) {
-    final extent = option.lanes.map((lane) => block.orientation ==
-        ComicTextOrientation.vertical
-        ? math.min(lane.bounds.width, lane.bounds.height)
-        : lane.bounds.height).reduce(math.min);
-    var low = 2.0;
-    var high = math.max(low, extent * .95);
-    for (var i = 0; i < 9; i++) {
-      final middle = (low + high) / 2;
-      if (_measureLayout(block, option, middle).fits) {
-        low = middle;
-      } else {
-        high = middle;
-      }
-    }
-    return low;
-  }
-
   _MeasuredTranslationLayout _measureLayout(
     _TranslationLayoutBlock block,
     _TranslationLayoutOption option,
@@ -714,7 +736,7 @@ class _ComicTranslationPainter extends CustomPainter {
         flowPenalty += _flowPenalty(
           _horizontalFlowCounts(
             lane.text.runes.map(String.fromCharCode).toList(),
-            lane.bounds,
+            metrics.map((line) => line.width).toList(),
             fontSize,
           ),
           _preferredFlowWeights(lane, metrics.length),
@@ -769,25 +791,23 @@ class _ComicTranslationPainter extends CustomPainter {
 
   List<int> _horizontalFlowCounts(
     List<String> glyphs,
-    Rect bounds,
+    List<double> lineWidths,
     double fontSize,
   ) {
-    final paragraph = _paragraph(
-      glyphs.join(),
-      fontSize,
-      bounds.width,
-      fillColor: const Color(0xff000000),
-      outline: const Color(0xffffffff),
+    final key = glyphs.join();
+    final widthFactor = layoutCache.horizontalWidthFactors.putIfAbsent(
+      key,
+      () => glyphs.fold(0.0, (width, glyph) => width +
+          _glyph(
+            glyph,
+            100,
+            fillColor: const Color(0xff000000),
+            outline: const Color(0xffffffff),
+          ).width) / glyphs.length / 100,
     );
-    final averageWidth = glyphs.fold(0.0, (width, glyph) => width +
-        _glyph(
-          glyph,
-          fontSize,
-          fillColor: const Color(0xff000000),
-          outline: const Color(0xffffffff),
-        ).width) / glyphs.length;
-    return paragraph.computeLineMetrics().map((line) =>
-        math.max(1, (line.width / averageWidth).round())).toList();
+    final averageWidth = widthFactor * fontSize;
+    return lineWidths.map((width) =>
+        math.max(1, (width / averageWidth).round())).toList();
   }
 
   List<double> _resampleWeights(List<int> source, int count) {
@@ -1345,6 +1365,18 @@ class _TranslationLayoutRegion {
   const _TranslationLayoutRegion(this.region, this.bounds);
 }
 
+class _TranslationBlockGeometry {
+  final List<Rect> regionBounds;
+  final Rect bounds;
+  final Path? bubblePath;
+
+  const _TranslationBlockGeometry(
+    this.regionBounds,
+    this.bounds,
+    this.bubblePath,
+  );
+}
+
 class _TranslationLayoutBlock {
   final String key;
   final List<_TranslationLayoutRegion> regions;
@@ -1403,6 +1435,140 @@ class _TranslationLayoutPlan {
   final double fontSize;
 
   const _TranslationLayoutPlan(this.lanes, this.fontSize);
+}
+
+class _TranslationLayoutSearch {
+  final _ComicTranslationPainter painter;
+  final _TranslationLayoutBlock block;
+  final List<_TranslationLayoutOption> options;
+  final int sourceCharacters;
+  final double sourceArea;
+  final Rect sourceBounds;
+  final double preferredFont;
+  int _optionIndex = 0;
+  int _binaryStep = 0;
+  int _fontStep = -1;
+  double _low = 2;
+  double _high = 2;
+  double _minimumFont = 2;
+  _TranslationLayoutCandidate? _best;
+  _TranslationLayoutPlan? plan;
+
+  _TranslationLayoutSearch(
+    this.painter,
+    this.block,
+    Rect bounds,
+    List<Rect> regionBounds,
+    Rect imageRect,
+    bool insideBubble,
+  ) : options = painter._layoutOptions(
+         block,
+         bounds,
+         regionBounds,
+         imageRect,
+         insideBubble,
+       ),
+       sourceCharacters = block.regions.fold(
+         0,
+         (count, region) =>
+             count + painter._characters(region.region.sourceText),
+       ),
+       sourceArea = regionBounds.fold(
+         0,
+         (area, region) => area + region.width * region.height,
+       ),
+       sourceBounds = regionBounds.reduce(
+         (value, next) => value.expandToInclude(next),
+       ),
+       preferredFont = painter._sourceFontSize(block, regionBounds) *
+           painter.fontScale;
+
+  bool step() {
+    if (_optionIndex >= options.length) {
+      plan = _best!.plan;
+      return true;
+    }
+    final option = options[_optionIndex];
+    if (_binaryStep == 0 && _fontStep < 0) {
+      final extent = option.lanes.map((lane) => block.orientation ==
+          ComicTextOrientation.vertical
+          ? math.min(lane.bounds.width, lane.bounds.height)
+          : lane.bounds.height).reduce(math.min);
+      _low = 2;
+      _high = math.max(_low, extent * .95);
+    }
+    if (_binaryStep < 9) {
+      final middle = (_low + _high) / 2;
+      if (painter._measureLayout(block, option, middle).fits) {
+        _low = middle;
+      } else {
+        _high = middle;
+      }
+      _binaryStep++;
+      return false;
+    }
+    if (_fontStep < 0) {
+      _minimumFont = math.min(
+        _low,
+        math.max(2, preferredFont * .45),
+      );
+      _fontStep = 0;
+    }
+    final fontSize = _minimumFont +
+        (_low - _minimumFont) * _fontStep / 24;
+    final measured = painter._measureLayout(block, option, fontSize);
+    if (measured.fits) _consider(option, fontSize, measured);
+    _fontStep++;
+    if (_fontStep <= 24) return false;
+    _optionIndex++;
+    _binaryStep = 0;
+    _fontStep = -1;
+    if (_optionIndex < options.length) return false;
+    plan = _best!.plan;
+    return true;
+  }
+
+  void _consider(
+    _TranslationLayoutOption option,
+    double fontSize,
+    _MeasuredTranslationLayout measured,
+  ) {
+    final targetCharacters = option.lanes.fold(
+      0,
+      (count, lane) => count + painter._characters(lane.text),
+    );
+    final targetArea = sourceArea * targetCharacters / sourceCharacters;
+    final densityPenalty = (math.log(measured.area / targetArea)).abs();
+    final fontPenalty = (math.log(fontSize / preferredFont)).abs();
+    final lengthRatio = targetCharacters / sourceCharacters;
+    final topologyPenalty =
+        (measured.lineCount - block.bands.length).abs() /
+            (1 + math.max(0, lengthRatio - 1) * .25);
+    final missingBands = math.max(0, block.bands.length - measured.lineCount);
+    final unbrokenShrinkPenalty = missingBands *
+        math.max(0, math.log(preferredFont / fontSize));
+    final extentPenalty = painter._extentPenalty(
+      block.orientation,
+      sourceBounds,
+      option.lanes.single,
+      measured.contentBounds,
+    );
+    final score = densityPenalty * .7 +
+        fontPenalty * .2 +
+        topologyPenalty * 1.3 +
+        unbrokenShrinkPenalty * 1.6 +
+        measured.flowPenalty * .9 +
+        measured.sentencePenalty * .8 +
+        measured.orphanPenalty * 1.1 +
+        extentPenalty * .9 +
+        option.positionPenalty * .35;
+    if (_best == null || score < _best!.score) {
+      _best = _TranslationLayoutCandidate(
+        _TranslationLayoutPlan(option.lanes, fontSize),
+        score,
+      );
+    }
+  }
 }
 
 class _TranslationLayoutCandidate {

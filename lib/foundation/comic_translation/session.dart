@@ -46,8 +46,8 @@ final class ComicTranslationSession {
   final Map<String, ComicTranslationPageIdentity> _identities = {};
   final Map<String, _QueuedTranslation> _queue = {};
   final Map<String, Map<int, ComicTranslationArtifact>> _readyPages = {};
-  final Map<String, List<double>> _fontScaleSamples = {};
   final ValueNotifier<double> _fontScale = ValueNotifier(1);
+  bool _fontScaleResolved = false;
 
   bool get enabled => _enabled;
 
@@ -364,7 +364,7 @@ final class ComicTranslationSession {
     if (_disposed) return;
     _readyPages.putIfAbsent(identity.chapterId, () => {})[identity.pageIndex] =
         translation;
-    _updateFontScale(identity.key, translation);
+    _updateFontScale(translation);
     _setState(
       identity,
       ComicTranslationPageState(
@@ -375,11 +375,9 @@ final class ComicTranslationSession {
     );
   }
 
-  void _updateFontScale(
-    String key,
-    ComicTranslationArtifact artifact,
-  ) {
-    _fontScaleSamples[key] = artifact.regions
+  void _updateFontScale(ComicTranslationArtifact artifact) {
+    if (_fontScaleResolved) return;
+    final samples = artifact.regions
         .where((region) =>
             region.kind != ComicTextKind.soundEffect &&
             region.sourceText.isNotEmpty &&
@@ -392,12 +390,10 @@ final class ComicTranslationSession {
                       .length,
             ).clamp(0.92, 1.10))
         .toList();
-    final samples = _fontScaleSamples.values
-        .expand((values) => values)
-        .toList();
     _fontScale.value = samples.isEmpty
         ? 1
         : samples.reduce((sum, value) => sum + value) / samples.length;
+    _fontScaleResolved = true;
   }
 
   List<ComicTranslationContextEntry> _translationContext(

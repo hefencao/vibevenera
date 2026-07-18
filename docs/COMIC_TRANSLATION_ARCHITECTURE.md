@@ -123,11 +123,15 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
   或竖排换列数，最小化“目标墨迹面积相对源面积及字符数变化”“源字号偏差”“列/行拓扑偏差”和“位置偏差”的加权
   代价。这样会优先尊重原排版，但在译文长度或气泡空间需要时允许换行、换列或合并句子，而不是把译文硬塞进 OCR 框
   或无条件铺满气泡。若译文行/列数少于 source band，且候选通过缩小字号才不断行/列，两者作为联合惩罚，
-  避免将原本均衡的两列压成小字单列。解析出的 plan 按显示矩形缓存在 painter，滚动重绘不重新测量。
+  避免将原本均衡的两列压成小字单列。排版枚举和 `TextPainter.layout` 不在 `CustomPainter.paint`
+  内执行：overlay 获得显示尺寸后，以 idle scheduler 每次只执行一次字号测量；二分搜索、候选字号和 block
+  之间都可被下一帧或输入抢占，不将一个 block 换成 Paint 之外的 UI isolate 长任务。全部 plan 就绪后才显示 clean overlay
+  和译文。plan cache 在 clean-overlay 解码完成、查看原文及颜色变化导致 painter 重建时继续复用；只有 artifact、字号比例或显示矩形变化才重算。
 - 联通气泡只将 OCR 区块中心分配到已经分离的距离核心，不再使用文字位置聚类创造拆分。气泡候选降低最低
   凸包实度以接纳凹形轮廓，普通近凸气泡仍不执行 Voronoi 拆分。
 - 排版方向以 OCR polygon 的宽高关系重新确认，竖向区块不会因为识别方向阈值过高而进入横排。
-- Reader session 汇总同一漫画已完成区块的源/目标长度缩放值作为字号先验；它不是字号上限。
+- Reader session 以本次阅读首个完成的 current artifact 汇总源/目标长度缩放值，作为整个 session 稳定的
+  字号先验；后续预翻译页不再改写该值，避免每完成一页就使所有可见 overlay 失效并重排。它不是字号上限。
   源字号按 `sqrt(OCR box area / source character count)` 估算，同一 band 的碎片先合并成一句译文，再参与
   候选排版评分，避免包含两列文字的宽 OCR box 被误当成双倍字号。
 - 远程配置支持保存多组 endpoint/model/prompt/API key 并即时切换；API key 仍只写入本机 secrets 文件。
