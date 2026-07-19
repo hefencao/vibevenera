@@ -43,7 +43,7 @@ class _ComicTranslationBackendPageState
     if (!profiles.any((profile) => profile.id == activeProfileId)) {
       activeProfileId = profiles.first.id;
     }
-    if (backend != 'none' && _activeProfile.backend != backend) {
+    if (_isRemoteBackend && _activeProfile.backend != backend) {
       activeProfileId = profiles
           .where((profile) => profile.backend == backend)
           .firstOrNull
@@ -75,7 +75,8 @@ class _ComicTranslationBackendPageState
 
   @override
   Widget build(BuildContext context) {
-    final models = ComicTranslationModelManager.instance;
+    final models = ComicOcrModelManager.instance;
+    final localModels = ComicLocalTranslationModelManager.instance;
     return SmoothCustomScrollView(
       slivers: [
         SliverAppbar(title: Text('Translation models and API'.tl)),
@@ -87,7 +88,7 @@ class _ComicTranslationBackendPageState
                 title: Text('Local OCR model'.tl),
                 subtitle: Text(
                   models.installed
-                      ? '${ComicTranslationModelManager.bundle.displayName} · ${_modelSize(ComicTranslationModelManager.bundle.bytes)}'
+                      ? '${ComicOcrModelManager.bundle.displayName} · ${_modelSize(ComicOcrModelManager.bundle.bytes)}'
                       : 'Not installed'.tl,
                 ),
               ),
@@ -97,15 +98,15 @@ class _ComicTranslationBackendPageState
                   child: Text('Local OCR is currently available on Android only.'.tl),
                 )
               else
-                ValueListenableBuilder<ComicTranslationModelProgress>(
+                ValueListenableBuilder<ComicOcrModelProgress>(
                   valueListenable: models.progress,
                   builder: (context, progress, _) => Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (progress.phase != ComicTranslationModelPhase.idle) ...[
+                      if (progress.phase != ComicOcrModelPhase.idle) ...[
                         LinearProgressIndicator(value: progress.fraction),
                         Text(
-                          progress.phase == ComicTranslationModelPhase.verifying
+                          progress.phase == ComicOcrModelPhase.verifying
                               ? 'Verifying model'.tl
                               : '${'Downloading model'.tl} · ${progress.fileName}',
                           textAlign: TextAlign.center,
@@ -169,11 +170,89 @@ class _ComicTranslationBackendPageState
               ).paddingHorizontal(8),
               const Divider(),
               ListTile(
+                title: Text('Local translation models'.tl),
+                subtitle: Text(localModels.models.isEmpty
+                    ? 'Not installed'.tl
+                    : localModels.models.map((model) =>
+                        '${model.displayName} · ${model.sourceLanguage} → '
+                        '${model.targetLanguage}').join('\n')),
+              ),
+              if (!App.isAndroid)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text(
+                    'Local translation is currently available on Android only.'.tl,
+                  ),
+                )
+              else
+                ValueListenableBuilder<ComicLocalModelProgress>(
+                  valueListenable: localModels.progress,
+                  builder: (context, progress, _) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (progress.phase != ComicLocalModelPhase.idle) ...[
+                        LinearProgressIndicator(value: progress.fraction),
+                        Text(
+                          progress.phase == ComicLocalModelPhase.verifying
+                              ? 'Verifying model'.tl
+                              : '${'Copying model'.tl} · ${progress.fileName}',
+                          textAlign: TextAlign.center,
+                          style: ts.s12,
+                        ).paddingVertical(6),
+                      ],
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 8,
+                        children: [
+                          for (final model in localModels.models)
+                            TextButton.icon(
+                              onPressed: localModels.installing
+                                  ? null
+                                  : () => _removeLocalModel(model),
+                              icon: const Icon(Icons.delete_outline),
+                              label: Text(model.displayName),
+                            ),
+                          FilledButton.icon(
+                            onPressed: localModels.installing
+                                ? null
+                                : _importLocalModel,
+                            icon: const Icon(Icons.folder_open),
+                            label: Text('Import model'.tl),
+                          ),
+                        ],
+                      ).paddingHorizontal(16),
+                    ],
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'Import an INT8 CTranslate2 Marian directory with manifest.json, model.bin, vocabularies and SentencePiece models.'.tl,
+                  style: ts.s12,
+                ),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => launchUrlString(
+                    'https://opennmt.net/CTranslate2/guides/transformers.html',
+                  ),
+                  icon: const Icon(Icons.menu_book_outlined),
+                  label: Text('Local model conversion guide'.tl),
+                ),
+              ).paddingHorizontal(8),
+              const Divider(),
+              ListTile(
                 title: Text('Translation backend'.tl),
                 trailing: DropdownButton<String>(
                   value: backend,
                   items: [
                     DropdownMenuItem(value: 'none', child: Text('Disabled'.tl)),
+                    if (App.isAndroid)
+                      DropdownMenuItem(
+                        value: 'local',
+                        child: Text('Local CTranslate2'.tl),
+                      ),
                     DropdownMenuItem(
                       value: 'openaiCompatible',
                       child: Text('OpenAI-compatible API'.tl),
@@ -186,7 +265,7 @@ class _ComicTranslationBackendPageState
                   onChanged: working ? null : (value) => _changeBackend(value!),
                 ),
               ),
-              if (backend != 'none') ...[
+              if (_isRemoteBackend) ...[
                 ListTile(
                   title: Text('Saved remote model'.tl),
                   trailing: DropdownButton<String>(
@@ -329,7 +408,7 @@ class _ComicTranslationBackendPageState
                 alignment: WrapAlignment.end,
                 spacing: 8,
                 children: [
-                  if (backend != 'none' && ComicTranslationSecrets.instance
+                  if (_isRemoteBackend && ComicTranslationSecrets.instance
                       .hasApiKey(activeProfileId))
                     TextButton(
                       onPressed: working ? null : _clearApiKey,
@@ -339,7 +418,7 @@ class _ComicTranslationBackendPageState
                     onPressed: working ? null : _save,
                     child: Text('Save'.tl),
                   ),
-                  if (backend != 'none')
+                  if (_isRemoteBackend)
                     FilledButton.tonal(
                       onPressed: working ? null : _testRemote,
                       child: Text('Save and test'.tl),
@@ -365,6 +444,9 @@ class _ComicTranslationBackendPageState
 
   ComicTranslationRemoteProfile get _activeProfile =>
       profiles.firstWhere((profile) => profile.id == activeProfileId);
+
+  bool get _isRemoteBackend =>
+      backend == 'openaiCompatible' || backend == 'deepl';
 
   List<ComicTranslationRemoteProfile> get _backendProfiles =>
       profiles.where((profile) => profile.backend == backend).toList();
@@ -414,12 +496,12 @@ class _ComicTranslationBackendPageState
 
   Future<void> _changeBackend(String value) async {
     final oldId = activeProfileId;
-    if (backend != 'none') _updateActiveProfile();
+    if (_isRemoteBackend) _updateActiveProfile();
     if (apiKey.text.isNotEmpty) {
       await ComicTranslationSecrets.instance.setApiKey(oldId, apiKey.text);
     }
     backend = value;
-    if (value != 'none') {
+    if (value == 'openaiCompatible' || value == 'deepl') {
       final profile = profiles
           .where((profile) => profile.backend == value)
           .firstOrNull ?? _addDefaultProfile(value);
@@ -500,6 +582,13 @@ class _ComicTranslationBackendPageState
 
   String? _validate() {
     if (backend == 'none') return null;
+    if (backend == 'local') {
+      if (!App.isAndroid) return 'Local translation requires Android'.tl;
+      if (ComicLocalTranslationModelManager.instance.models.isEmpty) {
+        return 'Import a local translation model first'.tl;
+      }
+      return null;
+    }
     final uri = Uri.tryParse(endpoint.text.trim());
     if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
       return 'Invalid API endpoint'.tl;
@@ -522,7 +611,7 @@ class _ComicTranslationBackendPageState
   Future<void> _installModel() async {
     setState(() {});
     try {
-      await ComicTranslationModelManager.instance.install();
+      await ComicOcrModelManager.instance.install();
       ComicTranslationRuntime.instance.configure();
       if (mounted) context.showMessage(message: 'OCR model installed'.tl);
     } catch (error) {
@@ -543,9 +632,51 @@ class _ComicTranslationBackendPageState
   }
 
   Future<void> _removeModelNow() async {
-    await ComicTranslationModelManager.instance.remove();
+    await ComicOcrModelManager.instance.remove();
     ComicTranslationRuntime.instance.configure();
     if (mounted) setState(() {});
+  }
+
+  Future<void> _importLocalModel() async {
+    final picker = DirectoryPicker();
+    final directory = await picker.pickDirectory(directAccess: true);
+    if (directory == null || !mounted) return;
+    setState(() {});
+    try {
+      final model = await ComicLocalTranslationModelManager.instance
+          .installFromDirectory(directory.path);
+      ComicTranslationRuntime.instance.configure();
+      if (mounted) {
+        context.showMessage(
+          message: '${'Local translation model installed'.tl}: '
+              '${model.displayName}',
+        );
+      }
+    } catch (error) {
+      if (mounted) context.showMessage(message: error.toString());
+    } finally {
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _removeLocalModel(ComicLocalTranslationModel model) {
+    showConfirmDialog(
+      context: context,
+      title: 'Remove local translation model?'.tl,
+      content: model.displayName,
+      confirmText: 'Remove',
+      onConfirm: () async {
+        await ComicLocalTranslationModelManager.instance.remove(model.id);
+        if (backend == 'local' &&
+            ComicLocalTranslationModelManager.instance.models.isEmpty) {
+          backend = 'none';
+          appdata.settings['comicTranslationBackend'] = backend;
+          await appdata.saveData();
+        }
+        ComicTranslationRuntime.instance.configure();
+        if (mounted) setState(() {});
+      },
+    );
   }
 
   Future<bool> _save() async {
@@ -554,20 +685,29 @@ class _ComicTranslationBackendPageState
       context.showMessage(message: error);
       return false;
     }
+    if (backend == 'local' &&
+        !await LocalMarianComicTranslationEngine.isNativeAvailable()) {
+      if (mounted) {
+        context.showMessage(
+          message: 'CTranslate2 runtime is not included in this build'.tl,
+        );
+      }
+      return false;
+    }
     setState(() => working = true);
-    if (backend != 'none') _updateActiveProfile();
-    final profile = _activeProfile;
+    if (_isRemoteBackend) _updateActiveProfile();
     appdata.settings['comicTranslationBackend'] = backend;
     appdata.settings['comicTranslationRemoteProfiles'] =
         profiles.map((profile) => profile.toJson()).toList();
-    if (backend != 'none') {
+    if (_isRemoteBackend) {
+      final profile = _activeProfile;
       appdata.settings['comicTranslationRemoteProfile'] = activeProfileId;
       appdata.settings['comicTranslationRemoteEndpoint'] = profile.endpoint;
       appdata.settings['comicTranslationRemoteModel'] = profile.model;
       appdata.settings['comicTranslationAdditionalPrompt'] =
           profile.additionalPrompt;
     }
-    if (backend != 'none' && apiKey.text.isNotEmpty) {
+    if (_isRemoteBackend && apiKey.text.isNotEmpty) {
       await ComicTranslationSecrets.instance.setApiKey(
         activeProfileId,
         apiKey.text,
@@ -658,7 +798,7 @@ class _ComicTranslationBenchmarkPageState
   String sourceLanguage = 'ja';
   String targetLanguage = 'zh-CN';
   bool relatedFilter = false;
-  bool runRemoteTranslation = false;
+  bool runTranslation = false;
   final relationEntries = TextEditingController();
 
   @override
@@ -678,13 +818,14 @@ class _ComicTranslationBenchmarkPageState
   @override
   Widget build(BuildContext context) {
     final engines = ComicTranslationEngineRegistry.instance;
+    final translator = engines.translationEngine;
     return Scaffold(
       appBar: AppBar(title: Text('Translation benchmark'.tl)),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           Text('OCR: ${engines.ocrEngine?.id ?? 'Not installed'.tl}'),
-          Text('Translation: ${engines.translationEngine?.id ?? 'Not configured'.tl}'),
+          Text('Translation: ${translator?.runtimeType ?? 'Not configured'.tl}'),
           const SizedBox(height: 12),
           OutlinedButton.icon(
             onPressed: running ? null : _selectImage,
@@ -757,16 +898,16 @@ class _ComicTranslationBenchmarkPageState
               ),
               const SizedBox(width: 12),
               _binaryButton(
-                selected: runRemoteTranslation,
+                selected: runTranslation,
                 onPressed: running || engines.translationEngine == null
                     ? null
                     : () => setState(() {
-                        runRemoteTranslation = !runRemoteTranslation;
+                        runTranslation = !runTranslation;
                       }),
-                icon: runRemoteTranslation
-                    ? Icons.cloud_outlined
-                    : Icons.cloud_off_outlined,
-                label: runRemoteTranslation ? '远程翻译' : '仅 OCR',
+                icon: runTranslation
+                    ? Icons.translate
+                    : Icons.comments_disabled_outlined,
+                label: runTranslation ? '运行翻译' : '仅 OCR',
               ),
             ],
           ),
@@ -943,7 +1084,7 @@ class _ComicTranslationBenchmarkPageState
         sourceLanguage: sourceLanguage,
         targetLanguage: targetLanguage,
         maxAnalysisSide: analysisSide,
-        runRemoteTranslation: runRemoteTranslation,
+        runTranslation: runTranslation,
       );
       final responses = _lastRawResponses();
       if (mounted) {
@@ -966,7 +1107,7 @@ class _ComicTranslationBenchmarkPageState
   }
 
   List<String> _lastRawResponses() {
-    if (!runRemoteTranslation) return const [];
+    if (!runTranslation) return const [];
     final engine = ComicTranslationEngineRegistry.instance.translationEngine;
     if (engine is! ComicTextTranslationEngineDiagnostics) return const [];
     final diagnostics = engine as ComicTextTranslationEngineDiagnostics;
@@ -1069,7 +1210,7 @@ class _ComicTranslationBenchmarkPageState
           ),
         if (translationMetrics != null)
           Text(
-            'remote=${translationMetrics.elapsed.inMilliseconds}ms · '
+            'translation=${translationMetrics.elapsed.inMilliseconds}ms · '
             'batches=${translationMetrics.batchDurations.length} '
             '[${translationMetrics.batchDurations.map((value) => value.inMilliseconds).join(', ')}]ms · '
             'units=${translationMetrics.unitCount} · '
@@ -1092,7 +1233,7 @@ class _ComicTranslationBenchmarkPageState
             style: ts.s12,
           ),
         SelectableText(
-          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? ComicTranslationEngineRegistry.instance.translationEngine == null ? 'Translation backend is not configured'.tl : 'Remote translation disabled'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
+          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? ComicTranslationEngineRegistry.instance.translationEngine == null ? 'Translation backend is not configured'.tl : 'Translation disabled'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
           style: ts.s12,
         ),
       ],

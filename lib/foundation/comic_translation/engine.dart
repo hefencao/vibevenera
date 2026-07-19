@@ -545,10 +545,24 @@ abstract interface class ComicOcrEngine {
   Future<void> unload();
 }
 
-abstract interface class ComicTextTranslationEngine {
-  String get id;
+enum ComicTranslationContextMode { none, previousPages }
 
-  String get modelVersion;
+final class ComicTranslationEngineIdentity {
+  final String id;
+  final String modelVersion;
+
+  const ComicTranslationEngineIdentity({
+    required this.id,
+    required this.modelVersion,
+  });
+}
+
+abstract interface class ComicTextTranslationEngine {
+  ComicTranslationContextMode get contextMode;
+
+  ComicTranslationEngineIdentity identityFor(
+    ComicTranslationRequest request,
+  );
 
   Future<void> load();
 

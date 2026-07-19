@@ -96,10 +96,10 @@ final class ComicTranslationBenchmark {
     required String sourceLanguage,
     required String targetLanguage,
     int maxAnalysisSide = 1600,
-    bool runRemoteTranslation = true,
+    bool runTranslation = true,
   }) async {
     final translationMeasured =
-        runRemoteTranslation && engines.translationEngine != null;
+        runTranslation && engines.translationEngine != null;
     final benchmarkEngines = translationMeasured
         ? engines
         : (ComicTranslationEngineRegistry()
@@ -379,10 +379,16 @@ final class _BenchmarkNoopTranslationEngine
   const _BenchmarkNoopTranslationEngine();
 
   @override
-  String get id => 'benchmark-noop';
+  ComicTranslationContextMode get contextMode =>
+      ComicTranslationContextMode.none;
 
   @override
-  String get modelVersion => '1';
+  ComicTranslationEngineIdentity identityFor(
+    ComicTranslationRequest request,
+  ) => const ComicTranslationEngineIdentity(
+    id: 'benchmark-noop',
+    modelVersion: '1',
+  );
 
   @override
   Future<void> load() async {}

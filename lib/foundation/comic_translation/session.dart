@@ -312,7 +312,10 @@ final class ComicTranslationSession {
       await ComicTranslationStore.instance.storeOcr(ocr);
     }
     if (!_isActive(ticket)) return;
-    final context = _translationContext(identity.chapterId, identity.pageIndex);
+    final context = translator.contextMode ==
+            ComicTranslationContextMode.previousPages
+        ? _translationContext(identity.chapterId, identity.pageIndex)
+        : const <ComicTranslationContextEntry>[];
     final contextDigest = sha256
         .convert(utf8.encode(jsonEncode(context.map((entry) => [
           entry.pageIndex,
@@ -320,18 +323,19 @@ final class ComicTranslationSession {
           entry.translatedTexts,
         ]).toList())))
         .toString();
-    final translationModelVersion =
-        '$_translationArtifactVersion:${translator.modelVersion}:'
-        'sfx=${policy.translateSoundEffects}';
     final request = ComicTranslationRequest(
       ocr: ocr,
       targetLanguage: targetLanguage,
       previousPages: context,
       translateSoundEffects: policy.translateSoundEffects,
     );
+    final engineIdentity = translator.identityFor(request);
+    final translationModelVersion =
+        '$_translationArtifactVersion:${engineIdentity.modelVersion}:'
+        'sfx=${policy.translateSoundEffects}';
     var translation = await ComicTranslationStore.instance.findTranslation(
       ocrDigest: ocr.digest,
-      engineId: translator.id,
+      engineId: engineIdentity.id,
       modelVersion: translationModelVersion,
       targetLanguage: targetLanguage,
       contextDigest: contextDigest,
@@ -368,7 +372,7 @@ final class ComicTranslationSession {
       translation = ComicTranslationArtifact(
         contentDigest: input.contentDigest,
         ocrDigest: ocr.digest,
-        engineId: translator.id,
+        engineId: engineIdentity.id,
         modelVersion: translationModelVersion,
         sourceLanguage: ocr.sourceLanguage,
         targetLanguage: targetLanguage,

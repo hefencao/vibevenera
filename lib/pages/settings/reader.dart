@@ -304,7 +304,9 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           ListTile(
             leading: const Icon(Icons.translate),
             title: Text('Translation models and API'.tl),
-            subtitle: Text('Configure OCR models, remote LLM and benchmark'.tl),
+                  subtitle: Text(
+                    'Configure OCR, local/remote translation and benchmark'.tl,
+                  ),
             trailing: const Icon(Icons.arrow_right),
             onTap: () => context.to(
               () => const ComicTranslationBackendPage(),

@@ -5,7 +5,9 @@ import 'package:venera/foundation/appdata.dart';
 
 import 'deepl_translation.dart';
 import 'engine.dart';
-import 'model_manager.dart';
+import 'local_model_manager.dart';
+import 'local_translation.dart';
+import 'ocr_model_manager.dart';
 import 'paddle_ocr.dart';
 import 'remote_translation.dart';
 
@@ -174,14 +176,15 @@ final class ComicTranslationRuntime {
   Future<void> init(String dataPath) async {
     await Future.wait([
       ComicTranslationSecrets.instance.init(dataPath),
-      ComicTranslationModelManager.instance.init(dataPath),
+      ComicOcrModelManager.instance.init(dataPath),
+      ComicLocalTranslationModelManager.instance.init(dataPath),
     ]);
     configure();
   }
 
   void configure() {
     final registry = ComicTranslationEngineRegistry.instance;
-    final models = ComicTranslationModelManager.instance;
+    final models = ComicOcrModelManager.instance;
     final AndroidPaddleComicOcrEngine? ocrEngine;
     if (Platform.isAndroid && models.installed) {
       ocrEngine = _ocrEngine ??= AndroidPaddleComicOcrEngine(models);
@@ -204,20 +207,26 @@ final class ComicTranslationRuntime {
               appdata.settings['comicTranslationAdditionalPrompt'] as String,
         );
     final backend = appdata.settings['comicTranslationBackend'] as String;
-    if (backend != 'none' && profile.backend != backend) {
+    if (backend != 'none' && backend != 'local' && profile.backend != backend) {
       throw StateError(
         'Comic translation profile ${profile.id} belongs to '
         '${profile.backend}, not $backend',
       );
     }
     final apiKey = ComicTranslationSecrets.instance.apiKeyFor(profile.id);
-    final translationConfiguration = jsonEncode([
-      backend,
-      profile.endpoint.trim(),
-      profile.model.trim(),
-      profile.additionalPrompt.trim(),
-      apiKey,
-    ]);
+    final translationConfiguration = backend == 'local'
+        ? jsonEncode([
+            backend,
+            for (final model in ComicLocalTranslationModelManager.instance.models)
+              [model.id, model.version],
+          ])
+        : jsonEncode([
+            backend,
+            profile.endpoint.trim(),
+            profile.model.trim(),
+            profile.additionalPrompt.trim(),
+            apiKey,
+          ]);
     if (_translationConfiguration != translationConfiguration) {
       _translationConfiguration = translationConfiguration;
       _translationEngine = switch (backend) {
@@ -231,6 +240,9 @@ final class ComicTranslationRuntime {
           endpoint: profile.endpoint.trim(),
           modelType: profile.model.trim(),
           apiKey: apiKey,
+        ),
+        'local' when Platform.isAndroid => LocalMarianComicTranslationEngine(
+          ComicLocalTranslationModelManager.instance,
         ),
         _ => null,
       };

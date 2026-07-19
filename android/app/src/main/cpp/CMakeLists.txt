@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(venera_webp C)
+project(venera_webp C CXX)
 
 # ============================================================
 # libwebp 源码路径
@@ -153,3 +153,32 @@ target_link_libraries(venera_webp log android)
 set_target_properties(venera_webp PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
 )
+
+# Optional on-device comic translation runtime. Build distributions set these
+# roots to prebuilt Android CTranslate2 and SentencePiece packages. Keeping the
+# runtime optional preserves normal builds while the model files remain
+# user-installed data rather than APK assets.
+set(CTRANSLATE2_ROOT "$ENV{CTRANSLATE2_ROOT}" CACHE PATH "CTranslate2 Android package")
+set(SENTENCEPIECE_ROOT "$ENV{SENTENCEPIECE_ROOT}" CACHE PATH "SentencePiece Android package")
+set(_ctranslate2_lib "${CTRANSLATE2_ROOT}/lib/${ANDROID_ABI}/libctranslate2.so")
+set(_sentencepiece_lib "${SENTENCEPIECE_ROOT}/lib/${ANDROID_ABI}/libsentencepiece.so")
+if(EXISTS "${CTRANSLATE2_ROOT}/include/ctranslate2/translator.h" AND
+   EXISTS "${SENTENCEPIECE_ROOT}/include/sentencepiece_processor.h" AND
+   EXISTS "${_ctranslate2_lib}" AND EXISTS "${_sentencepiece_lib}")
+    add_library(ctranslate2 SHARED IMPORTED)
+    set_target_properties(ctranslate2 PROPERTIES IMPORTED_LOCATION "${_ctranslate2_lib}")
+    add_library(sentencepiece SHARED IMPORTED)
+    set_target_properties(sentencepiece PROPERTIES IMPORTED_LOCATION "${_sentencepiece_lib}")
+    add_library(venera_translation SHARED comic_translation.cpp)
+    target_compile_features(venera_translation PRIVATE cxx_std_17)
+    target_include_directories(venera_translation PRIVATE
+        "${CTRANSLATE2_ROOT}/include"
+        "${SENTENCEPIECE_ROOT}/include"
+    )
+    target_link_libraries(venera_translation ctranslate2 sentencepiece log)
+    set_target_properties(venera_translation PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    )
+else()
+    message(STATUS "CTranslate2/SentencePiece Android packages not set; local translation disabled")
+endif()

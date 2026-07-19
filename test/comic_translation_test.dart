@@ -394,7 +394,69 @@ void main() {
     reopened.dispose();
   });
 
+  test('context-free translator ignores prior pages in requests and cache', () async {
+    final firstImage = File('${temp.path}/local-context-0.bin');
+    final secondImage = File('${temp.path}/local-context-1.bin');
+    await firstImage.writeAsBytes(List<int>.filled(267, 1));
+    await secondImage.writeAsBytes(List<int>.filled(269, 2));
+    ComicTranslationPageIdentity identity(File file, int page) =>
+        ComicTranslationPageIdentity(
+          imageKey: file.uri.toString(),
+          sourceKey: 'local-context',
+          comicId: 'local-context',
+          chapterId: 'chapter',
+          pageIndex: page,
+          mediaKind: ComicTranslationMediaKind.staticImage,
+        );
+    final firstPage = identity(firstImage, 0);
+    final secondPage = identity(secondImage, 1);
+    final translator = _TranslationEngine(
+      contextMode: ComicTranslationContextMode.none,
+    );
+    final registry = ComicTranslationEngineRegistry()
+      ..ocrEngine = _OcrEngine()
+      ..translationEngine = translator;
+    final session = ComicTranslationSession(
+      enabled: true,
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      engines: registry,
+    );
+    session.reportPages(
+      current: [firstPage],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    await _waitFor(session, firstPage);
+    session.reportPages(
+      current: [secondPage],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    await _waitFor(session, secondPage);
+    expect(translator.lastRequest!.previousPages, isEmpty);
+    expect(translator.calls, 2);
+    session.dispose();
+
+    final reopened = ComicTranslationSession(
+      enabled: true,
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      engines: registry,
+    );
+    reopened.reportPages(
+      current: [secondPage],
+      interaction: ComicTranslationInteraction.idle,
+    );
+    await _waitFor(reopened, secondPage);
+    expect(translator.calls, 2);
+    reopened.dispose();
+  });
+
   test('additional remote prompt participates in translation cache identity', () {
+    final request = ComicTranslationRequest(
+      ocr: _ocrArtifact([_ocrRegion('test', 'Hello', 0, 1)]),
+      targetLanguage: 'zh-CN',
+      previousPages: const [],
+    );
     OpenAiCompatibleComicTranslationEngine engine(String prompt) =>
         OpenAiCompatibleComicTranslationEngine(
           endpoint: 'https://example.com/v1/chat/completions',
@@ -402,8 +464,9 @@ void main() {
           apiKey: '',
           additionalPrompt: prompt,
         );
-    expect(engine(' names ').modelVersion, engine('names').modelVersion);
-    expect(engine('formal').modelVersion, isNot(engine('casual').modelVersion));
+    String version(String prompt) => engine(prompt).identityFor(request).modelVersion;
+    expect(version(' names '), version('names'));
+    expect(version('formal'), isNot(version('casual')));
   });
 
   test('DeepL profile backend survives persistence and old profiles migrate', () {
@@ -469,7 +532,12 @@ void main() {
       modelType: 'fast-ish',
       apiKey: 'secret',
     );
-    expect(() => engine.modelVersion, throwsStateError);
+    final request = ComicTranslationRequest(
+      ocr: _ocrArtifact([_ocrRegion('test', 'Hello', 0, 1)]),
+      targetLanguage: 'zh-CN',
+      previousPages: const [],
+    );
+    expect(() => engine.identityFor(request), throwsStateError);
   });
 
   test('DeepL batches at 50 ordered texts', () async {
@@ -1440,7 +1508,7 @@ void main() {
       )],
       sourceLanguage: 'ja',
       targetLanguage: 'zh-CN',
-      runRemoteTranslation: false,
+      runTranslation: false,
     );
     expect(result.translationMeasured, false);
     expect(translator.calls, 0);
@@ -1677,20 +1745,28 @@ final class _OcrEngine implements ComicOcrEngine {
 final class _TranslationEngine implements ComicTextTranslationEngine {
   final String translatedText;
   final List<String>? translatedLines;
+  @override
+  final ComicTranslationContextMode contextMode;
   int calls = 0;
   int loads = 0;
   int unloads = 0;
   ComicTranslationRequest? lastRequest;
 
-  _TranslationEngine() : translatedText = '你好', translatedLines = null;
+  _TranslationEngine({
+    this.contextMode = ComicTranslationContextMode.previousPages,
+  }) : translatedText = '你好', translatedLines = null;
 
-  _TranslationEngine.lines(this.translatedLines) : translatedText = '';
+  _TranslationEngine.lines(this.translatedLines)
+      : translatedText = '',
+        contextMode = ComicTranslationContextMode.previousPages;
 
   @override
-  String get id => 'test-translation';
-
-  @override
-  String get modelVersion => '1';
+  ComicTranslationEngineIdentity identityFor(
+    ComicTranslationRequest request,
+  ) => const ComicTranslationEngineIdentity(
+    id: 'test-translation',
+    modelVersion: '1',
+  );
 
   @override
   Future<void> load() async => loads++;

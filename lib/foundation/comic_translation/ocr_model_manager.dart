@@ -7,13 +7,13 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:venera/network/app_dio.dart' show RHttpAdapter;
 
-final class ComicTranslationModelFile {
+final class ComicOcrModelFile {
   final String name;
   final String url;
   final int bytes;
   final String sha256;
 
-  const ComicTranslationModelFile({
+  const ComicOcrModelFile({
     required this.name,
     required this.url,
     required this.bytes,
@@ -21,13 +21,13 @@ final class ComicTranslationModelFile {
   });
 }
 
-final class ComicTranslationModelBundle {
+final class ComicOcrModelBundle {
   final String id;
   final String version;
   final String displayName;
-  final List<ComicTranslationModelFile> files;
+  final List<ComicOcrModelFile> files;
 
-  const ComicTranslationModelBundle({
+  const ComicOcrModelBundle({
     required this.id,
     required this.version,
     required this.displayName,
@@ -37,36 +37,36 @@ final class ComicTranslationModelBundle {
   int get bytes => files.fold(0, (sum, file) => sum + file.bytes);
 }
 
-const ppOcrV6SmallBundle = ComicTranslationModelBundle(
+const ppOcrV6SmallBundle = ComicOcrModelBundle(
   id: 'ppocrv6-small',
   version: '2026-07-korean-pinned',
   displayName: 'PP-OCRv6 small + Korean PP-OCRv5 mobile',
   files: [
-    ComicTranslationModelFile(
+    ComicOcrModelFile(
       name: 'det.onnx',
       url: 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/5994b4f1a827310b6d38f6b13716af6381847be0/inference.onnx',
       bytes: 9880512,
       sha256: 'd73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e',
     ),
-    ComicTranslationModelFile(
+    ComicOcrModelFile(
       name: 'rec.onnx',
       url: 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/3d2d345e6a299891174f1397a72cdd81331359c7/inference.onnx',
       bytes: 21159378,
       sha256: '5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634',
     ),
-    ComicTranslationModelFile(
+    ComicOcrModelFile(
       name: 'rec.yml',
       url: 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/35200ec2acf6562260fa500e3262f5ea11f33642/inference.yml',
       bytes: 150579,
       sha256: 'ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1',
     ),
-    ComicTranslationModelFile(
+    ComicOcrModelFile(
       name: 'rec-ko.onnx',
       url: 'https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.onnx',
       bytes: 13418787,
       sha256: '92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08',
     ),
-    ComicTranslationModelFile(
+    ComicOcrModelFile(
       name: 'rec-ko.yml',
       url: 'https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.yml',
       bytes: 96039,
@@ -75,16 +75,16 @@ const ppOcrV6SmallBundle = ComicTranslationModelBundle(
   ],
 );
 
-enum ComicTranslationModelPhase { idle, downloading, verifying }
+enum ComicOcrModelPhase { idle, downloading, verifying }
 
-final class ComicTranslationModelProgress {
-  final ComicTranslationModelPhase phase;
+final class ComicOcrModelProgress {
+  final ComicOcrModelPhase phase;
   final String? fileName;
   final int receivedBytes;
   final int totalBytes;
 
-  const ComicTranslationModelProgress({
-    this.phase = ComicTranslationModelPhase.idle,
+  const ComicOcrModelProgress({
+    this.phase = ComicOcrModelPhase.idle,
     this.fileName,
     this.receivedBytes = 0,
     this.totalBytes = 0,
@@ -93,13 +93,13 @@ final class ComicTranslationModelProgress {
   double get fraction => totalBytes == 0 ? 0 : receivedBytes / totalBytes;
 }
 
-final class ComicTranslationModelManager {
-  ComicTranslationModelManager._();
+final class ComicOcrModelManager {
+  ComicOcrModelManager._();
 
-  static final instance = ComicTranslationModelManager._();
+  static final instance = ComicOcrModelManager._();
   static const bundle = ppOcrV6SmallBundle;
 
-  final progress = ValueNotifier(const ComicTranslationModelProgress());
+  final progress = ValueNotifier(const ComicOcrModelProgress());
   late final Directory _directory;
   bool _installed = false;
   Future<void>? _installing;
@@ -118,7 +118,7 @@ final class ComicTranslationModelManager {
 
   Future<void> install() => _installing ??= _install().whenComplete(() {
     _installing = null;
-    progress.value = const ComicTranslationModelProgress();
+    progress.value = const ComicOcrModelProgress();
   });
 
   Future<void> _install() async {
@@ -131,8 +131,8 @@ final class ComicTranslationModelManager {
       }
       await _download(modelFile, completed);
       final partial = File('${target.path}.part');
-      progress.value = ComicTranslationModelProgress(
-        phase: ComicTranslationModelPhase.verifying,
+      progress.value = ComicOcrModelProgress(
+        phase: ComicOcrModelPhase.verifying,
         fileName: modelFile.name,
         receivedBytes: completed + modelFile.bytes,
         totalBytes: bundle.bytes,
@@ -154,7 +154,7 @@ final class ComicTranslationModelManager {
     _installed = true;
   }
 
-  Future<void> _download(ComicTranslationModelFile modelFile, int completed) async {
+  Future<void> _download(ComicOcrModelFile modelFile, int completed) async {
     final partial = File('${pathOf(modelFile.name)}.part');
     var offset = await partial.exists() ? await partial.length() : 0;
     if (offset > modelFile.bytes) {
@@ -182,8 +182,8 @@ final class ComicTranslationModelManager {
       final output = await partial.open(mode: append ? FileMode.append : FileMode.write);
       var received = offset;
       final publishTimer = Stopwatch()..start();
-      progress.value = ComicTranslationModelProgress(
-        phase: ComicTranslationModelPhase.downloading,
+      progress.value = ComicOcrModelProgress(
+        phase: ComicOcrModelPhase.downloading,
         fileName: modelFile.name,
         receivedBytes: completed + received,
         totalBytes: bundle.bytes,
@@ -195,8 +195,8 @@ final class ComicTranslationModelManager {
           if (publishTimer.elapsedMilliseconds >= 500 ||
               received == modelFile.bytes) {
             publishTimer.reset();
-            progress.value = ComicTranslationModelProgress(
-              phase: ComicTranslationModelPhase.downloading,
+            progress.value = ComicOcrModelProgress(
+              phase: ComicOcrModelPhase.downloading,
               fileName: modelFile.name,
               receivedBytes: completed + received,
               totalBytes: bundle.bytes,
@@ -238,7 +238,7 @@ final class ComicTranslationModelManager {
 
   Future<bool> _verified(
     File file,
-    ComicTranslationModelFile modelFile,
+    ComicOcrModelFile modelFile,
   ) async {
     if (!await file.exists() || await file.length() != modelFile.bytes) return false;
     final path = file.path;
@@ -252,6 +252,6 @@ final class ComicTranslationModelManager {
     if (await _directory.exists()) await _directory.delete(recursive: true);
     await _directory.create(recursive: true);
     _installed = false;
-    progress.value = const ComicTranslationModelProgress();
+    progress.value = const ComicOcrModelProgress();
   }
 }

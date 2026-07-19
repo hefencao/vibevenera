@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 import 'engine.dart';
-import 'model_manager.dart';
+import 'ocr_model_manager.dart';
 import 'models.dart';
 
 final class AndroidPaddleComicOcrEngine
@@ -11,7 +11,7 @@ final class AndroidPaddleComicOcrEngine
   static const _channel = MethodChannel('venera/comic_translation_ocr');
   static const _analysisSide = 1600;
 
-  final ComicTranslationModelManager models;
+  final ComicOcrModelManager models;
   ComicOcrRunMetrics? _lastRunMetrics;
 
   AndroidPaddleComicOcrEngine(this.models);
@@ -24,7 +24,7 @@ final class AndroidPaddleComicOcrEngine
 
   @override
   String get modelVersion =>
-      '${ComicTranslationModelManager.bundle.version}:bubble-v20:pixel-mask-v5';
+      '${ComicOcrModelManager.bundle.version}:bubble-v20:pixel-mask-v5';
 
   @override
   bool get supportsAnimatedPosterFrame => false;

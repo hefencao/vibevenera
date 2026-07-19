@@ -31,12 +31,18 @@ final class OpenAiCompatibleComicTranslationEngine
   });
 
   @override
-  String get id =>
-      'openai-compatible:${sha256.convert(utf8.encode(endpoint.trim()))}';
+  ComicTranslationContextMode get contextMode =>
+      ComicTranslationContextMode.previousPages;
 
   @override
-  String get modelVersion => '${model.trim()}:bubble-unit-lines-v27:'
-      '${sha256.convert(utf8.encode(additionalPrompt.trim()))}';
+  ComicTranslationEngineIdentity identityFor(
+    ComicTranslationRequest request,
+  ) => ComicTranslationEngineIdentity(
+    id: 'openai-compatible:'
+        '${sha256.convert(utf8.encode(endpoint.trim()))}',
+    modelVersion: '${model.trim()}:bubble-unit-lines-v27:'
+        '${sha256.convert(utf8.encode(additionalPrompt.trim()))}',
+  );
 
   @override
   ComicTextTranslationRunMetrics? get lastRunMetrics => _lastRunMetrics;

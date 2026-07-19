@@ -34,11 +34,17 @@ final class DeepLComicTranslationEngine
        _ownsClient = client == null;
 
   @override
-  String get id =>
-      'deepl:${sha256.convert(utf8.encode(_translateEndpoint.toString()))}';
+  ComicTranslationContextMode get contextMode =>
+      ComicTranslationContextMode.previousPages;
 
   @override
-  String get modelVersion => 'deepl-v1:$_validatedModelType';
+  ComicTranslationEngineIdentity identityFor(
+    ComicTranslationRequest request,
+  ) => ComicTranslationEngineIdentity(
+    id: 'deepl:'
+        '${sha256.convert(utf8.encode(_translateEndpoint.toString()))}',
+    modelVersion: 'deepl-v1:$_validatedModelType',
+  );
 
   @override
   ComicTextTranslationRunMetrics? get lastRunMetrics => _lastRunMetrics;

@@ -1,6 +1,6 @@
 # Comic Translation Architecture
 
-> 当前架构，更新于 2026-07-17。漫画翻译是 Reader 图片管线的旁路消费者，
+> 当前架构，更新于 2026-07-19。漫画翻译是 Reader 图片管线的旁路消费者，
 > 不属于下载、WebP/GIF 解码或 present 管线。
 
 ## 1. 边界
@@ -48,6 +48,13 @@ Android 本地 OCR 使用独立 `ppocr-sdk` module。Flutter 侧模型管理器�
 长度/SHA-256 校验和原子发布；原生侧使用单线程 worker 加载 ONNX session、采样图片并执行
 PaddleOCR。MethodChannel 不传原图字节，也不在 Android platform 主线程推理。
 
+OCR 与本地文本翻译的模型生命周期已拆开：`ComicOcrModelManager` 只管理 PaddleOCR，
+`ComicLocalTranslationModelManager` 管理按源/目标语言对安装的 Marian INT8 包。本地文本引擎通过
+独立单线程 MethodChannel 调用 CTranslate2 + SentencePiece；一个 unit 作为一个 batch item，返回值
+按请求顺序映射，不向模型发送 region/unit ID，也不经过 JSON 协议。日/韩→简中使用独立 pair；繁中
+目标在简中推理完成后走现有 OpenCC 字符转换。本地模型不使用跨页 prompt，因此不会因前页上下文改变
+重复生成缓存；远程 OpenAI-compatible/DeepL 继续声明 `previousPages` 能力并保留原有上下文语义。
+
 强制规则：
 
 1. 翻译不得改变图片 provider identity，不得重建下载或播放 session。
@@ -66,6 +73,11 @@ OCR key = contentDigest + OCR engine/model + source language
 Translation key = OCR digest + translation engine/model + target language
                   + context digest
 ```
+
+翻译 engine 不再暴露一个与请求无关的固定 model version，而是通过 `identityFor(request)` 返回
+实际语言对的模型身份。`contextMode=none` 的本地 engine 使用空上下文及稳定摘要；声明
+`previousPages` 的远程 engine 才读取、散列和发送前页内容。这样同一个动态本地 backend 切换
+`ja→zh-CN` / `ko→zh-CN` 时不会串用 artifact，也不会把无效上下文变体写入数据库。
 
 查询 translation 时先命中完整 key；若 Reader 刚重建、当前还没有前页内存上下文，则回退到
 `OCR digest + engine/model + target language` 相同的最近 artifact。上下文参与首次翻译，但不应因
@@ -275,7 +287,7 @@ float Mat、通道 Mat 和逐通道数组的重复副本；Bitmap 已是 ARGB888
 2. PP-OCRv5 mobile det/rec：兼容性和日文准确率基线；
 3. 手动指定韩文时切换到 `korean_PP-OCRv5_mobile_rec`；切换时释放前一个 recognition session，
    不让两套 ONNX recognition 权重同时常驻；
-4. 本地 Marian/Bergamot 与显式远程翻译后端。
+4. 本地 Marian INT8/CTranslate2 与显式远程翻译后端。
 
 PP-OCRv6 tiny 先只作为体积/速度基线；其日文覆盖和漫画竖排准确率必须以实际模型包验证，
 不能仅凭通用 OCR 指标作为默认模型。
@@ -288,6 +300,8 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 已完成：旁路模型、内容寻址数据库、独立调度、缓存完成事件、Reader overlay、设置入口、
 动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
-已提供 OpenAI-compatible 和 DeepL 远程翻译 adapter。未完成：iOS/桌面 OCR runtime、本地文本翻译、
-learned balloon detector、用户校正、拟声词和动图实际分析。OCR 引擎未注册时 UI 明确报告模型
-未安装，不进行网络回退。
+已提供 OpenAI-compatible、DeepL 和 Android CTranslate2/Marian adapter。本地模型采用带 SHA-256
+manifest 的目录导入，构建端必须随 APK 提供 CTranslate2/SentencePiece ARM64 runtime；当前仓库不
+捆绑第三方权重，也尚未发布应用内可直接下载的已验证日/韩→中模型包。未完成：iOS/桌面 OCR 与本地
+翻译 runtime、learned balloon detector、用户校正、拟声词和动图实际分析。OCR/本地翻译 runtime
+或对应语言对模型缺失时 UI/任务明确报错，不进行网络回退。
