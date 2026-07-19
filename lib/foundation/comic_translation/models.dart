@@ -231,10 +231,6 @@ final class ComicTranslatedRegion {
   final String ocrRegionId;
   final String sourceText;
   final String translatedText;
-  final String? translationUnitId;
-  final int? translationUnitOrder;
-  final int? translationBandIndex;
-  final ComicTextOrientation? translationOrientation;
   final List<NormalizedPoint> polygon;
   final ComicTextOrientation orientation;
   final ComicTextKind kind;
@@ -250,10 +246,6 @@ final class ComicTranslatedRegion {
     required this.ocrRegionId,
     required this.sourceText,
     required this.translatedText,
-    required this.translationUnitId,
-    required this.translationUnitOrder,
-    required this.translationBandIndex,
-    required this.translationOrientation,
     required this.polygon,
     required this.orientation,
     required this.kind,
@@ -271,14 +263,6 @@ final class ComicTranslatedRegion {
         ocrRegionId: json['ocrRegionId'] as String,
         sourceText: json['sourceText'] as String,
         translatedText: json['translatedText'] as String,
-        translationUnitId: json['translationUnitId'] as String?,
-        translationUnitOrder: json['translationUnitOrder'] as int?,
-        translationBandIndex: json['translationBandIndex'] as int?,
-        translationOrientation: json['translationOrientation'] == null
-            ? null
-            : ComicTextOrientation.values.byName(
-                json['translationOrientation'] as String,
-              ),
         polygon: (json['polygon'] as List)
             .map((point) => NormalizedPoint.fromJson(point as List))
             .toList(),
@@ -309,11 +293,6 @@ final class ComicTranslatedRegion {
     'ocrRegionId': ocrRegionId,
     'sourceText': sourceText,
     'translatedText': translatedText,
-    if (translationUnitId != null) 'translationUnitId': translationUnitId,
-    if (translationUnitOrder != null) 'translationUnitOrder': translationUnitOrder,
-    if (translationBandIndex != null) 'translationBandIndex': translationBandIndex,
-    if (translationOrientation != null)
-      'translationOrientation': translationOrientation!.name,
     'polygon': polygon.map((point) => point.toJson()).toList(),
     'orientation': orientation.name,
     'kind': kind.name,

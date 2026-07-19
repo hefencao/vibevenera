@@ -35,7 +35,7 @@ final class OpenAiCompatibleComicTranslationEngine
       'openai-compatible:${sha256.convert(utf8.encode(endpoint.trim()))}';
 
   @override
-  String get modelVersion => '${model.trim()}:bubble-unit-lines-v24:'
+  String get modelVersion => '${model.trim()}:bubble-unit-lines-v26:'
       '${sha256.convert(utf8.encode(additionalPrompt.trim()))}';
 
   @override

@@ -22,8 +22,7 @@ final class ComicTranslationBenchmarkSample {
   final List<int?> translationUnitOrders;
   final List<int?> translationBandIndices;
   final List<ComicTextOrientation?> translationUnitOrientations;
-  final List<String> splitDiagnostics;
-  final List<String> mergeDiagnostics;
+  final List<String> relationDiagnostics;
   final List<String> translatedTexts;
   final int rssBefore;
   final int rssAfter;
@@ -45,8 +44,7 @@ final class ComicTranslationBenchmarkSample {
     required this.translationUnitOrders,
     required this.translationBandIndices,
     required this.translationUnitOrientations,
-    required this.splitDiagnostics,
-    required this.mergeDiagnostics,
+    required this.relationDiagnostics,
     required this.translatedTexts,
     required this.rssBefore,
     required this.rssAfter,
@@ -91,8 +89,10 @@ final class ComicTranslationBenchmark {
     required String sourceLanguage,
     required String targetLanguage,
     int maxAnalysisSide = 1600,
+    bool runRemoteTranslation = true,
   }) async {
-    final translationMeasured = engines.translationEngine != null;
+    final translationMeasured =
+        runRemoteTranslation && engines.translationEngine != null;
     final benchmarkEngines = translationMeasured
         ? engines
         : (ComicTranslationEngineRegistry()
@@ -170,21 +170,7 @@ final class ComicTranslationBenchmark {
           imageHeight: artifact.imageHeight,
           sourceLanguage: artifact.sourceLanguage,
         );
-        final splitDiagnostics = grouping.diagnoseSplitRelations(
-          artifact.regions.map((region) => ComicTextRegion(
-            value: region,
-            id: region.id,
-            text: region.text,
-            polygon: region.polygon,
-            sourceMaskPolygons: region.sourceMaskPolygons,
-            orientation: region.orientation,
-            backgroundArgb: region.backgroundArgb,
-            bubbleGroupId: region.bubbleGroupId,
-            bubblePolygon: region.bubblePolygon,
-          )).toList(),
-          unitIds,
-        );
-        final mergeDiagnostics = grouping.diagnoseMergeRelations(
+        final relationDiagnostics = grouping.diagnoseRelations(
           artifact.regions.map((region) => ComicTextRegion(
             value: region,
             id: region.id,
@@ -236,8 +222,7 @@ final class ComicTranslationBenchmark {
               artifact.regions.map((region) => bandIndices[region.id]).toList(),
           translationUnitOrientations: artifact.regions
               .map((region) => unitOrientations[region.id]).toList(),
-          splitDiagnostics: splitDiagnostics,
-          mergeDiagnostics: mergeDiagnostics,
+          relationDiagnostics: relationDiagnostics,
           translatedTexts: artifact.regions
               .map((region) => translatedRegions[region.id]!)
               .toList(),

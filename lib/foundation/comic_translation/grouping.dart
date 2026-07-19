@@ -128,65 +128,43 @@ final class ComicTextGrouping {
     return groups;
   }
 
-  List<String> diagnoseSplitRelations<T>(
+  List<String> diagnoseRelations<T>(
     List<ComicTextRegion<T>> regions,
     Map<String, String?> unitIds,
+    {
+      bool? relatedFilter,
+      Set<int> regionIndices = const {},
+    }
   ) {
     final boxes = regions.map(_box).toList();
     final diagnostics = <String>[];
     for (var i = 0; i < boxes.length; i++) {
       for (var j = i + 1; j < boxes.length; j++) {
-        final a = boxes[i];
-        final b = boxes[j];
-        final group = a.region.bubbleGroupId;
-        if (group == null || group != b.region.bubbleGroupId ||
-            unitIds[a.region.id] == unitIds[b.region.id]) {
+        if (regionIndices.isNotEmpty &&
+            (regionIndices.length == 1
+                ? !regionIndices.contains(i) && !regionIndices.contains(j)
+                : !regionIndices.contains(i) || !regionIndices.contains(j))) {
           continue;
         }
+        final a = boxes[i];
+        final b = boxes[j];
         final relation = StringBuffer();
         final separation = StringBuffer();
         final related = _related(a, b, boxes, trace: relation);
+        if (relatedFilter != null && related != relatedFilter) continue;
         final separated = _directionallySeparated(
           a, b, boxes, trace: separation,
         );
         diagnostics.add(
-          '${a.region.id}(${a.region.text})/${b.region.id}(${b.region.text}) '
-          'g$group u${unitIds[a.region.id]}/u${unitIds[b.region.id]} '
+          '#${i + 1} ${a.region.id}(${a.region.text})/'
+          '#${j + 1} ${b.region.id}(${b.region.text}) '
+          'g${a.region.bubbleGroupId ?? '-'}/'
+          '${b.region.bubbleGroupId ?? '-'} '
+          'u${unitIds[a.region.id]}/u${unitIds[b.region.id]} '
           'ocr=${_boundsText(a)}/${_boundsText(b)} '
           'mask=${_boundsText(_positionBox(a.region))}/'
           '${_boundsText(_positionBox(b.region))} '
           'related=$related {$relation} separated=$separated {$separation}',
-        );
-      }
-    }
-    return diagnostics;
-  }
-
-  List<String> diagnoseMergeRelations<T>(
-    List<ComicTextRegion<T>> regions,
-    Map<String, String?> unitIds,
-  ) {
-    final boxes = regions.map(_box).toList();
-    final diagnostics = <String>[];
-    for (var i = 0; i < boxes.length; i++) {
-      for (var j = i + 1; j < boxes.length; j++) {
-        final a = boxes[i];
-        final b = boxes[j];
-        final unit = unitIds[a.region.id];
-        if (unit == null || unit != unitIds[b.region.id]) continue;
-        final relation = StringBuffer();
-        if (!_related(a, b, boxes, trace: relation)) continue;
-        final separation = StringBuffer();
-        final separated = _directionallySeparated(
-          a, b, boxes, trace: separation,
-        );
-        diagnostics.add(
-          '${a.region.id}(${a.region.text})/${b.region.id}(${b.region.text}) '
-          'g${a.region.bubbleGroupId ?? '-'}/${b.region.bubbleGroupId ?? '-'} '
-          'u$unit ocr=${_boundsText(a)}/${_boundsText(b)} '
-          'mask=${_boundsText(_positionBox(a.region))}/'
-          '${_boundsText(_positionBox(b.region))} '
-          'related=true {$relation} separated=$separated {$separation}',
         );
       }
     }
@@ -257,7 +235,7 @@ final class ComicTextGrouping {
       (region) => _characterCount(region.text) > 1,
     );
     for (final region in regions) {
-      final box = _box(region);
+      final box = _positionBox(region);
       final characters = _characterCount(region.text);
       final aspect = _max(box.width, box.height) /
           _min(box.width, box.height);
@@ -293,37 +271,32 @@ final class ComicTextGrouping {
     final aGroup = a.region.bubbleGroupId;
     final bGroup = b.region.bubbleGroupId;
     final sameId = aGroup != null && aGroup == bGroup;
+    final differentId = aGroup != null && bGroup != null && !sameId;
+    final nativeGroupWeight =
+        sourceLanguage.split(RegExp('[-_]')).first.toLowerCase() == 'ko'
+            ? .10
+            : .45;
     final duplicateBubble = _sameBubbleGeometry(a.region, b.region);
     final hasBubbleGeometry =
         a.region.bubblePolygon != null && b.region.bubblePolygon != null;
-    final sameIdContainer = sameId && (!hasBubbleGeometry || duplicateBubble);
-    final contained = aGroup == null || bGroup == null
-        ? _containedByBubble(a, b)
-        : false;
-    final sameContainer = sameIdContainer || duplicateBubble || contained;
-    final strongContainer = sameIdContainer || duplicateBubble;
+    final contained = _containedByBubble(a, b);
+    final sameContainer = duplicateBubble || contained;
+    final strongContainer = duplicateBubble;
     final groupContext = sameContainer || sameId;
+    final similarBackground = _similarBackground(a.region, b.region, 40);
     final concavityWeight = duplicateBubble
         ? _concavityWeight(a.region.bubblePolygon!)
         : 0.0;
-    if (aGroup != null && bGroup != null && !sameId && !sameContainer) {
-      trace?.write('reject=different-native-group');
-      return false;
-    }
-    final mixedBubble = !sameContainer && (aGroup == null) != (bGroup == null);
-    if (!groupContext && !_similarBackground(a.region, b.region, 40)) {
-      trace?.write('reject=background');
-      return false;
-    }
     final aOrientation = _orientation([a.region]);
     final bOrientation = _orientation([b.region]);
-    if (aOrientation != bOrientation && !groupContext) {
+    if (aOrientation != bOrientation && !sameContainer) {
       trace?.write('reject=orientation');
       return false;
     }
-    final context = groupContext
-        ? all.where((box) => _sharesContainer(a, b, box)).toList()
-        : [a, b];
+    final context = sameContainer
+        ? all.where((box) => _sharesVisualContainer(a, b, box)).toList()
+        : sameId ? all.where((box) =>
+            box.region.bubbleGroupId == aGroup).toList() : [a, b];
     final vertical = groupContext
         ? _orientation(context.map((box) => box.region).toList()) ==
             ComicTextOrientation.vertical
@@ -408,28 +381,52 @@ final class ComicTextGrouping {
     final crossCenterRatio = crossCenterDistance /
         (groupContext ? dominantThickness : characterSize);
     final weightedCrossRatio = _weightedDistance(crossCenterRatio);
-    final overlapLimit = mixedBubble ? 0.60 : 0.45;
+    final overlapLimit = sameContainer ? 0.42 : 0.45;
+    if (differentId && nativeGroupWeight > .10 &&
+        crossCenterRatio < .72 && crossOverlap >= overlapLimit) {
+      trace?.write('reject=overlapping-native-groups');
+      return false;
+    }
     final sameBandGap = sameContainer
         ? hasBubbleGeometry ? 1.8 - concavityWeight * .9 : 2.4
         : 1.6;
     final sameBand = crossCenterRatio < .72 &&
         crossOverlap >= overlapLimit &&
-        mainGap <= dominantThickness * sameBandGap;
+        mainGap <= dominantThickness * sameBandGap &&
+        similarBackground &&
+        (!differentId || nativeGroupWeight <= .10);
+    final nativeLimitAdjustment =
+        differentId ? -1.4 * nativeGroupWeight : 0.0;
+    final backgroundLimitAdjustment = similarBackground ? 0.0 : -.35;
     final adjacentLimit = strongContainer
         ? 2.75 - concavityWeight * .40
-        : groupContext ? 2.3 : 1.8;
+        : groupContext
+            ? 2.3 + backgroundLimitAdjustment
+            : 1.8 + nativeLimitAdjustment + backgroundLimitAdjustment;
+    final aCharacters = _characterCount(a.region.text);
+    final bCharacters = _characterCount(b.region.text);
+    final singleCharacter = _min(aCharacters, bCharacters) == 1 &&
+        _max(aCharacters, bCharacters) > 1;
+    final effectiveAdjacentLimit = strongContainer &&
+            singleCharacter && crossOverlap < .05
+        ? _min(adjacentLimit, 1.35)
+        : adjacentLimit;
     final shortFragment = _min(aMainExtent, bMainExtent) <=
         characterSize * 1.55;
     final endpointContact = shortFragment &&
         mainGap <= characterSize * .65;
+    final nativeOverlapAdjustment = sameId
+        ? -.05 * nativeGroupWeight
+        : differentId ? .18 * nativeGroupWeight : 0.0;
     final overlapContact = mainOverlapConfidence >=
-        (mixedBubble ? .58 : sameContainer ? .38 : .48);
+        (sameContainer ? .38 : .48 + nativeOverlapAdjustment) +
+            (similarBackground ? 0 : .08);
     final boundaryReliable = !hasBubbleGeometry ||
         bubbleCoverage >= .60 ||
         crossCenterRatio <= 1.30 ||
         endpointContact;
     final adjacentBand = !sameBand &&
-        weightedCrossRatio <= adjacentLimit &&
+        weightedCrossRatio <= effectiveAdjacentLimit &&
         (overlapContact || endpointContact) &&
         boundaryReliable;
     final related = sameBand || adjacentBand;
@@ -440,14 +437,19 @@ final class ComicTextGrouping {
         'body=${_number(dominantThickness)} '
         'text=${_boundsText(aText)}/${_boundsText(bText)} '
         'crossCenter=${_number(crossCenterRatio)} '
-        'weighted=${_number(weightedCrossRatio)} limit=${_number(adjacentLimit)} '
+        'weighted=${_number(weightedCrossRatio)} '
+        'limit=${_number(effectiveAdjacentLimit)} '
         'crossOverlap=${_number(crossOverlap)} '
         'mainOverlap=${_number(shortMainOverlap)}/'
         '${_number(longMainOverlap)}/${_number(mainOverlapConfidence)} '
         'mainGap=${_number(mainGap / dominantThickness)} '
         'same=$sameBand adjacent=$adjacentBand overlap=$overlapContact '
         'endpoint=$endpointContact boundary=$boundaryReliable '
-        'coverage=${_number(bubbleCoverage)} concavity=${_number(concavityWeight)}',
+        'coverage=${_number(bubbleCoverage)} concavity=${_number(concavityWeight)} '
+        'background=${similarBackground ? 'same' : 'different'} '
+        'single=$singleCharacter '
+        'native=${sameId ? 'same' : differentId ? 'different' : 'none'}:'
+        '${_number(nativeGroupWeight)}',
       );
     }
     return related;
@@ -508,7 +510,10 @@ final class ComicTextGrouping {
     _RegionBox<T> b,
     List<_RegionBox<T>> all,
   ) {
-    final container = all.where((box) => _sharesContainer(a, b, box)).toList();
+    final container = all
+        .where((box) => _sharesVisualContainer(a, b, box))
+        .toList();
+    if (container.isEmpty) container.addAll([a, b]);
     final vertical = _orientation(container.map((box) => box.region).toList()) ==
         ComicTextOrientation.vertical;
     final aText = _textBounds(a, vertical);
@@ -537,11 +542,14 @@ final class ComicTextGrouping {
     final crossCenterDistance = vertical
         ? ((aText.left + aText.right) - (bText.left + bText.right)).abs() / 2
         : ((aText.top + aText.bottom) - (bText.top + bText.bottom)).abs() / 2;
-    return crossCenterDistance / scale >= .72
+    final distance = crossCenterDistance / scale >= .72
         ? crossGap / scale + (1 - mainOverlap) * 1.5 +
             mainGap / scale * .35
         : mainGap / scale + (1 - crossOverlap) * .8 +
             (1 - mainOverlap) * 1.2;
+    final sameId = a.region.bubbleGroupId != null &&
+        a.region.bubbleGroupId == b.region.bubbleGroupId;
+    return sameId ? distance * .96 : distance;
   }
 
   double _bubbleCoverage<T>(ComicTextRegion<T> region) {
@@ -618,6 +626,15 @@ final class ComicTextGrouping {
         _containedByBubble(a, candidate) ||
         _containedByBubble(b, candidate);
   }
+
+  bool _sharesVisualContainer<T>(
+    _RegionBox<T> a,
+    _RegionBox<T> b,
+    _RegionBox<T> candidate,
+  ) => _sameBubbleGeometry(a.region, candidate.region) ||
+      _sameBubbleGeometry(b.region, candidate.region) ||
+      _containedByBubble(a, candidate) ||
+      _containedByBubble(b, candidate);
 
   double _dominantThickness<T>(
     List<_RegionBox<T>> boxes,

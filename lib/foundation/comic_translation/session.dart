@@ -332,15 +332,6 @@ final class ComicTranslationSession {
       targetLanguage: targetLanguage,
       contextDigest: contextDigest,
     );
-    // Bubble ids are only container hints. Persisted unit membership, order,
-    // bands and orientation must all match the current grouping contract.
-    if (translation != null) {
-      final compatible = _translationUnitsCompatible(
-        translation,
-        request.units,
-      );
-      if (!compatible) translation = null;
-    }
     if (translation == null) {
       if (!_isActive(ticket)) return;
       _setStateIfActive(
@@ -352,37 +343,11 @@ final class ComicTranslationSession {
       );
       final result = await engines.translate(pair, request);
       final translatedRegions = request.expandUnitTranslations(result);
-      final memberships = <String, ({
-        String unitId,
-        int unitOrder,
-        int bandIndex,
-        ComicTextOrientation orientation,
-      })>{};
-      for (final unit in request.units) {
-        final orders = <String, int>{
-          for (var i = 0; i < unit.regionIds.length; i++) unit.regionIds[i]: i,
-        };
-        for (var band = 0; band < unit.bandRegionIds.length; band++) {
-          for (final regionId in unit.bandRegionIds[band]) {
-            memberships[regionId] = (
-              unitId: unit.id,
-              unitOrder: orders[regionId]!,
-              bandIndex: band,
-              orientation: unit.orientation,
-            );
-          }
-        }
-      }
       final regions = ocr.regions.map((region) {
-        final membership = memberships[region.id];
         return ComicTranslatedRegion(
           ocrRegionId: region.id,
           sourceText: region.text,
           translatedText: translatedRegions[region.id]!,
-          translationUnitId: membership?.unitId,
-          translationUnitOrder: membership?.unitOrder,
-          translationBandIndex: membership?.bandIndex,
-          translationOrientation: membership?.orientation,
           polygon: region.polygon,
           orientation: region.orientation,
           kind: region.kind,
@@ -429,63 +394,6 @@ final class ComicTranslationSession {
     );
   }
 
-
-  bool _translationUnitsCompatible(
-    ComicTranslationArtifact artifact,
-    List<ComicTranslationUnit> expectedUnits,
-  ) {
-    final translated = artifact.regions
-        .where((region) => region.translatedText.trim().isNotEmpty)
-        .toList(growable: false);
-    final expectedRegions = {
-      for (final unit in expectedUnits) ...unit.regionIds,
-    };
-    if (!setEquals(
-      translated.map((region) => region.ocrRegionId).toSet(),
-      expectedRegions,
-    )) {
-      return false;
-    }
-
-    String signature(Iterable<String> ids) {
-      final ordered = ids.toList()..sort();
-      return ordered.join('\x00');
-    }
-
-    final actualUnits = <String, Set<String>>{};
-    for (final region in translated) {
-      final unitId = region.translationUnitId;
-      if (unitId == null || unitId.isEmpty ||
-          region.translationUnitOrder == null ||
-          region.translationBandIndex == null ||
-          region.translationOrientation == null) {
-        return false;
-      }
-      actualUnits.putIfAbsent(unitId, () => <String>{})
-          .add(region.ocrRegionId);
-    }
-    final storedById = {
-      for (final region in translated) region.ocrRegionId: region,
-    };
-    for (final unit in expectedUnits) {
-      final expectedSignature = signature(unit.regionIds);
-      final bands = <String, int>{
-        for (var band = 0; band < unit.bandRegionIds.length; band++)
-          for (final id in unit.bandRegionIds[band]) id: band,
-      };
-      for (var order = 0; order < unit.regionIds.length; order++) {
-        final region = storedById[unit.regionIds[order]]!;
-        if (signature(actualUnits[region.translationUnitId]!) !=
-                expectedSignature ||
-            region.translationUnitOrder != order ||
-            region.translationBandIndex != bands[region.ocrRegionId] ||
-            region.translationOrientation != unit.orientation) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
 
   void _updateFontScale(ComicTranslationArtifact artifact) {
     if (_fontScaleResolved) return;

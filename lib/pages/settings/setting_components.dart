@@ -68,9 +68,8 @@ class _SwitchSettingState extends State<_SwitchSetting> {
               appdata.settings[widget.settingKey] = value;
             }
           });
-          appdata.saveData().then((_) {
-            widget.onChanged?.call();
-          });
+          widget.onChanged?.call();
+          appdata.saveData();
         },
       ),
     );

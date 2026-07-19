@@ -8,6 +8,7 @@ class _TranslationLayoutSearch {
   final double sourceArea;
   final Rect sourceBounds;
   final double preferredFont;
+  final bool body;
   int _optionIndex = 0;
   int _binaryStep = 0;
   int _fontStep = -1;
@@ -17,6 +18,7 @@ class _TranslationLayoutSearch {
   double _high = 2;
   double _minimumFont = 2;
   _TranslationLayoutCandidate? _best;
+  _TranslationLayoutCandidate? _bodyBest;
   _TranslationLayoutPlan? plan;
 
   _TranslationLayoutSearch(
@@ -46,11 +48,18 @@ class _TranslationLayoutSearch {
          (value, next) => value.expandToInclude(next),
        ),
        preferredFont = painter._sourceFontSize(block, regionBounds) *
-           painter.fontScale;
+           painter.fontScale,
+       body = block.regions.every((region) =>
+               region.region.kind != ComicTextKind.soundEffect) &&
+           (block.regions.any((region) =>
+               region.region.bubbleGroupId != null ||
+               region.region.bubblePolygon != null) ||
+               block.regions.fold(0, (count, region) =>
+                   count + painter._characters(region.region.sourceText)) >= 4);
 
   bool step() {
     if (_optionIndex >= options.length) {
-      plan = _best!.plan;
+      plan = (_bodyBest ?? _best)!.plan;
       return true;
     }
     final option = options[_optionIndex];
@@ -100,7 +109,7 @@ class _TranslationLayoutSearch {
     _optionInitialized = false;
     _lowerBoundFits = false;
     if (_optionIndex < options.length) return false;
-    plan = _best!.plan;
+    plan = (_bodyBest ?? _best)!.plan;
     return true;
   }
 
@@ -152,15 +161,19 @@ class _TranslationLayoutSearch {
         measured.orphanPenalty * 1.1 +
         extentPenalty * .8 +
         option.positionPenalty * 3.0;
-    if (_best == null || score < _best!.score) {
-      _best = _TranslationLayoutCandidate(
-        _TranslationLayoutPlan(
-          option.lanes,
-          measured.laneLayouts,
-          fontSize,
-        ),
-        score,
-      );
+    final candidate = _TranslationLayoutCandidate(
+      _TranslationLayoutPlan(
+        option.lanes,
+        measured.laneLayouts,
+        fontSize,
+      ),
+      score,
+    );
+    if (_best == null || score < _best!.score) _best = candidate;
+    final ratio = fontSize / preferredFont;
+    if (body && ratio >= .82 && ratio <= 1.18 &&
+        (_bodyBest == null || score < _bodyBest!.score)) {
+      _bodyBest = candidate;
     }
   }
 }

@@ -653,15 +653,25 @@ class _ComicTranslationBenchmarkPageState
   List<String> rawResponses = const [];
   bool showRawResponses = false;
   bool running = false;
-  int runs = 3;
+  int runs = 1;
   int analysisSide = 1600;
   String sourceLanguage = 'ja';
   String targetLanguage = 'zh-CN';
+  bool relatedFilter = false;
+  bool runRemoteTranslation =
+      ComicTranslationEngineRegistry.instance.translationEngine != null;
+  final relationEntries = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     imagePath = appdata.implicitData['comicTranslationBenchmarkImage'] as String?;
+  }
+
+  @override
+  void dispose() {
+    relationEntries.dispose();
+    super.dispose();
   }
 
   @override
@@ -681,18 +691,6 @@ class _ComicTranslationBenchmarkPageState
             label: Text(imagePath ?? 'Select test image'.tl),
           ),
           const SizedBox(height: 8),
-          ListTile(
-            title: Text('Benchmark runs'.tl),
-            trailing: DropdownButton<int>(
-              value: runs,
-              items: const [
-                DropdownMenuItem(value: 1, child: Text('1')),
-                DropdownMenuItem(value: 3, child: Text('3')),
-                DropdownMenuItem(value: 10, child: Text('10')),
-              ],
-              onChanged: running ? null : (value) => setState(() => runs = value!),
-            ),
-          ),
           ListTile(
             title: const Text('OCR analysis side'),
             trailing: DropdownButton<int>(
@@ -734,32 +732,92 @@ class _ComicTranslationBenchmarkPageState
                     }),
             ),
           ),
-          ListTile(
-            title: Text('Target language'.tl),
-            trailing: DropdownButton<String>(
-              value: targetLanguage,
-              items: const [
-                DropdownMenuItem(value: 'zh-CN', child: Text('简体中文')),
-                DropdownMenuItem(value: 'zh-TW', child: Text('繁體中文')),
-                DropdownMenuItem(value: 'ko-KR', child: Text('한국어')),
-                DropdownMenuItem(value: 'ja-JP', child: Text('日本語')),
-                DropdownMenuItem(value: 'en-US', child: Text('English')),
-              ],
-              onChanged: running
-                  ? null
-                  : (value) => setState(() {
-                      targetLanguage = value!;
-                      result = null;
-                      error = null;
-                    }),
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: targetLanguage,
+                  decoration: InputDecoration(labelText: 'Target language'.tl),
+                  items: const [
+                    DropdownMenuItem(value: 'zh-CN', child: Text('简体中文')),
+                    DropdownMenuItem(value: 'zh-TW', child: Text('繁體中文')),
+                    DropdownMenuItem(value: 'ko-KR', child: Text('한국어')),
+                    DropdownMenuItem(value: 'ja-JP', child: Text('日本語')),
+                    DropdownMenuItem(value: 'en-US', child: Text('English')),
+                  ],
+                  onChanged: running
+                      ? null
+                      : (value) => setState(() {
+                          targetLanguage = value!;
+                          result = null;
+                          error = null;
+                        }),
+                ),
+              ),
+              const SizedBox(width: 12),
+              _binaryButton(
+                selected: runRemoteTranslation,
+                onPressed: running || engines.translationEngine == null
+                    ? null
+                    : () => setState(() {
+                        runRemoteTranslation = !runRemoteTranslation;
+                      }),
+                icon: runRemoteTranslation
+                    ? Icons.cloud_outlined
+                    : Icons.cloud_off_outlined,
+                label: runRemoteTranslation ? '远程翻译' : '仅 OCR',
+              ),
+            ],
           ),
-          FilledButton.icon(
-            onPressed: running || imagePath == null || engines.ocrEngine == null
-                ? null
-                : _run,
-            icon: const Icon(Icons.speed),
-            label: Text(running ? 'Running'.tl : '${'Run'.tl} $runs×'),
+          Row(
+            children: [
+              Expanded(child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('Benchmark runs'.tl),
+                trailing: DropdownButton<int>(
+                  value: runs,
+                  items: const [
+                    DropdownMenuItem(value: 1, child: Text('1')),
+                    DropdownMenuItem(value: 3, child: Text('3')),
+                    DropdownMenuItem(value: 10, child: Text('10')),
+                  ],
+                  onChanged: running
+                      ? null
+                      : (value) => setState(() => runs = value!),
+                ),
+              )),
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed:
+                    running || imagePath == null || engines.ocrEngine == null
+                        ? null
+                        : _run,
+                icon: const Icon(Icons.speed),
+                label: Text(running ? 'Running'.tl : '${'Run'.tl} $runs×'),
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              Text('related=$relatedFilter'),
+              Switch(
+                value: relatedFilter,
+                onChanged: (value) => setState(() => relatedFilter = value),
+              ),
+              const SizedBox(width: 8),
+              Expanded(child: TextField(
+                controller: relationEntries,
+                keyboardType: TextInputType.text,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9,，\s]')),
+                ],
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'Relation entries',
+                  hintText: '例如 2,3；单个编号会显示它与所有条目的判断',
+                ),
+              )),
+            ],
           ),
           Text(
             'Model load time is a warm-load value when another Reader session already owns the model.'.tl,
@@ -827,6 +885,7 @@ class _ComicTranslationBenchmarkPageState
       appdata.implicitData['comicTranslationBenchmarkImage'] = selected.path;
       appdata.writeImplicitData();
       setState(() {
+        if (imagePath != selected.path) relationEntries.clear();
         imagePath = selected.path;
         result = null;
         error = null;
@@ -860,6 +919,7 @@ class _ComicTranslationBenchmarkPageState
         sourceLanguage: sourceLanguage,
         targetLanguage: targetLanguage,
         maxAnalysisSide: analysisSide,
+        runRemoteTranslation: runRemoteTranslation,
       );
       final responses = _lastRawResponses();
       if (mounted) {
@@ -882,12 +942,58 @@ class _ComicTranslationBenchmarkPageState
   }
 
   List<String> _lastRawResponses() {
+    if (!runRemoteTranslation) return const [];
     final engine = ComicTranslationEngineRegistry.instance.translationEngine;
     if (engine is! ComicTextTranslationEngineDiagnostics) return const [];
     final diagnostics = engine as ComicTextTranslationEngineDiagnostics;
     return diagnostics.lastRawResponses
         .where((value) => value.isNotEmpty)
         .toList();
+  }
+
+  Set<int> _relationRegionIndices() {
+    final value = relationEntries.text.trim();
+    if (value.isEmpty) return const {};
+    return value.split(RegExp(r'[,，\s]+'))
+        .where((token) => token.isNotEmpty)
+        .map((token) {
+          final index = int.parse(token);
+          if (index < 1) throw const FormatException('条目编号必须从 1 开始');
+          return index - 1;
+        }).toSet();
+  }
+
+  Widget _binaryButton({
+    required bool selected,
+    required VoidCallback? onPressed,
+    required String label,
+    IconData? icon,
+  }) {
+    final child = icon == null
+        ? Text(label)
+        : Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon),
+            const SizedBox(width: 8),
+            Text(label),
+          ]);
+    return selected
+        ? FilledButton(onPressed: onPressed, child: child)
+        : FilledButton.tonal(onPressed: onPressed, child: child);
+  }
+
+  List<String> _visibleRelations(ComicTranslationBenchmarkSample sample) {
+    final entries = _relationRegionIndices();
+    final pattern = RegExp(r'^#(\d+) .*?/#(\d+) ');
+    return sample.relationDiagnostics.where((diagnostic) {
+      if (!diagnostic.contains('related=$relatedFilter')) return false;
+      if (entries.isEmpty) return true;
+      final match = pattern.firstMatch(diagnostic)!;
+      final first = int.parse(match.group(1)!) - 1;
+      final second = int.parse(match.group(2)!) - 1;
+      return entries.length == 1
+          ? entries.contains(first) || entries.contains(second)
+          : entries.contains(first) && entries.contains(second);
+    }).toList();
   }
 
   int _percentile(List<Duration> values, double percentile) {
@@ -901,6 +1007,7 @@ class _ComicTranslationBenchmarkPageState
   Widget _buildSample(ComicTranslationBenchmarkSample sample, int index) {
     final metrics = sample.ocrMetrics;
     final translationMetrics = sample.translationMetrics;
+    final relations = _visibleRelations(sample);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -949,18 +1056,13 @@ class _ComicTranslationBenchmarkPageState
           'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} b${sample.translationBandIndices[i] ?? '-'} ${sample.translationUnitOrientations[i]?.name ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
           style: ts.s12,
         ),
-        if (sample.splitDiagnostics.isNotEmpty)
+        if (relations.isNotEmpty)
           SelectableText(
-            'Split diagnostics:\n${sample.splitDiagnostics.join('\n')}',
+            'Relation diagnostics:\n${relations.join('\n')}',
             style: ts.s12,
-          ),
-        if (sample.mergeDiagnostics.isNotEmpty)
-          SelectableText(
-            'Merge diagnostics:\n${sample.mergeDiagnostics.join('\n')}',
-            style: ts.s12,
-          ),
+        ),
         SelectableText(
-          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? 'Translation backend is not configured'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
+          '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? ComicTranslationEngineRegistry.instance.translationEngine == null ? 'Translation backend is not configured'.tl : 'Remote translation disabled'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
           style: ts.s12,
         ),
       ],

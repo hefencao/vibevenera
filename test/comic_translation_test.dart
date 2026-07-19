@@ -60,10 +60,6 @@ void main() {
     expect(firstState.artifact!.regions.single.backgroundArgb, 0xFFFFFFFF);
     expect(firstState.artifact!.regions.single.foregroundArgb, 0xFF202020);
     expect(firstState.artifact!.regions.single.bubbleGroupId, 3);
-    expect(firstState.artifact!.regions.single.translationUnitId, isNotNull);
-    expect(firstState.artifact!.regions.single.translationUnitOrder, 0);
-    expect(firstState.artifact!.regions.single.translationBandIndex, 0);
-    expect(firstState.artifact!.regions.single.translationOrientation, isNotNull);
     expect(firstState.cleanOverlayPng, [1, 2, 3]);
     expect(firstState.artifact!.regions.single.bubblePolygon, isNotEmpty);
     expect(firstState.artifact!.regions.single.sourceMaskPolygons.single, hasLength(4));
@@ -97,9 +93,6 @@ void main() {
     );
     expect(secondState.artifact!.regions.single.foregroundArgb, 0xFF202020);
     expect(secondState.artifact!.regions.single.bubbleGroupId, 3);
-    expect(secondState.artifact!.regions.single.translationUnitId,
-        firstState.artifact!.regions.single.translationUnitId);
-    expect(secondState.artifact!.regions.single.translationBandIndex, 0);
     expect(secondState.cleanOverlayPng, [1, 2, 3]);
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
@@ -122,7 +115,7 @@ void main() {
     fallback.dispose();
   });
 
-  test('stale overlay layout metadata invalidates translation artifact',
+  test('translation cache does not persist image-lifetime layout metadata',
       () async {
     final image = File('${temp.path}/stale-layout.bin');
     await image.writeAsBytes(List<int>.filled(263, 7));
@@ -151,18 +144,12 @@ void main() {
     );
     final artifact = (await _waitFor(first, identity)).artifact!;
     first.dispose();
-
-    final staleJson = artifact.toJson();
-    final staleRegion =
-        (staleJson['regions'] as List).single as Map<String, dynamic>;
-    final originalOrientation = artifact.regions.single.translationOrientation!;
-    staleRegion['translationOrientation'] =
-        (originalOrientation == ComicTextOrientation.vertical
-            ? ComicTextOrientation.horizontal
-            : ComicTextOrientation.vertical).name;
-    await ComicTranslationStore.instance.storeTranslation(
-      ComicTranslationArtifact.fromJson(staleJson),
-    );
+    final storedRegion =
+        (artifact.toJson()['regions'] as List).single as Map<String, dynamic>;
+    expect(storedRegion, isNot(contains('translationUnitId')));
+    expect(storedRegion, isNot(contains('translationUnitOrder')));
+    expect(storedRegion, isNot(contains('translationBandIndex')));
+    expect(storedRegion, isNot(contains('translationOrientation')));
 
     final reopened = ComicTranslationSession(
       enabled: true,
@@ -174,12 +161,8 @@ void main() {
       current: [identity],
       interaction: ComicTranslationInteraction.idle,
     );
-    final refreshed = (await _waitFor(reopened, identity)).artifact!;
-    expect(translator.calls, 2);
-    expect(
-      refreshed.regions.single.translationOrientation,
-      originalOrientation,
-    );
+    await _waitFor(reopened, identity);
+    expect(translator.calls, 1);
     reopened.dispose();
   });
 
@@ -520,6 +503,91 @@ void main() {
     expect(ComicTranslationUnit.fromOcr(artifact), hasLength(2));
   });
 
+  test('Korean stacked lines can cross unreliable native bubble groups', () {
+    final artifact = _ocrArtifact([
+      _positionedRegion('r0', '태어나지도', .2, .10, .5, .08, 0,
+          bubbleGroupId: 0, orientation: ComicTextOrientation.horizontal),
+      _positionedRegion('r1', '못한 아이를', .2, .19, .5, .08, 1,
+          bubbleGroupId: 0, orientation: ComicTextOrientation.horizontal),
+      _positionedRegion('r2', '둘이나 어깨위에', .2, .28, .5, .08, 2,
+          bubbleGroupId: 1, orientation: ComicTextOrientation.horizontal),
+      _positionedRegion('r3', '태운주제에', .2, .37, .5, .08, 3,
+          orientation: ComicTextOrientation.horizontal,
+          backgroundArgb: 0xff777777),
+    ], sourceLanguage: 'ko');
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units, hasLength(1));
+    expect(units.single.regionIds, ['r0', 'r1', 'r2', 'r3']);
+
+    final regions = artifact.regions.map((region) => ComicTextRegion(
+      value: region,
+      id: region.id,
+      text: region.text,
+      polygon: region.polygon,
+      sourceMaskPolygons: region.sourceMaskPolygons,
+      orientation: region.orientation,
+      backgroundArgb: region.backgroundArgb,
+      bubbleGroupId: region.bubbleGroupId,
+      bubblePolygon: region.bubblePolygon,
+    )).toList();
+    final unitIds = {for (final id in units.single.regionIds) id: units.single.id};
+    final grouping = ComicTextGrouping(
+      imageWidth: artifact.imageWidth,
+      imageHeight: artifact.imageHeight,
+      sourceLanguage: artifact.sourceLanguage,
+    );
+    expect(grouping.diagnoseRelations(
+      regions,
+      unitIds,
+      relatedFilter: true,
+      regionIndices: const {1, 2},
+    ).single, contains('related=true'));
+    expect(grouping.diagnoseRelations(
+      regions,
+      unitIds,
+      relatedFilter: false,
+      regionIndices: const {1, 2},
+    ), isEmpty);
+    expect(grouping.diagnoseRelations(
+      regions,
+      unitIds,
+      regionIndices: const {1},
+    ), hasLength(3));
+  });
+
+  test('distant single glyph does not join dialogue by endpoint contact', () {
+    const bubble = [
+      NormalizedPoint(.18, .70), NormalizedPoint(.32, .70),
+      NormalizedPoint(.32, .83), NormalizedPoint(.18, .83),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion('edge', 'は', .269, .733, .037, .059, 0,
+          bubbleGroupId: 6, bubblePolygon: bubble),
+      _positionedRegion('body', '明日', .230, .772, .030, .032, 1,
+          bubbleGroupId: 6, bubblePolygon: bubble),
+    ]);
+    expect(ComicTranslationUnit.fromOcr(artifact), hasLength(2));
+  });
+
+  test('oversized single OCR mark stays outside nearby body columns', () {
+    const bubble = [
+      NormalizedPoint(.18, .48), NormalizedPoint(.32, .48),
+      NormalizedPoint(.32, .62), NormalizedPoint(.18, .62),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion('body-1', 'あんたでしょ', .255, .502, .027, .087, 0,
+          bubbleGroupId: 4, bubblePolygon: bubble),
+      _positionedRegion('body-2', 'やめなかったの', .276, .502, .031, .098, 1,
+          bubbleGroupId: 4, bubblePolygon: bubble),
+      _positionedRegion('mark', '北', .209, .548, .041, .041, 2,
+          bubbleGroupId: 4, bubblePolygon: bubble),
+    ]);
+    final units = ComicTranslationUnit.fromOcr(artifact);
+    expect(units, hasLength(2));
+    expect(units.singleWhere((unit) => unit.regionIds.length == 2).regionIds,
+        ['body-2', 'body-1']);
+  });
+
   test('staggered columns without rectangular contact stay separate', () {
     final artifact = _ocrArtifact([
       _positionedRegion('right', '右列', 0.58, 0.08, 0.08, 0.22, 0,
@@ -793,6 +861,37 @@ void main() {
     expect(unit.orientation, ComicTextOrientation.vertical);
   });
 
+  test('unit orientation ignores whitespace in wide OCR body boxes', () {
+    const bubble = [
+      NormalizedPoint(0.34, 0.16), NormalizedPoint(0.68, 0.16),
+      NormalizedPoint(0.68, 0.82), NormalizedPoint(0.34, 0.82),
+    ];
+    final artifact = _ocrArtifact([
+      _positionedRegion(
+        'prefix', '前', .5, .28, .16, .07, 0,
+        bubbleGroupId: 7,
+        bubblePolygon: bubble,
+        orientation: ComicTextOrientation.horizontal,
+        sourceMaskPolygons: const [[
+          NormalizedPoint(.5, .28), NormalizedPoint(.57, .28),
+          NormalizedPoint(.57, .35), NormalizedPoint(.5, .35),
+        ]],
+      ),
+      _positionedRegion(
+        'body', '映画の広告', .4, .35, .2, .15, 1,
+        bubbleGroupId: 7,
+        bubblePolygon: bubble,
+        orientation: ComicTextOrientation.horizontal,
+        sourceMaskPolygons: const [[
+          NormalizedPoint(.43, .35), NormalizedPoint(.5, .35),
+          NormalizedPoint(.5, .7), NormalizedPoint(.43, .7),
+        ]],
+      ),
+    ]);
+    final unit = ComicTranslationUnit.fromOcr(artifact).single;
+    expect(unit.orientation, ComicTextOrientation.vertical);
+  });
+
   test('ambiguous single character follows neighboring vertical text', () {
     final artifact = _ocrArtifact([
       _positionedRegion(
@@ -1013,6 +1112,13 @@ void main() {
     ]);
     final units = ComicTranslationUnit.fromOcr(artifact);
     expect(units.expand((unit) => unit.regionIds), isNot(contains('sfx')));
+    expect(
+      ComicTranslationUnit.fromOcr(
+        artifact,
+        translateSoundEffects: true,
+      ).expand((unit) => unit.regionIds),
+      contains('sfx'),
+    );
   });
 
   test('sound effects are submitted only when explicitly enabled', () {
@@ -1277,6 +1383,32 @@ void main() {
     expect(result.samples.single.regionCount, 1);
     expect(ocr.loads, 1);
     expect(ocr.unloads, 1);
+  });
+
+  test('OCR benchmark can temporarily bypass configured translation', () async {
+    final image = File('${temp.path}/benchmark-ocr-only.bin');
+    await image.writeAsBytes(List<int>.generate(128, (i) => i));
+    final ocr = _OcrEngine();
+    final translator = _TranslationEngine();
+    final registry = ComicTranslationEngineRegistry()
+      ..ocrEngine = ocr
+      ..translationEngine = translator;
+    final result = await ComicTranslationBenchmark(engines: registry).run(
+      pages: [ComicTranslationPageIdentity(
+        imageKey: image.uri.toString(),
+        sourceKey: 'benchmark',
+        comicId: 'benchmark',
+        chapterId: '0',
+        pageIndex: 0,
+        mediaKind: ComicTranslationMediaKind.staticImage,
+      )],
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-CN',
+      runRemoteTranslation: false,
+    );
+    expect(result.translationMeasured, false);
+    expect(translator.calls, 0);
+    expect(translator.loads, 0);
   });
 
   test('animated page uses the reserved unsupported state', () async {
@@ -1562,11 +1694,14 @@ ComicOcrRegion _ocrRegion(
   bubbleGroupId: bubbleGroupId,
 );
 
-ComicOcrArtifact _ocrArtifact(List<ComicOcrRegion> regions) => ComicOcrArtifact(
+ComicOcrArtifact _ocrArtifact(
+  List<ComicOcrRegion> regions, {
+  String sourceLanguage = 'ja',
+}) => ComicOcrArtifact(
   contentDigest: 'content',
   engineId: 'test',
   modelVersion: '1',
-  sourceLanguage: 'ja',
+  sourceLanguage: sourceLanguage,
   imageWidth: 1000,
   imageHeight: 1000,
   mediaKind: ComicTranslationMediaKind.staticImage,
@@ -1586,6 +1721,7 @@ ComicOcrRegion _positionedRegion(
   List<NormalizedPoint>? bubblePolygon,
   ComicTextOrientation orientation = ComicTextOrientation.vertical,
   List<List<NormalizedPoint>> sourceMaskPolygons = const [],
+  int backgroundArgb = 0xffffffff,
 }) => ComicOcrRegion(
   id: id,
   polygon: [
@@ -1600,7 +1736,7 @@ ComicOcrRegion _positionedRegion(
   kind: ComicTextKind.dialogue,
   readingOrder: readingOrder,
   sourceMaskPolygons: sourceMaskPolygons,
-  backgroundArgb: 0xffffffff,
+  backgroundArgb: backgroundArgb,
   bubbleGroupId: bubbleGroupId,
   bubblePolygon: bubblePolygon,
 );

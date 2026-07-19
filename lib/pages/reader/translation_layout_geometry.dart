@@ -32,7 +32,9 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
     // inner rectangle although the OCR text geometry itself is valid. Such a
     // polygon is not a valid layout constraint; keep the source-anchored block
     // instead of silently dropping its translated text.
-    if (bubblePath != null && (bounds.width < 3 || bounds.height < 3)) {
+    if (bubblePath != null &&
+        (bounds.width < math.max(3, sourceBounds.width) ||
+            bounds.height < math.max(3, sourceBounds.height))) {
       bubblePath = null;
       bounds = _openBubbleBounds(sourceBounds, sourceFontSize, imageRect);
     }
@@ -105,11 +107,9 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
         bodyContext:
             region.bubbleGroupId != null || region.bubblePolygon != null,
       );
-      final visualMass = math.max(1.0, bounds.width * bounds.height) *
-          math.sqrt(characters);
       return (
         size: math.max(1.0, size).toDouble(),
-        weight: visualMass,
+        weight: characters.toDouble(),
       );
     });
     return _dominantFontSize(samples);
@@ -343,6 +343,28 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
         bestArea = area;
       }
     }
+    if (best == null) return null;
+    final path = Path()..addPolygon(
+      best.map((point) => Offset(point.x, point.y)).toList(),
+      true,
+    );
+    bool containsInk(Rect bounds) {
+      final core = Rect.fromCenter(
+        center: bounds.center,
+        width: bounds.width * .6,
+        height: bounds.height * .6,
+      );
+      return [
+        core.center,
+        core.topCenter,
+        core.centerRight,
+        core.bottomCenter,
+        core.centerLeft,
+      ].every(path.contains);
+    }
+    if (block.regions.any((region) => !containsInk(region.inkBounds))) {
+      return null;
+    }
     return best;
   }
 
@@ -360,59 +382,54 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
   List<_TranslationLayoutBlock> _layoutBlocks() {
     final cached = _blocks;
     if (cached != null) return cached;
-    final regions = artifact.regions
-        .where((region) =>
-            region.translatedText.trim().isNotEmpty &&
-            region.polygon.length >= 3 &&
-            region.polygon.every(
-              (point) => point.x.isFinite && point.y.isFinite,
-            ))
-        .map((region) => _TranslationLayoutRegion(
-              region,
-              _normalizedBounds(region),
-              _normalizedInkBounds(region),
-            ))
-        .toList();
-    if (regions.isEmpty) {
-      return _blocks = const [];
-    }
-    final incomplete = regions.where((region) {
-      final value = region.region;
-      return value.translationUnitId == null ||
-          value.translationUnitOrder == null ||
-          value.translationBandIndex == null ||
-          value.translationOrientation == null;
-    }).map((region) => region.region.ocrRegionId).toList();
-    if (incomplete.isNotEmpty) {
-      throw StateError('Translation artifact has incomplete layout metadata: '
-          '${incomplete.join(',')}');
-    }
-
-    final groups = <String, List<_TranslationLayoutRegion>>{};
-    for (final region in regions) {
-      groups.putIfAbsent(region.region.translationUnitId!, () => [])
-          .add(region);
-    }
-    final blocks = groups.entries.where((entry) => entry.value.any((region) =>
-        _visibleTranslation(region.region.translatedText).isNotEmpty))
-        .map((entry) {
-      final values = entry.value
-        ..sort((a, b) => a.region.translationUnitOrder!
-            .compareTo(b.region.translationUnitOrder!));
-      final bandMap = <int, List<_TranslationLayoutRegion>>{};
-      for (final region in values) {
-        bandMap.putIfAbsent(region.region.translationBandIndex!, () => [])
-            .add(region);
-      }
-      final bands = bandMap.entries.toList()
-        ..sort((a, b) => a.key.compareTo(b.key));
+    final valid = artifact.regions.where((region) =>
+        region.polygon.length >= 3 &&
+        region.polygon.every(
+          (point) => point.x.isFinite && point.y.isFinite,
+        )).toList();
+    final layouts = {
+      for (final region in valid)
+        region.ocrRegionId: _TranslationLayoutRegion(
+          region,
+          _normalizedBounds(region),
+          _normalizedInkBounds(region),
+        ),
+    };
+    final grouping = ComicTextGrouping(
+      imageWidth: artifact.imageWidth,
+      imageHeight: artifact.imageHeight,
+      sourceLanguage: artifact.sourceLanguage,
+    );
+    final groups = grouping.resolve(valid.map((region) => ComicTextRegion(
+      value: region,
+      id: region.ocrRegionId,
+      text: region.sourceText,
+      polygon: region.polygon,
+      sourceMaskPolygons: region.sourceMaskPolygons,
+      orientation: region.orientation,
+      backgroundArgb: region.backgroundArgb,
+      bubbleGroupId: region.bubbleGroupId,
+      bubblePolygon: region.bubblePolygon,
+    )).toList());
+    final blocks = groups.map((group) {
+      final values = group.regions
+          .where((region) =>
+              _visibleTranslation(region.value.translatedText).isNotEmpty)
+          .map((region) => layouts[region.id]!)
+          .toList();
+      final bands = group.bands.map((band) => band.regions
+          .where((region) =>
+              _visibleTranslation(region.value.translatedText).isNotEmpty)
+          .map((region) => layouts[region.id]!)
+          .toList()).where((band) => band.isNotEmpty).toList();
+      if (values.isEmpty) return null;
       return _TranslationLayoutBlock(
-        key: 'layout:${entry.key}',
+        key: 'layout:${group.key}',
         regions: values,
-        orientation: values.first.region.translationOrientation!,
-        bands: bands.map((entry) => entry.value).toList(),
+        orientation: _blockOrientation(values, group.orientation),
+        bands: bands,
       );
-    }).toList();
+    }).whereType<_TranslationLayoutBlock>().toList();
     blocks.sort((a, b) {
       double order(_TranslationLayoutBlock block) {
         final top = block.regions
@@ -426,6 +443,37 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
       return order(a).compareTo(order(b));
     });
     return _blocks = blocks;
+  }
+
+  ComicTextOrientation _blockOrientation(
+    List<_TranslationLayoutRegion> regions,
+    ComicTextOrientation fallback,
+  ) {
+    var vertical = 0;
+    var horizontal = 0;
+    final hasBody = regions.any((region) =>
+        _characters(region.region.sourceText) > 1);
+    for (final region in regions) {
+      final characters = _characters(region.region.sourceText);
+      if (hasBody && characters == 1) continue;
+      final bounds = region.inkBounds;
+      final width = bounds.width * artifact.imageWidth;
+      final height = bounds.height * artifact.imageHeight;
+      final orientation = height >= width * 1.15
+          ? ComicTextOrientation.vertical
+          : width >= height * 1.15
+              ? ComicTextOrientation.horizontal
+              : region.region.orientation;
+      if (orientation == ComicTextOrientation.vertical) {
+        vertical += characters;
+      } else {
+        horizontal += characters;
+      }
+    }
+    if (vertical == horizontal) return fallback;
+    return vertical > horizontal
+        ? ComicTextOrientation.vertical
+        : ComicTextOrientation.horizontal;
   }
 
 
