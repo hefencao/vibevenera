@@ -11,7 +11,6 @@ import 'package:venera/foundation/image_provider/renderer/webp_texture_channel.d
 import 'package:venera/foundation/image_provider/session/download_session.dart';
 import 'package:venera/foundation/image_provider/session/webp_decode_session.dart';
 import 'package:venera/foundation/image_provider/session/streaming_session_coordinator.dart';
-import 'package:venera/foundation/image_provider/streaming_source_registry.dart';
 import 'package:venera/network/streaming_image_transport.dart';
 
 import 'download_progress_publisher.dart';
@@ -65,6 +64,17 @@ final class ReaderPipelineSession {
     required this.targetHeight,
     required this.preloadCount,
   });
+
+  // Scheme-less keys are also used by remote sources; source ownership, not
+  // URL syntax, distinguishes local files from remote page identifiers.
+  bool get isLocalStatic =>
+      sourceKey == null &&
+      images.isNotEmpty &&
+      images.every((key) => key.startsWith('file://') || !key.contains('://')) &&
+      !images.any((key) {
+        final lower = key.toLowerCase();
+        return lower.contains('.webp') || lower.contains('.gif');
+      });
 }
 
 class PipelineController {
@@ -140,7 +150,7 @@ class PipelineController {
 
   void attachReaderSession(ReaderPipelineSession session) {
     _syncNetworkConcurrency();
-    if (_isLocalStaticSession(session)) {
+    if (session.isLocalStatic) {
       _readerOwner = session.owner;
       detachReaderSession(session.owner);
       return;
@@ -285,15 +295,6 @@ class PipelineController {
       _applyWindow(protectJump: _provisionalIdx != null);
     }
   }
-
-  bool _isLocalStaticSession(ReaderPipelineSession session) =>
-      session.images.isNotEmpty &&
-      session.images.every((key) => key.startsWith('file://') || !key.contains('://')) &&
-      !session.images.any((key) {
-        final lower = key.toLowerCase();
-        return lower.contains('.webp') || lower.contains('.gif');
-      }) &&
-      !StreamingSourceRegistry.isStreamingSource(session.sourceKey);
 
   void _syncNetworkConcurrency() {
     final value = appdata.settings['downloadThreads'];
