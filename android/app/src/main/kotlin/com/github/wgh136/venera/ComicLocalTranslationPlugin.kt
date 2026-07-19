@@ -24,6 +24,7 @@ private object LocalTranslationNative {
         modelPath: String,
         sourceSpm: String,
         targetSpm: String,
+        sourceEosToken: String,
         threads: Int,
     ): Long
     external fun translate(handle: Long, texts: Array<String>): Array<String>
@@ -40,7 +41,7 @@ class ComicLocalTranslationPlugin(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
-    private var handle = 0L
+    private val handles = LinkedHashMap<String, Long>()
 
     init {
         channel.setMethodCallHandler(this)
@@ -61,25 +62,27 @@ class ComicLocalTranslationPlugin(
         if (failure != null) {
             throw IllegalStateException("CTranslate2 native runtime is unavailable", failure)
         }
-        unload()
-        handle = LocalTranslationNative.create(
+        val modelKey = call.argument<String>("modelKey")!!
+        if (handles.containsKey(modelKey)) return
+        handles[modelKey] = LocalTranslationNative.create(
             call.argument<String>("modelPath")!!,
             call.argument<String>("sourceSpm")!!,
             call.argument<String>("targetSpm")!!,
+            call.argument<String>("sourceEosToken")!!,
             call.argument<Number>("threads")!!.toInt(),
         )
     }
 
     private fun translate(call: MethodCall): Array<String> {
-        if (handle == 0L) throw IllegalStateException("Local model is not loaded")
+        val handle = handles[call.argument<String>("modelKey")!!]
+            ?: throw IllegalStateException("Local model is not loaded")
         val texts = call.argument<List<String>>("texts")!!.toTypedArray()
         return LocalTranslationNative.translate(handle, texts)
     }
 
     private fun unload() {
-        if (handle == 0L) return
-        LocalTranslationNative.destroy(handle)
-        handle = 0L
+        handles.values.forEach(LocalTranslationNative::destroy)
+        handles.clear()
     }
 
     private fun execute(result: MethodChannel.Result, action: () -> Any?) {

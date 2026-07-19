@@ -227,7 +227,7 @@ class _ComicTranslationBackendPageState
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Text(
-                  'Import an INT8 CTranslate2 Marian directory with manifest.json, model.bin, vocabularies and SentencePiece models.'.tl,
+                  'Import a direct INT8 CTranslate2 Marian model or every model in a source-to-English-to-target pipeline.'.tl,
                   style: ts.s12,
                 ),
               ),
@@ -425,16 +425,6 @@ class _ComicTranslationBackendPageState
                     ),
                 ],
               ).paddingAll(16),
-              const Divider(),
-              ListTile(
-                leading: const Icon(Icons.speed),
-                title: Text('Translation benchmark'.tl),
-                subtitle: Text('Select a local comic page and measure model load, OCR, translation and RSS.'.tl),
-                trailing: const Icon(Icons.arrow_right),
-                onTap: () => context.to(
-                  () => const _ComicTranslationBenchmarkPage(),
-                ),
-              ),
             ],
           ),
         ),
@@ -799,7 +789,12 @@ class _ComicTranslationBenchmarkPageState
   String targetLanguage = 'zh-CN';
   bool relatedFilter = false;
   bool runTranslation = false;
+  bool diagnoseGrouping = true;
   final relationEntries = TextEditingController();
+  final manualSource = TextEditingController();
+  String? manualResult;
+  List<String> manualRawResponses = const [];
+  bool manualTranslating = false;
 
   @override
   void initState() {
@@ -807,11 +802,14 @@ class _ComicTranslationBenchmarkPageState
     final saved =
         appdata.implicitData['comicTranslationBenchmarkImage'] as String?;
     imagePath = saved != null && File(saved).existsSync() ? saved : null;
+    runTranslation = appdata.settings['comicTranslationBackend'] == 'local' &&
+        ComicTranslationEngineRegistry.instance.translationEngine != null;
   }
 
   @override
   void dispose() {
     relationEntries.dispose();
+    manualSource.dispose();
     super.dispose();
   }
 
@@ -941,14 +939,29 @@ class _ComicTranslationBenchmarkPageState
           ),
           Row(
             children: [
-              Text('related=$relatedFilter'),
-              Switch(
-                value: relatedFilter,
-                onChanged: (value) => setState(() => relatedFilter = value),
+              _binaryButton(
+                selected: diagnoseGrouping,
+                onPressed: running
+                    ? null
+                    : () => setState(() {
+                        diagnoseGrouping = !diagnoseGrouping;
+                      }),
+                label: diagnoseGrouping ? '分组诊断' : '不输出分组诊断',
+              ),
+              const SizedBox(width: 8),
+              _binaryButton(
+                selected: relatedFilter,
+                onPressed: running || !diagnoseGrouping
+                    ? null
+                    : () => setState(() {
+                        relatedFilter = !relatedFilter;
+                      }),
+                label: 'related=$relatedFilter',
               ),
               const SizedBox(width: 8),
               Expanded(child: TextField(
                 controller: relationEntries,
+                enabled: diagnoseGrouping && !running,
                 keyboardType: TextInputType.text,
                 inputFormatters: [
                   FilteringTextInputFormatter.allow(RegExp(r'[0-9,，\s]')),
@@ -961,6 +974,37 @@ class _ComicTranslationBenchmarkPageState
               )),
             ],
           ),
+          const Divider(),
+          TextField(
+            controller: manualSource,
+            minLines: 2,
+            maxLines: 6,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: '手动输入整组原文',
+              hintText: '每个 OCR 行/列输入一行；整组只提交一次翻译',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              onPressed: running || manualTranslating ||
+                      translator == null || manualSource.text.trim().isEmpty
+                  ? null
+                  : _translateManual,
+              icon: const Icon(Icons.translate),
+              label: Text(manualTranslating ? 'Running'.tl : '翻译整组原文'),
+            ),
+          ).paddingVertical(8),
+          if (manualResult != null)
+            SelectableText('手动翻译结果：\n$manualResult'),
+          if (manualRawResponses.isNotEmpty)
+            SelectableText(
+              '模型阶段输出：\n${manualRawResponses.join('\n\n')}',
+              style: ts.s12,
+            ).paddingVertical(8),
+          const Divider(),
           Text(
             'Model load time is a warm-load value when another Reader session already owns the model.'.tl,
             style: ts.s12,
@@ -1085,6 +1129,7 @@ class _ComicTranslationBenchmarkPageState
         targetLanguage: targetLanguage,
         maxAnalysisSide: analysisSide,
         runTranslation: runTranslation,
+        diagnoseGrouping: diagnoseGrouping,
       );
       final responses = _lastRawResponses();
       if (mounted) {
@@ -1103,6 +1148,65 @@ class _ComicTranslationBenchmarkPageState
       }
     } finally {
       if (mounted) setState(() => running = false);
+    }
+  }
+
+  Future<void> _translateManual() async {
+    final lines = manualSource.text.split(RegExp(r'\r?\n'))
+        .map((line) => line.trim()).where((line) => line.isNotEmpty).toList();
+    final ids = List.generate(lines.length, (index) => 'manual:$index');
+    setState(() {
+      manualTranslating = true;
+      manualResult = null;
+      manualRawResponses = const [];
+    });
+    try {
+      final request = ComicTranslationRequest(
+        ocr: ComicOcrArtifact(
+          contentDigest: 'manual-benchmark',
+          engineId: 'manual-benchmark',
+          modelVersion: '1',
+          sourceLanguage: sourceLanguage,
+          imageWidth: 1,
+          imageHeight: 1,
+          mediaKind: ComicTranslationMediaKind.staticImage,
+          animatedMode: AnimatedTranslationMode.posterFrame,
+          regions: List.generate(lines.length, (index) => ComicOcrRegion(
+            id: ids[index],
+            polygon: const [],
+            text: lines[index],
+            confidence: 1,
+            orientation: ComicTextOrientation.horizontal,
+            kind: ComicTextKind.dialogue,
+            readingOrder: index,
+            sourceMaskPolygons: const [],
+          )),
+        ),
+        targetLanguage: targetLanguage,
+        previousPages: const [],
+        units: [ComicTranslationUnit(
+          id: 'manual',
+          regionIds: ids,
+          sourceLines: lines,
+          orientation: ComicTextOrientation.horizontal,
+          bandRegionIds: [ids],
+        )],
+      );
+      final engines = ComicTranslationEngineRegistry.instance;
+      final value = await engines.translateConfigured(request);
+      final translator = engines.translationEngine;
+      final responses = translator is ComicTextTranslationEngineDiagnostics
+          ? (translator as ComicTextTranslationEngineDiagnostics).lastRawResponses
+          : const <String>[];
+      if (!mounted) return;
+      setState(() {
+        manualResult = value.translations['manual']!.join();
+        manualRawResponses = responses;
+      });
+    } catch (value) {
+      if (mounted) setState(() => manualResult = value.toString());
+    } finally {
+      if (mounted) setState(() => manualTranslating = false);
     }
   }
 

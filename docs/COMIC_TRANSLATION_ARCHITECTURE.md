@@ -50,10 +50,13 @@ PaddleOCR。MethodChannel 不传原图字节，也不在 Android platform 主线
 
 OCR 与本地文本翻译的模型生命周期已拆开：`ComicOcrModelManager` 只管理 PaddleOCR，
 `ComicLocalTranslationModelManager` 管理按源/目标语言对安装的 Marian INT8 包。本地文本引擎通过
-独立单线程 MethodChannel 调用 CTranslate2 + SentencePiece；一个 unit 作为一个 batch item，返回值
-按请求顺序映射，不向模型发送 region/unit ID，也不经过 JSON 协议。日/韩→简中使用独立 pair；繁中
-目标在简中推理完成后走现有 OpenCC 字符转换。本地模型不使用跨页 prompt，因此不会因前页上下文改变
-重复生成缓存；远程 OpenAI-compatible/DeepL 继续声明 `previousPages` 能力并保留原有上下文语义。
+独立单线程 MethodChannel 调用 CTranslate2 + SentencePiece；同组 OCR 行/列先按阅读顺序组成一个 unit，
+以换行保留原分段并作为一个 batch item，绝不逐 region 调用模型。返回值
+按请求顺序映射，不向模型发送 region/unit ID，也不经过 JSON 协议。选择策略优先直连 pair，否则使用
+已验证的 `ja/ko→en→zh-CN` 完整枢轴链路；插件在同一个 worker 内按 model key 保持两个 native handle，
+不会在枢轴两段或切页时反复卸载。繁中目标在简中推理完成后走现有 OpenCC 字符转换。本地模型不使用
+跨页 prompt，因此不会因前页上下文改变重复生成缓存；远程 OpenAI-compatible/DeepL 继续声明
+`previousPages` 能力并保留原有上下文语义。
 
 强制规则：
 
@@ -75,7 +78,8 @@ Translation key = OCR digest + translation engine/model + target language
 ```
 
 翻译 engine 不再暴露一个与请求无关的固定 model version，而是通过 `identityFor(request)` 返回
-实际语言对的模型身份。`contextMode=none` 的本地 engine 使用空上下文及稳定摘要；声明
+实际直连/枢轴链路中全部模型的身份、权重摘要、源前缀和 EOS。`contextMode=none` 的本地 engine 使用
+空上下文及稳定摘要；声明
 `previousPages` 的远程 engine 才读取、散列和发送前页内容。这样同一个动态本地 backend 切换
 `ja→zh-CN` / `ko→zh-CN` 时不会串用 artifact，也不会把无效上下文变体写入数据库。
 
@@ -262,14 +266,16 @@ WebP 在完整 artifact 上按 RIFF chunk 检查 `ANIM/ANMF`，不因扩展名�
 - OCR/翻译模型加载耗时；
 - 输入解析、检测预处理/推理/后处理、识别预处理/推理/后处理和翻译耗时；
 - 实际 recognizer，检测框/非空原始解码/阈值接受数量，区域数量、唯一气泡数、源文字 mask 数、
-  逐区 group id/OCR 置信度、OCR 原文和翻译结果、气泡补检候选/补回数量及 clean patch 大小；
+逐区 group id/OCR 置信度、OCR 原文和翻译结果、气泡补检候选/补回数量及 clean patch 大小；
 - 模型加载、检测总输入像素及每个 tile 的 tensor shape、释放后 RSS，以及每页任务前后 RSS。
   RSS 均为整个进程的边界采样，不代表 OCR 推理瞬时峰值。
 - 每个 region 的 unit/order/band/orientation，以及统一的 `Relation diagnostics`。性能测试可只显示
   `related=true` 或 `related=false`，也可用一个条目编号查看它与全部条目的关系，或用多个编号限制待检查的条目对。
   输出包含逻辑矩形、字号、副轴距离/重叠、主轴接触、边界可靠性、native group 权重和方向冲突，
-  用于在调参前确定真正生效的分支。诊断关系一次性生成，结果过滤和条目筛选不重跑 OCR；可临时关闭远程翻译，
-  默认测试轮数为 1，避免关系排查重复执行昂贵 OCR/翻译。
+用于在调参前确定真正生效的分支。诊断关系一次性生成，也可完全关闭关系/边界诊断输出；结果过滤和条目筛选不重跑 OCR；可临时关闭翻译，
+默认测试轮数为 1，避免关系排查重复执行昂贵 OCR/翻译。
+性能测试还可绕过 OCR/分组，手动输入一个完整 unit，并显示枢轴每阶段的真实输入和输出，用于区分 OCR 输入、
+分组、模型解码和译文回填问题。本地后端启用时默认运行翻译，其他后端默认仅 OCR。
 
 真机结果显示高性能设备的 OCR P50 约 0.5 秒，旧设备约 2.4 秒。任务仍保持单路后台
 执行，不为追求吞吐增加并发。普通页默认以 1600 长边为准确率基线，但实际值来自每次
@@ -287,7 +293,7 @@ float Mat、通道 Mat 和逐通道数组的重复副本；Bitmap 已是 ARGB888
 2. PP-OCRv5 mobile det/rec：兼容性和日文准确率基线；
 3. 手动指定韩文时切换到 `korean_PP-OCRv5_mobile_rec`；切换时释放前一个 recognition session，
    不让两套 ONNX recognition 权重同时常驻；
-4. 本地 Marian INT8/CTranslate2 与显式远程翻译后端。
+4. 本地 Marian INT8/CTranslate2（直连优先，已验证日/韩→英→中枢轴）与显式远程翻译后端。
 
 PP-OCRv6 tiny 先只作为体积/速度基线；其日文覆盖和漫画竖排准确率必须以实际模型包验证，
 不能仅凭通用 OCR 指标作为默认模型。
@@ -301,7 +307,7 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
 已提供 OpenAI-compatible、DeepL 和 Android CTranslate2/Marian adapter。本地模型采用带 SHA-256
-manifest 的目录导入，构建端必须随 APK 提供 CTranslate2/SentencePiece ARM64 runtime；当前仓库不
-捆绑第三方权重，也尚未发布应用内可直接下载的已验证日/韩→中模型包。未完成：iOS/桌面 OCR 与本地
-翻译 runtime、learned balloon detector、用户校正、拟声词和动图实际分析。OCR/本地翻译 runtime
+manifest 的目录导入，构建端必须随 APK 提供 CTranslate2/SentencePiece ARM64 runtime；仓库提供固定
+revision 的 runtime/精选枢轴模型构建与冒烟测试脚本，但不捆绑第三方权重。未完成：应用内直接下载、
+iOS/桌面 OCR 与本地翻译 runtime、learned balloon detector、用户校正、拟声词和动图实际分析。OCR/本地翻译 runtime
 或对应语言对模型缺失时 UI/任务明确报错，不进行网络回退。

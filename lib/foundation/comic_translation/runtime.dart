@@ -218,7 +218,7 @@ final class ComicTranslationRuntime {
         ? jsonEncode([
             backend,
             for (final model in ComicLocalTranslationModelManager.instance.models)
-              [model.id, model.version],
+              model.runtimeKey,
           ])
         : jsonEncode([
             backend,

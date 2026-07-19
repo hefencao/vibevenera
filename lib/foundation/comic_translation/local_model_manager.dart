@@ -6,7 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 final class ComicLocalTranslationModel {
-  static const schemaVersion = 1;
+  static const schemaVersion = 2;
   static const engine = 'ctranslate2-marian';
 
   final String id;
@@ -15,6 +15,9 @@ final class ComicLocalTranslationModel {
   final String sourceLanguage;
   final String targetLanguage;
   final String license;
+  final String sourcePrefix;
+  final String sourceEosToken;
+  final String sourceUrl;
   final Map<String, String> files;
   final String path;
 
@@ -25,6 +28,9 @@ final class ComicLocalTranslationModel {
     required this.sourceLanguage,
     required this.targetLanguage,
     required this.license,
+    required this.sourcePrefix,
+    required this.sourceEosToken,
+    required this.sourceUrl,
     required this.files,
     required this.path,
   });
@@ -33,7 +39,9 @@ final class ComicLocalTranslationModel {
     Map<String, dynamic> json,
     String path,
   ) {
-    if (json['schemaVersion'] != schemaVersion || json['engine'] != engine) {
+    final manifestVersion = json['schemaVersion'] as int;
+    if (manifestVersion != 1 && manifestVersion != schemaVersion ||
+        json['engine'] != engine) {
       throw const FormatException('Unsupported local translation model format');
     }
     final files = Map<String, dynamic>.from(json['files'] as Map).map(
@@ -46,6 +54,11 @@ final class ComicLocalTranslationModel {
       sourceLanguage: _language(json['sourceLanguage'] as String),
       targetLanguage: _language(json['targetLanguage'] as String),
       license: json['license'] as String,
+      sourcePrefix: json['sourcePrefix'] as String? ?? '',
+      sourceEosToken: manifestVersion == 1
+          ? '</s>'
+          : json['sourceEosToken'] as String,
+      sourceUrl: json['sourceUrl'] as String? ?? '',
       files: files,
       path: path,
     );
@@ -54,6 +67,18 @@ final class ComicLocalTranslationModel {
   }
 
   String filePath(String name) => '$path${Platform.pathSeparator}$name';
+
+  String get runtimeKey {
+    final entries = files.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final fingerprint = sha256.convert(utf8.encode(jsonEncode({
+      'schema': schemaVersion,
+      'prefix': sourcePrefix,
+      'eos': sourceEosToken,
+      'files': {for (final entry in entries) entry.key: entry.value},
+    })));
+    return '$id:$version:$fingerprint';
+  }
 
   Map<String, dynamic> toManifest() => {
     'schemaVersion': schemaVersion,
@@ -64,12 +89,16 @@ final class ComicLocalTranslationModel {
     'sourceLanguage': sourceLanguage,
     'targetLanguage': targetLanguage,
     'license': license,
+    'sourcePrefix': sourcePrefix,
+    'sourceEosToken': sourceEosToken,
+    'sourceUrl': sourceUrl,
     'files': files,
   };
 
   void _validateManifest() {
     if (!RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$').hasMatch(id) ||
-        id.isEmpty || version.isEmpty || displayName.isEmpty || license.isEmpty) {
+        id.isEmpty || version.isEmpty || displayName.isEmpty || license.isEmpty ||
+        sourceEosToken.isEmpty) {
       throw const FormatException('Invalid local translation model metadata');
     }
     const required = {'model.bin', 'config.json', 'source.spm', 'target.spm'};
@@ -164,6 +193,14 @@ final class ComicLocalTranslationModelManager {
     return _models.where((model) =>
         model.sourceLanguage == normalizedSource &&
         model.targetLanguage == normalizedTarget).firstOrNull;
+  }
+
+  List<ComicLocalTranslationModel>? pipelineFor(String source, String target) {
+    final direct = modelFor(source, target);
+    if (direct != null) return [direct];
+    final first = modelFor(source, 'en');
+    final second = modelFor('en', target);
+    return first == null || second == null ? null : [first, second];
   }
 
   Future<ComicLocalTranslationModel> installFromDirectory(String sourcePath) {
@@ -275,6 +312,9 @@ final class ComicLocalTranslationModelManager {
         jsonDecode(await manifest.readAsString()) as Map,
       );
       final model = ComicLocalTranslationModel.fromManifest(json, entry.path);
+      if (json['schemaVersion'] != ComicLocalTranslationModel.schemaVersion) {
+        await manifest.writeAsString(jsonEncode(model.toManifest()), flush: true);
+      }
       for (final name in model.files.keys) {
         if (!await File(model.filePath(name)).exists()) {
           throw StateError('Installed local model is incomplete: ${model.id}');

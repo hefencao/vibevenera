@@ -160,6 +160,14 @@ set_target_properties(venera_webp PROPERTIES
 # user-installed data rather than APK assets.
 set(CTRANSLATE2_ROOT "$ENV{CTRANSLATE2_ROOT}" CACHE PATH "CTranslate2 Android package")
 set(SENTENCEPIECE_ROOT "$ENV{SENTENCEPIECE_ROOT}" CACHE PATH "SentencePiece Android package")
+if(NOT CTRANSLATE2_ROOT)
+    set(CTRANSLATE2_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.local/comic_translation_native/runtime/ctranslate2")
+endif()
+if(NOT SENTENCEPIECE_ROOT)
+    set(SENTENCEPIECE_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.local/comic_translation_native/runtime/sentencepiece")
+endif()
 set(_ctranslate2_lib "${CTRANSLATE2_ROOT}/lib/${ANDROID_ABI}/libctranslate2.so")
 set(_sentencepiece_lib "${SENTENCEPIECE_ROOT}/lib/${ANDROID_ABI}/libsentencepiece.so")
 if(EXISTS "${CTRANSLATE2_ROOT}/include/ctranslate2/translator.h" AND

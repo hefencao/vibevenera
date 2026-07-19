@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <ctranslate2/translator.h>
@@ -10,21 +11,30 @@
 
 namespace {
 
+ctranslate2::ReplicaPoolConfig pool_config(int threads) {
+  ctranslate2::ReplicaPoolConfig config;
+  config.num_threads_per_replica = threads;
+  return config;
+}
+
 struct TranslationRuntime {
   ctranslate2::Translator translator;
   sentencepiece::SentencePieceProcessor source;
   sentencepiece::SentencePieceProcessor target;
+  std::string source_eos_token;
 
   TranslationRuntime(const std::string& model_path,
                      const std::string& source_spm,
                      const std::string& target_spm,
+                     std::string source_eos_token,
                      int threads)
       : translator(model_path,
                    ctranslate2::Device::CPU,
-                   0,
                    ctranslate2::ComputeType::INT8,
-                   1,
-                   threads) {
+                   {0},
+                   false,
+                   pool_config(threads)),
+        source_eos_token(std::move(source_eos_token)) {
     const auto source_status = source.Load(source_spm);
     if (!source_status.ok())
       throw std::runtime_error(source_status.ToString());
@@ -56,12 +66,14 @@ Java_com_github_wgh136_venera_LocalTranslationNative_create(
     jstring model_path,
     jstring source_spm,
     jstring target_spm,
+    jstring source_eos_token,
     jint threads) {
   try {
     return reinterpret_cast<jlong>(new TranslationRuntime(
         string_from_java(env, model_path),
         string_from_java(env, source_spm),
         string_from_java(env, target_spm),
+        string_from_java(env, source_eos_token),
         threads));
   } catch (const std::exception& error) {
     throw_java(env, error);
@@ -87,10 +99,12 @@ Java_com_github_wgh136_venera_LocalTranslationNative_translate(
       const auto status = runtime->source.Encode(string_from_java(env, text), &pieces);
       env->DeleteLocalRef(text);
       if (!status.ok()) throw std::runtime_error(status.ToString());
+      if (!runtime->source_eos_token.empty())
+        pieces.emplace_back(runtime->source_eos_token);
       batch.emplace_back(std::move(pieces));
     }
     ctranslate2::TranslationOptions options;
-    options.beam_size = 1;
+    options.beam_size = 2;
     options.max_decoding_length = 256;
     const auto translated = runtime->translator.translate_batch(batch, options);
     const auto string_class = env->FindClass("java/lang/String");

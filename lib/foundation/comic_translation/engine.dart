@@ -263,8 +263,9 @@ final class ComicTranslationRequest {
     required this.targetLanguage,
     required this.previousPages,
     bool translateSoundEffects = false,
+    List<ComicTranslationUnit>? units,
     this.glossary = const {},
-  }) : units = ComicTranslationUnit.fromOcr(
+  }) : units = units ?? ComicTranslationUnit.fromOcr(
           ocr,
           translateSoundEffects: translateSoundEffects,
         );

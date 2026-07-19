@@ -304,12 +304,20 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           ListTile(
             leading: const Icon(Icons.translate),
             title: Text('Translation models and API'.tl),
-                  subtitle: Text(
-                    'Configure OCR, local/remote translation and benchmark'.tl,
-                  ),
+            subtitle: Text('Configure OCR and local/remote translation'.tl),
             trailing: const Icon(Icons.arrow_right),
             onTap: () => context.to(
               () => const ComicTranslationBackendPage(),
+            ),
+          ).toSliver(),
+        if (widget.comicId == null)
+          ListTile(
+            leading: const Icon(Icons.speed),
+            title: Text('Translation benchmark'.tl),
+            subtitle: Text('Select a local comic page and measure model load, OCR, translation and RSS.'.tl),
+            trailing: const Icon(Icons.arrow_right),
+            onTap: () => context.to(
+              () => const _ComicTranslationBenchmarkPage(),
             ),
           ).toSliver(),
         _SwitchSetting(

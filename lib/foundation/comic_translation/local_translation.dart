@@ -12,8 +12,9 @@ final class LocalMarianComicTranslationEngine
   static const _channel = MethodChannel('venera/comic_translation_local');
 
   final ComicLocalTranslationModelManager models;
-  String? _loadedModel;
+  final _loadedModels = <String>{};
   ComicTextTranslationRunMetrics? _lastRunMetrics;
+  List<String> _lastRawResponses = const [];
 
   LocalMarianComicTranslationEngine(this.models);
 
@@ -28,11 +29,12 @@ final class LocalMarianComicTranslationEngine
   ComicTranslationEngineIdentity identityFor(
     ComicTranslationRequest request,
   ) {
-    final model = _modelFor(request);
+    final pipeline = _pipelineFor(request);
     return ComicTranslationEngineIdentity(
-      id: 'local-ctranslate2:${model.id}',
-      modelVersion: '${model.version}:pair=${model.sourceLanguage}'
-          '-${model.targetLanguage}:package-v1',
+      id: 'local-ctranslate2:${pipeline.map((model) => model.id).join('+')}',
+      modelVersion: '${pipeline.map((model) => model.runtimeKey).join('>')}:'
+          'package-v${ComicLocalTranslationModel.schemaVersion}:'
+          'group-beam2-v1',
     );
   }
 
@@ -40,7 +42,7 @@ final class LocalMarianComicTranslationEngine
   ComicTextTranslationRunMetrics? get lastRunMetrics => _lastRunMetrics;
 
   @override
-  List<String> get lastRawResponses => const [];
+  List<String> get lastRawResponses => _lastRawResponses;
 
   @override
   Future<void> load() async {
@@ -57,64 +59,88 @@ final class LocalMarianComicTranslationEngine
     ComicTranslationRequest request,
   ) async {
     _lastRunMetrics = null;
+    _lastRawResponses = const [];
     if (request.units.isEmpty) return const ComicTranslationResult({});
-    final model = _modelFor(request);
+    final pipeline = _pipelineFor(request);
     final timer = Stopwatch()..start();
-    await _loadModel(model);
-    final texts = request.units
+    var texts = request.units
         .map((unit) => unit.sourceLines.join('\n'))
         .toList(growable: false);
-    final raw = await _channel.invokeListMethod<String>('translate', {
-      'texts': texts,
-    });
-    timer.stop();
-    if (raw == null || raw.length != request.units.length) {
-      throw StateError(
-        'Local translator returned ${raw?.length} results for '
-        '${request.units.length} units',
-      );
+    final sourceCharacters = texts.fold(
+      0,
+      (sum, text) => sum + text.runes.length,
+    );
+    final batchDurations = <Duration>[];
+    for (final model in pipeline) {
+      await _loadModel(model);
+      final input = model.sourcePrefix.isEmpty
+          ? texts
+          : texts.map((text) => '${model.sourcePrefix}$text').toList();
+      final stageTimer = Stopwatch()..start();
+      final raw = await _channel.invokeListMethod<String>('translate', {
+        'modelKey': model.runtimeKey,
+        'texts': input,
+      });
+      stageTimer.stop();
+      batchDurations.add(stageTimer.elapsed);
+      if (raw == null || raw.length != request.units.length) {
+        throw StateError(
+          'Local translator returned ${raw?.length} results for '
+          '${request.units.length} units',
+        );
+      }
+      _lastRawResponses = [
+        ..._lastRawResponses,
+        '${model.displayName} (${model.sourceLanguage} → ${model.targetLanguage})\n'
+            '${List.generate(request.units.length, (i) => '${request.units[i].id}: ${texts[i].replaceAll('\n', ' | ')} → ${raw[i]}').join('\n')}',
+      ];
+      texts = raw.map((text) => text.trim()).toList(growable: false);
+      final empty = texts.indexWhere((text) => text.isEmpty);
+      if (empty >= 0) {
+        throw StateError('Local translation unit ${request.units[empty].id} is empty');
+      }
     }
+    timer.stop();
     final traditional = _isTraditionalTarget(request.targetLanguage);
     final translations = <String, List<String>>{};
     for (var i = 0; i < request.units.length; i++) {
-      final text = raw[i].trim();
-      if (text.isEmpty) {
-        throw StateError('Local translation unit ${request.units[i].id} is empty');
-      }
       translations[request.units[i].id] = [
-        traditional ? OpenCC.simplifiedToTraditional(text) : text,
+        traditional ? OpenCC.simplifiedToTraditional(texts[i]) : texts[i],
       ];
     }
     _lastRunMetrics = ComicTextTranslationRunMetrics(
       elapsed: timer.elapsed,
-      batchDurations: [timer.elapsed],
+      batchDurations: batchDurations,
       unitCount: request.units.length,
-      sourceCharacters: texts.fold(0, (sum, text) => sum + text.runes.length),
+      sourceCharacters: sourceCharacters,
     );
     return ComicTranslationResult(translations);
   }
 
   Future<void> _loadModel(ComicLocalTranslationModel model) async {
-    final identity = '${model.id}:${model.version}';
-    if (_loadedModel == identity) return;
+    if (_loadedModels.contains(model.runtimeKey)) return;
     await _channel.invokeMethod<void>('load', {
+      'modelKey': model.runtimeKey,
       'modelPath': model.path,
       'sourceSpm': model.filePath('source.spm'),
       'targetSpm': model.filePath('target.spm'),
+      'sourceEosToken': model.sourceEosToken,
       'threads': math.min(4, math.max(1, Platform.numberOfProcessors ~/ 2)),
     });
-    _loadedModel = identity;
+    _loadedModels.add(model.runtimeKey);
   }
 
-  ComicLocalTranslationModel _modelFor(ComicTranslationRequest request) {
+  List<ComicLocalTranslationModel> _pipelineFor(
+    ComicTranslationRequest request,
+  ) {
     final source = _sourceLanguage(request);
-    final model = models.modelFor(source, request.targetLanguage);
-    if (model == null) {
+    final pipeline = models.pipelineFor(source, request.targetLanguage);
+    if (pipeline == null) {
       throw StateError(
-        'No local translation model for $source → ${request.targetLanguage}',
+        'No local translation pipeline for $source → ${request.targetLanguage}',
       );
     }
-    return model;
+    return pipeline;
   }
 
   String _sourceLanguage(ComicTranslationRequest request) {
@@ -131,7 +157,7 @@ final class LocalMarianComicTranslationEngine
     }
     if (hangul > japanese) return 'ko';
     if (japanese > 0) return 'ja';
-    if (han > 0 && models.modelFor('ja', request.targetLanguage) != null) {
+    if (han > 0 && models.pipelineFor('ja', request.targetLanguage) != null) {
       return 'ja';
     }
     throw StateError('Local translation cannot infer the source language');
@@ -144,8 +170,8 @@ final class LocalMarianComicTranslationEngine
 
   @override
   Future<void> unload() async {
-    if (_loadedModel == null) return;
+    if (_loadedModels.isEmpty) return;
     await _channel.invokeMethod<void>('unload');
-    _loadedModel = null;
+    _loadedModels.clear();
   }
 }

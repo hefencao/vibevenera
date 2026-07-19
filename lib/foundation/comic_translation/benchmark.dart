@@ -97,6 +97,7 @@ final class ComicTranslationBenchmark {
     required String targetLanguage,
     int maxAnalysisSide = 1600,
     bool runTranslation = true,
+    bool diagnoseGrouping = true,
   }) async {
     final translationMeasured =
         runTranslation && engines.translationEngine != null;
@@ -188,17 +189,18 @@ final class ComicTranslationBenchmark {
             bubbleGroupId: region.bubbleGroupId,
             bubblePolygon: region.bubblePolygon,
           )).toList();
-        final relationDiagnostics = grouping.diagnoseRelations(
-          textRegions,
-          unitIds,
-        );
+        final relationDiagnostics = diagnoseGrouping
+            ? grouping.diagnoseRelations(textRegions, unitIds)
+            : const <String>[];
         final candidates = artifact.regions
             .map((region) => region.bubbleCandidatePolygon)
             .whereType<List<NormalizedPoint>>()
             .map((polygon) => _benchmarkPolygon(
               polygon, artifact.imageWidth, artifact.imageHeight,
             )).toList();
-        final bubbleBoundaryDiagnostics = grouping.resolve(textRegions)
+        final bubbleBoundaryDiagnostics = !diagnoseGrouping
+            ? const <String>[]
+            : grouping.resolve(textRegions)
             .map((group) {
           final regions = group.regions.map((region) => region.value).toList();
           final inkBounds = regions.map((region) => _benchmarkInkBounds(

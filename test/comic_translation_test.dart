@@ -1482,9 +1482,12 @@ void main() {
       ],
       sourceLanguage: 'ja',
       targetLanguage: 'zh-CN',
+      diagnoseGrouping: false,
     );
     expect(result.translationMeasured, false);
     expect(result.samples.single.regionCount, 1);
+    expect(result.samples.single.relationDiagnostics, isEmpty);
+    expect(result.samples.single.bubbleBoundaryDiagnostics, isEmpty);
     expect(ocr.loads, 1);
     expect(ocr.unloads, 1);
   });

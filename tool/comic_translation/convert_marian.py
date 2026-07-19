@@ -2,8 +2,6 @@
 import argparse
 import hashlib
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
 
@@ -13,6 +11,61 @@ def digest(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             value.update(chunk)
     return value.hexdigest()
+
+
+def convert_model(
+    model: str,
+    output: Path,
+    model_id: str,
+    version: str,
+    name: str,
+    source_language: str,
+    target_language: str,
+    license_name: str,
+    revision: str | None = None,
+    source_prefix: str = "",
+    source_eos_token: str = "</s>",
+    source_url: str = "",
+) -> None:
+    try:
+        from ctranslate2.converters import TransformersConverter
+    except ImportError as error:
+        raise RuntimeError(
+            "Install ctranslate2, transformers, torch and sentencepiece",
+        ) from error
+    TransformersConverter(
+        model,
+        copy_files=["source.spm", "target.spm"],
+        revision=revision,
+    ).convert(str(output), quantization="int8", force=True)
+    required = {"model.bin", "config.json", "source.spm", "target.spm"}
+    names = {path.name for path in output.iterdir() if path.is_file()}
+    if not required.issubset(names):
+        raise RuntimeError(f"Converted model is incomplete: {sorted(required - names)}")
+    vocabulary = {"shared_vocabulary.json"}
+    if not vocabulary.issubset(names):
+        vocabulary = {"source_vocabulary.json", "target_vocabulary.json"}
+    if not vocabulary.issubset(names):
+        raise RuntimeError("Converted model has no CTranslate2 vocabulary")
+    package_files = sorted(required | vocabulary)
+    manifest = {
+        "schemaVersion": 2,
+        "engine": "ctranslate2-marian",
+        "id": model_id,
+        "version": version,
+        "displayName": name,
+        "sourceLanguage": source_language,
+        "targetLanguage": target_language,
+        "license": license_name,
+        "sourcePrefix": source_prefix,
+        "sourceEosToken": source_eos_token,
+        "sourceUrl": source_url,
+        "files": {name: digest(output / name) for name in package_files},
+    }
+    (output / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
@@ -27,58 +80,24 @@ def main() -> None:
     parser.add_argument("--source-language", required=True)
     parser.add_argument("--target-language", required=True)
     parser.add_argument("--license", required=True)
+    parser.add_argument("--revision")
+    parser.add_argument("--source-prefix", default="")
+    parser.add_argument("--source-eos-token", default="</s>")
+    parser.add_argument("--source-url", default="")
     args = parser.parse_args()
-
-    converter = shutil.which("ct2-transformers-converter")
-    if converter is None:
-        raise RuntimeError(
-            "ct2-transformers-converter is missing; install ctranslate2, "
-            "transformers and sentencepiece",
-        )
-    args.output.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            converter,
-            "--model",
-            args.model,
-            "--output_dir",
-            str(args.output),
-            "--quantization",
-            "int8",
-            "--copy_files",
-            "source.spm",
-            "target.spm",
-            "--force",
-        ],
-        check=True,
-    )
-    required = {"model.bin", "config.json", "source.spm", "target.spm"}
-    names = {path.name for path in args.output.iterdir() if path.is_file()}
-    if not required.issubset(names):
-        raise RuntimeError(f"Converted model is incomplete: {sorted(required - names)}")
-    vocabulary = {"shared_vocabulary.json"}
-    if not vocabulary.issubset(names):
-        vocabulary = {"source_vocabulary.json", "target_vocabulary.json"}
-    if not vocabulary.issubset(names):
-        raise RuntimeError("Converted model has no CTranslate2 vocabulary")
-    package_files = sorted(required | vocabulary)
-    manifest = {
-        "schemaVersion": 1,
-        "engine": "ctranslate2-marian",
-        "id": args.id,
-        "version": args.version,
-        "displayName": args.name,
-        "sourceLanguage": args.source_language,
-        "targetLanguage": args.target_language,
-        "license": args.license,
-        "files": {
-            name: digest(args.output / name)
-            for name in package_files
-        },
-    }
-    (args.output / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    convert_model(
+        args.model,
+        args.output,
+        args.id,
+        args.version,
+        args.name,
+        args.source_language,
+        args.target_language,
+        args.license,
+        args.revision,
+        args.source_prefix,
+        args.source_eos_token,
+        args.source_url,
     )
 
 
