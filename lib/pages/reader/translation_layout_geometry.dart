@@ -11,19 +11,13 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
     final sourceBounds = regionBounds
         .reduce((value, next) => value.expandToInclude(next));
     final sourceCenter = _sourceCenter(block, imageRect, sourceBounds);
-    final bubble = _blockBubble(block);
-    final bubblePoints = bubble == null
-        ? null
-        : _displayPolygon(bubble, imageRect);
-    var bubblePath = bubblePoints == null
-        ? null
-        : (Path()..addPolygon(bubblePoints, true));
+    final bubble = _blockBubble(block, imageRect);
+    var bubblePath = bubble?.path;
     final sourceFontSize = _sourceFontSize(block, regionBounds);
     var bounds = bubblePath == null
         ? _openBubbleBounds(sourceBounds, sourceFontSize, imageRect)
         : _safeBubbleBounds(
-            bubblePath,
-            bubblePoints!,
+            bubble!.polygons,
             sourceBounds,
             sourceCenter,
             sourceFontSize,
@@ -35,6 +29,19 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
     if (bubblePath != null &&
         (bounds.width < math.max(3, sourceBounds.width) ||
             bounds.height < math.max(3, sourceBounds.height))) {
+      final outer = _bounds(bubble!.polygons.expand((polygon) => polygon));
+      Log.warning(
+        'Translation.Layout',
+        'bubble inner rejected block=${block.key} '
+            'outer/source='
+            '${(outer.width / sourceBounds.width).toStringAsFixed(2)}x'
+            '${(outer.height / sourceBounds.height).toStringAsFixed(2)} '
+            'inner/source='
+            '${(bounds.width / sourceBounds.width).toStringAsFixed(2)}x'
+            '${(bounds.height / sourceBounds.height).toStringAsFixed(2)} '
+            'source=${block.regions.map((region) =>
+                region.region.sourceText).join('|')}',
+      );
       bubblePath = null;
       bounds = _openBubbleBounds(sourceBounds, sourceFontSize, imageRect);
     }
@@ -48,6 +55,7 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
 
   double _dominantFontSize(
     List<({double size, double weight})> samples,
+    {double clusterRatio = 1.32,}
   ) {
     samples.sort((a, b) => a.size.compareTo(b.size));
     if (samples.length == 1) return samples.single.size;
@@ -57,7 +65,7 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
     for (var start = 0; start < samples.length; start++) {
       var end = start + 1;
       while (end < samples.length &&
-          samples[end].size <= samples[start].size * 1.32) {
+          samples[end].size <= samples[start].size * clusterRatio) {
         end++;
       }
       final clusterWeight = samples
@@ -87,8 +95,12 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
     _TranslationLayoutBlock block,
     List<Rect> regionBounds,
   ) {
+    final bodyBlock = _isBodyBlock(block);
+    final sourceLanguage = artifact.sourceLanguage
+        .split(RegExp('[-_]')).first.toLowerCase();
+    final squareGlyphs = {'ja', 'ko', 'zh'}.contains(sourceLanguage);
     final samples = List.generate(block.regions.length, (index) {
-      final characters = math.max(
+      final decodedCharacters = math.max(
         1,
         _characters(block.regions[index].region.sourceText),
       );
@@ -100,19 +112,44 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
           ? bounds.height
           : bounds.width;
       final region = block.regions[index].region;
-      final size = comicTextFontSize(
+      final bodyContext =
+          region.bubbleGroupId != null ||
+          region.bubblePolygon != null ||
+          region.bubbleCandidatePolygon != null ||
+          bodyBlock;
+      // A small recognizer may decode only one glyph from a multi-glyph OCR
+      // line. Ink aspect still preserves its approximate character count and
+      // prevents mainExtent / 1 from inflating the source font estimate.
+      final size = comicTextSourceFontSize(
         crossExtent: crossExtent,
         mainExtent: mainExtent,
-        characters: characters,
-        bodyContext:
-            region.bubbleGroupId != null || region.bubblePolygon != null,
+        decodedCharacters: decodedCharacters,
+        bodyContext: bodyContext,
+        squareGlyphs: squareGlyphs,
       );
       return (
         size: math.max(1.0, size).toDouble(),
-        weight: characters.toDouble(),
+        weight: decodedCharacters.toDouble(),
       );
     });
-    return _dominantFontSize(samples);
+    final local = _dominantFontSize(samples);
+    final reference = bodyBlock ? bodyFontRatio : null;
+    return reference == null
+        ? local
+        : math.max(local, reference * _layoutImageRect!.width);
+  }
+
+  bool _isBodyBlock(_TranslationLayoutBlock block) {
+    if (block.regions.any((region) =>
+        region.region.kind == ComicTextKind.soundEffect)) {
+      return false;
+    }
+    final characters = block.regions.fold(0, (count, region) =>
+        count + _characters(region.region.sourceText));
+    return characters >= 4 || block.regions.any((region) =>
+        region.region.bubbleGroupId != null ||
+        region.region.bubblePolygon != null ||
+        region.region.bubbleCandidatePolygon != null);
   }
 
 
@@ -237,83 +274,16 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
       .intersect(imageRect);
 
   Rect _safeBubbleBounds(
-    Path bubble,
-    List<Offset> bubblePoints,
+    List<List<Offset>> bubblePolygons,
     Rect sourceBounds,
     Offset sourceCenter,
     double sourceFontSize,
-  ) {
-    final bubbleBounds = _bounds(bubblePoints);
-    Rect candidateAt(Offset center) {
-      final width = 2.0 * math.min(
-        center.dx - bubbleBounds.left,
-        bubbleBounds.right - center.dx,
-      );
-      final height = 2.0 * math.min(
-        center.dy - bubbleBounds.top,
-        bubbleBounds.bottom - center.dy,
-      );
-      var candidate = Rect.fromCenter(
-        center: center,
-        width: math.max(0, width),
-        height: math.max(0, height),
-      );
-      while (candidate.width >= 12 &&
-          candidate.height >= 12 &&
-          !_rectFitsBubble(bubble, candidate)) {
-        candidate = Rect.fromCenter(
-          center: center,
-          width: candidate.width * 0.94,
-          height: candidate.height * 0.94,
-        );
-      }
-      return candidate;
-    }
-
-    // Preserve the OCR text centre. Bubble bounding-box and polygon
-    // centroids are often pulled toward a speech tail, so using them to gain a
-    // larger rectangle causes the visible translation to drift. Only fall back
-    // when the source centre itself is outside a malformed bubble polygon.
-    final center = bubble.contains(sourceCenter)
-        ? sourceCenter
-        : bubble.contains(sourceBounds.center)
-            ? sourceBounds.center
-            : bubble.contains(_polygonCentroid(bubblePoints))
-                ? _polygonCentroid(bubblePoints)
-                : bubbleBounds.center;
-    return candidateAt(center).deflate(math.max(2, sourceFontSize * 0.12));
-  }
-
-  Offset _polygonCentroid(List<Offset> polygon) {
-    if (polygon.length < 3) return _bounds(polygon).center;
-    var crossSum = 0.0;
-    var x = 0.0;
-    var y = 0.0;
-    for (var index = 0; index < polygon.length; index++) {
-      final a = polygon[index];
-      final b = polygon[(index + 1) % polygon.length];
-      final cross = a.dx * b.dy - b.dx * a.dy;
-      crossSum += cross;
-      x += (a.dx + b.dx) * cross;
-      y += (a.dy + b.dy) * cross;
-    }
-    if (crossSum.abs() < 1e-6) return _bounds(polygon).center;
-    final factor = 1 / (3 * crossSum);
-    return Offset(x * factor, y * factor);
-  }
-
-
-  bool _rectFitsBubble(Path path, Rect rect) => [
-    rect.topCenter,
-    rect.centerLeft,
-    rect.center,
-    rect.centerRight,
-    rect.bottomCenter,
-    Offset(rect.left + rect.width * 0.16, rect.top + rect.height * 0.16),
-    Offset(rect.right - rect.width * 0.16, rect.top + rect.height * 0.16),
-    Offset(rect.left + rect.width * 0.16, rect.bottom - rect.height * 0.16),
-    Offset(rect.right - rect.width * 0.16, rect.bottom - rect.height * 0.16),
-  ].every(path.contains);
+  ) => comicBubbleInnerBounds(
+    polygons: bubblePolygons,
+    sourceBounds: sourceBounds,
+    sourceCenter: sourceCenter,
+    sourceFontSize: sourceFontSize,
+  );
   Color _regionBackground(ComicTranslatedRegion region) =>
       region.backgroundArgb == null
           ? background.withValues(alpha: 1)
@@ -324,48 +294,38 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
           ? foreground
           : Color(region.foregroundArgb!);
 
-  List<NormalizedPoint>? _blockBubble(_TranslationLayoutBlock block) {
-    List<NormalizedPoint>? best;
-    var bestArea = 0.0;
-    for (final region in block.regions) {
-      final polygon = region.region.bubblePolygon;
-      if (polygon == null ||
-          polygon.length < 3 ||
-          polygon.any((point) => !point.x.isFinite || !point.y.isFinite)) {
-        continue;
-      }
-      final bounds = _bounds(
-        polygon.map((point) => Offset(point.x, point.y)),
-      );
-      final area = bounds.width * bounds.height;
-      if (area > bestArea) {
-        best = polygon;
-        bestArea = area;
-      }
-    }
-    if (best == null) return null;
-    final path = Path()..addPolygon(
-      best.map((point) => Offset(point.x, point.y)).toList(),
-      true,
+  ({Path path, List<List<Offset>> polygons})? _blockBubble(
+    _TranslationLayoutBlock block,
+    Rect imageRect,
+  ) {
+    final confirmed = block.bubblePolygons
+        .map((polygon) => _displayPolygon(polygon, imageRect))
+        .toList();
+    final inkBounds = block.regions
+        .map((region) => _displayBounds(region.inkBounds, imageRect))
+        .toList();
+    final candidates = block.bubbleCandidatePolygons
+        .map((polygon) => _displayPolygon(polygon, imageRect))
+        .toList();
+    final decision = exploreComicBubbleBoundary(
+      inkBounds: inkBounds,
+      confirmedPolygons: confirmed,
+      candidatePolygons: candidates,
     );
-    bool containsInk(Rect bounds) {
-      final core = Rect.fromCenter(
-        center: bounds.center,
-        width: bounds.width * .6,
-        height: bounds.height * .6,
-      );
-      return [
-        core.center,
-        core.topCenter,
-        core.centerRight,
-        core.bottomCenter,
-        core.centerLeft,
-      ].every(path.contains);
+    final polygons = decision.polygons;
+    if (polygons == null) return null;
+    Path union(List<List<Offset>> polygons) {
+      var path = Path()..addPolygon(polygons.first, true);
+      for (final polygon in polygons.skip(1)) {
+        path = Path.combine(
+          PathOperation.union,
+          path,
+          Path()..addPolygon(polygon, true),
+        );
+      }
+      return path;
     }
-    if (block.regions.any((region) => !containsInk(region.inkBounds))) {
-      return null;
-    }
-    return best;
+    return (path: union(polygons), polygons: polygons);
   }
 
   Locale? get _targetLocale => _languageLocale(artifact.targetLanguage);
@@ -428,6 +388,21 @@ extension _ComicTranslationGeometry on _ComicTranslationPainter {
         regions: values,
         orientation: _blockOrientation(values, group.orientation),
         bands: bands,
+        bubblePolygons: group.regions
+            .map((region) => region.value.bubblePolygon)
+            .whereType<List<NormalizedPoint>>()
+            .where((polygon) => polygon.length >= 3 && polygon.every(
+                (point) => point.x.isFinite && point.y.isFinite))
+            .toList(),
+        // Candidate contours are page-level evidence. Grouping is already
+        // complete here, so an open block may inspect a candidate recovered
+        // beside another member instead of being limited by native g-/group.
+        bubbleCandidatePolygons: artifact.regions
+            .map((region) => region.bubbleCandidatePolygon)
+            .whereType<List<NormalizedPoint>>()
+            .where((polygon) => polygon.length >= 3 && polygon.every(
+                (point) => point.x.isFinite && point.y.isFinite))
+            .toList(),
       );
     }).whereType<_TranslationLayoutBlock>().toList();
     blocks.sort((a, b) {

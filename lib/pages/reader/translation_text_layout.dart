@@ -664,5 +664,6 @@ class _TranslationRenderPreparation {
     geometry,
     List.unmodifiable(_backgrounds),
     List.unmodifiable(_text),
+    plan.fontSize,
   );
 }

@@ -5,6 +5,7 @@ class _TranslationLayoutCache {
   final Map<String, _TranslationBlockGeometry> geometries = {};
   final Map<String, _TranslationPreparedBlock> prepared = {};
   final Set<String> preparedRegionIds = {};
+  final Set<String> painted = {};
   final ValueNotifier<int> repaint = ValueNotifier(0);
   final Set<String> skipped = {};
   final Map<String, _VerticalGlyphMetrics> verticalMetrics = {};
@@ -18,12 +19,14 @@ class _TranslationLayoutCache {
 }
 
 class _ComicTranslationPainter extends CustomPainter {
+  final int pageIndex;
   final ComicTranslationArtifact artifact;
   final BoxFit fit;
   final Alignment alignment;
   final Color background;
   final Color foreground;
   final double fontScale;
+  final double? bodyFontRatio;
   final bool hasCleanOverlay;
   final String? hiddenBlockKey;
   final _TranslationLayoutCache layoutCache;
@@ -37,12 +40,14 @@ class _ComicTranslationPainter extends CustomPainter {
   set _layoutImageRect(Rect? value) => layoutCache.imageRect = value;
 
   _ComicTranslationPainter({
+    required this.pageIndex,
     required this.artifact,
     required this.fit,
     required this.alignment,
     required this.background,
     required this.foreground,
     required this.fontScale,
+    required this.bodyFontRatio,
     required this.hasCleanOverlay,
     required this.hiddenBlockKey,
     required this.layoutCache,
@@ -65,6 +70,7 @@ class _ComicTranslationPainter extends CustomPainter {
     layoutCache.geometries.clear();
     layoutCache.prepared.clear();
     layoutCache.preparedRegionIds.clear();
+    layoutCache.painted.clear();
     layoutCache.skipped.clear();
     layoutCache.search = null;
     layoutCache.render = null;
@@ -79,6 +85,7 @@ class _ComicTranslationPainter extends CustomPainter {
     layoutCache.renderForeground = foreground;
     layoutCache.prepared.clear();
     layoutCache.preparedRegionIds.clear();
+    layoutCache.painted.clear();
     layoutCache.render = null;
   }
 
@@ -171,6 +178,19 @@ class _ComicTranslationPainter extends CustomPainter {
       final geometry = prepared.geometry;
       final bounds = geometry.bounds;
       final bubblePath = geometry.bubblePath;
+      if (layoutCache.painted.add(block.key)) {
+        final imageRect = _layoutImageRect!;
+        Log.warning(
+          'Translation.Paint',
+          'paint page=$pageIndex '
+              'digest=${artifact.contentDigest.substring(0, 10)} '
+              'block=${block.key} font=${prepared.fontSize.toStringAsFixed(2)} '
+              'layer=${size.width.toStringAsFixed(1)}x'
+              '${size.height.toStringAsFixed(1)} '
+              'image=${imageRect.width.toStringAsFixed(1)}x'
+              '${imageRect.height.toStringAsFixed(1)}',
+        );
+      }
       _hitRegions.add(_TranslationHitRegion(
         block.key,
         bubblePath ?? (Path()..addRect(bounds)),
@@ -200,11 +220,13 @@ class _ComicTranslationPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ComicTranslationPainter oldDelegate) =>
       oldDelegate.artifact != artifact ||
+      oldDelegate.pageIndex != pageIndex ||
       oldDelegate.fit != fit ||
       oldDelegate.alignment != alignment ||
       oldDelegate.background != background ||
       oldDelegate.foreground != foreground ||
       oldDelegate.fontScale != fontScale ||
+      oldDelegate.bodyFontRatio != bodyFontRatio ||
       oldDelegate.hasCleanOverlay != hasCleanOverlay ||
       oldDelegate.hiddenBlockKey != hiddenBlockKey;
 }
@@ -238,12 +260,16 @@ class _TranslationLayoutBlock {
   final List<_TranslationLayoutRegion> regions;
   final ComicTextOrientation orientation;
   final List<List<_TranslationLayoutRegion>> bands;
+  final List<List<NormalizedPoint>> bubblePolygons;
+  final List<List<NormalizedPoint>> bubbleCandidatePolygons;
 
   const _TranslationLayoutBlock({
     required this.key,
     required this.regions,
     required this.orientation,
     required this.bands,
+    required this.bubblePolygons,
+    required this.bubbleCandidatePolygons,
   });
 }
 
@@ -298,8 +324,14 @@ class _TranslationPreparedBlock {
   final _TranslationBlockGeometry geometry;
   final List<_TranslationBackgroundShape> backgrounds;
   final List<_TranslationTextCommand> text;
+  final double fontSize;
 
-  const _TranslationPreparedBlock(this.geometry, this.backgrounds, this.text);
+  const _TranslationPreparedBlock(
+    this.geometry,
+    this.backgrounds,
+    this.text,
+    this.fontSize,
+  );
 }
 
 class _TranslationBackgroundShape {

@@ -658,14 +658,15 @@ class _ComicTranslationBenchmarkPageState
   String sourceLanguage = 'ja';
   String targetLanguage = 'zh-CN';
   bool relatedFilter = false;
-  bool runRemoteTranslation =
-      ComicTranslationEngineRegistry.instance.translationEngine != null;
+  bool runRemoteTranslation = false;
   final relationEntries = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    imagePath = appdata.implicitData['comicTranslationBenchmarkImage'] as String?;
+    final saved =
+        appdata.implicitData['comicTranslationBenchmarkImage'] as String?;
+    imagePath = saved != null && File(saved).existsSync() ? saved : null;
   }
 
   @override
@@ -882,15 +883,38 @@ class _ComicTranslationBenchmarkPageState
       ext: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
     );
     if (selected != null && mounted) {
-      appdata.implicitData['comicTranslationBenchmarkImage'] = selected.path;
+      final previous = imagePath;
+      final retained = await _retainBenchmarkImage(selected);
+      if (!mounted) return;
+      appdata.implicitData['comicTranslationBenchmarkImage'] = retained;
       appdata.writeImplicitData();
       setState(() {
-        if (imagePath != selected.path) relationEntries.clear();
-        imagePath = selected.path;
+        if (imagePath != retained) relationEntries.clear();
+        imagePath = retained;
         result = null;
         error = null;
       });
+      if (previous != null && previous != retained &&
+          previous.startsWith(_benchmarkImageDirectory)) {
+        await File(previous).deleteIgnoreError();
+      }
     }
+  }
+
+  String get _benchmarkImageDirectory =>
+      FilePath.join(App.cachePath, 'comic_translation_benchmark');
+
+  Future<String> _retainBenchmarkImage(FileSelectResult selected) async {
+    if (!selected.path.startsWith(App.cachePath)) return selected.path;
+    final directory = Directory(_benchmarkImageDirectory);
+    await directory.create(recursive: true);
+    final extension = selected.name.split('.').last.toLowerCase();
+    final target = FilePath.join(
+      directory.path,
+      'selected_${DateTime.now().microsecondsSinceEpoch}.$extension',
+    );
+    await selected.saveTo(target);
+    return target;
   }
 
   Future<void> _run() async {
@@ -1053,14 +1077,20 @@ class _ComicTranslationBenchmarkPageState
             style: ts.s12,
           ),
         SelectableText(
-          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} b${sample.translationBandIndices[i] ?? '-'} ${sample.translationUnitOrientations[i]?.name ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
+          'OCR ($sourceLanguage):\n${sample.sourceTexts.isEmpty ? '—' : List.generate(sample.sourceTexts.length, (i) => '#${i + 1} g${sample.bubbleGroupIds[i] ?? '-'} c${sample.bubbleCandidateAvailable[i] ? '+' : '-'} u${sample.translationUnitIds[i] ?? '-'}:${sample.translationUnitOrders[i] ?? '-'} b${sample.translationBandIndices[i] ?? '-'} ${sample.translationUnitOrientations[i]?.name ?? '-'} [${sample.sourceConfidences[i].toStringAsFixed(2)}] ${sample.sourceTexts[i]}').join('\n')}',
           style: ts.s12,
         ),
         if (relations.isNotEmpty)
           SelectableText(
             'Relation diagnostics:\n${relations.join('\n')}',
             style: ts.s12,
-        ),
+          ),
+        if (sample.bubbleBoundaryDiagnostics.isNotEmpty)
+          SelectableText(
+            'Open boundary exploration:\n'
+            '${sample.bubbleBoundaryDiagnostics.join('\n')}',
+            style: ts.s12,
+          ),
         SelectableText(
           '${'Translation'.tl} ($targetLanguage):\n${!result!.translationMeasured ? ComicTranslationEngineRegistry.instance.translationEngine == null ? 'Translation backend is not configured'.tl : 'Remote translation disabled'.tl : sample.translatedTexts.isEmpty ? '—' : List.generate(sample.translatedTexts.length, (i) => '#${i + 1} ${sample.translatedTexts[i].replaceAll(comicTranslationBreakMarker, '')}').join('\n')}',
           style: ts.s12,

@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera/foundation/comic_translation/benchmark.dart';
+import 'package:venera/foundation/comic_translation/bubble_boundary.dart';
 import 'package:venera/foundation/comic_translation/deepl_translation.dart';
 import 'package:venera/foundation/comic_translation/engine.dart';
 import 'package:venera/foundation/comic_translation/grouping.dart';
@@ -62,6 +64,7 @@ void main() {
     expect(firstState.artifact!.regions.single.bubbleGroupId, 3);
     expect(firstState.cleanOverlayPng, [1, 2, 3]);
     expect(firstState.artifact!.regions.single.bubblePolygon, isNotEmpty);
+    expect(firstState.artifact!.regions.single.bubbleCandidatePolygon, isNotEmpty);
     expect(firstState.artifact!.regions.single.sourceMaskPolygons.single, hasLength(4));
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
@@ -93,6 +96,7 @@ void main() {
     );
     expect(secondState.artifact!.regions.single.foregroundArgb, 0xFF202020);
     expect(secondState.artifact!.regions.single.bubbleGroupId, 3);
+    expect(secondState.artifact!.regions.single.bubbleCandidatePolygon, isNotEmpty);
     expect(secondState.cleanOverlayPng, [1, 2, 3]);
     expect(ocr.calls, 1);
     expect(translator.calls, 1);
@@ -113,6 +117,38 @@ void main() {
     expect(fallbackState.cleanOverlayPng, isNull);
     expect(fallbackState.artifact, isNotNull);
     fallback.dispose();
+  });
+
+  test('open bubble explores nearby candidate after text grouping', () {
+    final decision = exploreComicBubbleBoundary(
+      inkBounds: const [Rect.fromLTWH(40, 40, 20, 40)],
+      confirmedPolygons: const [],
+      candidatePolygons: const [[
+        Offset(20, 20), Offset(80, 20),
+        Offset(80, 100), Offset(20, 100),
+      ]],
+    );
+    expect(decision.initialOpen, isTrue);
+    expect(decision.nearbyCandidates, 1);
+    expect(decision.formedBoundary, isTrue);
+    expect(decision.source, ComicBubbleBoundarySource.candidate);
+    expect(decision.boundaryBounds!.width / decision.sourceBounds.width, 3);
+  });
+
+  test('connected bubble resolves a usable inner layout independently by axis',
+      () {
+    final bounds = comicBubbleInnerBounds(
+      polygons: const [[
+        Offset(20, 10), Offset(80, 10), Offset(80, 45), Offset(55, 45),
+        Offset(55, 60), Offset(90, 60), Offset(90, 120), Offset(10, 120),
+        Offset(10, 60), Offset(45, 60), Offset(45, 45), Offset(20, 45),
+      ]],
+      sourceBounds: const Rect.fromLTWH(40, 20, 20, 15),
+      sourceCenter: const Offset(50, 27.5),
+      sourceFontSize: 10,
+    );
+    expect(bounds.width, greaterThanOrEqualTo(20));
+    expect(bounds.height, greaterThanOrEqualTo(15));
   });
 
   test('translation cache does not persist image-lifetime layout metadata',
@@ -1619,6 +1655,12 @@ final class _OcrEngine implements ComicOcrEngine {
             NormalizedPoint(0.95, 0.05),
             NormalizedPoint(0.95, 0.55),
             NormalizedPoint(0.05, 0.55),
+          ],
+          bubbleCandidatePolygon: [
+            NormalizedPoint(0.04, 0.04),
+            NormalizedPoint(0.96, 0.04),
+            NormalizedPoint(0.96, 0.56),
+            NormalizedPoint(0.04, 0.56),
           ],
         ),
       ],

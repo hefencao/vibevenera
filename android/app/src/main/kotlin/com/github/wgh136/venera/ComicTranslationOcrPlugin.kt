@@ -403,6 +403,13 @@ class ComicTranslationOcrPlugin(
                 bubblePoints = segmented.bubblePolygon?.map { point ->
                     PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
                 },
+                bubbleCandidatePoints = segmentation.bubbleCandidatePolygons[index]
+                    ?.map { point ->
+                        PointF(
+                            source.left + point.x * scaleX,
+                            source.top + point.y * scaleY,
+                        )
+                    },
                 sourceMaskPolygons = segmented.sourceMaskPolygons.map { polygon ->
                     polygon.map { point ->
                         PointF(source.left + point.x * scaleX, source.top + point.y * scaleY)
@@ -563,6 +570,7 @@ class ComicTranslationOcrPlugin(
         val bubbleGroupId: Int?,
         val points: List<PointF>,
         val bubblePoints: List<PointF>?,
+        val bubbleCandidatePoints: List<PointF>?,
         val sourceMaskPolygons: List<List<PointF>>,
     )
 
@@ -639,6 +647,9 @@ class ComicTranslationOcrPlugin(
                     "bubbleGroupId" to region.bubbleGroupId,
                     "points" to region.points.map { listOf(it.x.toDouble(), it.y.toDouble()) },
                     "bubblePoints" to region.bubblePoints?.map {
+                        listOf(it.x.toDouble(), it.y.toDouble())
+                    },
+                    "bubbleCandidatePoints" to region.bubbleCandidatePoints?.map {
                         listOf(it.x.toDouble(), it.y.toDouble())
                     },
                     "sourceMaskPolygons" to region.sourceMaskPolygons.map { polygon ->

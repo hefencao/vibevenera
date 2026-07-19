@@ -155,6 +155,7 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
     final identity = reader.translationIdentity(widget.pageIndex);
     final pageState = reader.translationSession.listenable(identity);
     final fontScaleState = reader.translationSession.fontScaleListenable;
+    final bodyFontState = reader.translationSession.bodyFontRatioListenable;
     return Stack(
       fit: StackFit.passthrough,
       children: [
@@ -163,10 +164,15 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
           child: IgnorePointer(
             child: RepaintBoundary(
               child: AnimatedBuilder(
-                animation: Listenable.merge([pageState, fontScaleState]),
+                animation: Listenable.merge([
+                  pageState,
+                  fontScaleState,
+                  bodyFontState,
+                ]),
                 builder: (context, _) {
                   final state = pageState.value;
                   final fontScale = fontScaleState.value;
+                  final bodyFontRatio = bodyFontState.value;
                   final artifact = state.artifact;
                   if (state.phase != ComicTranslationPhase.ready ||
                       artifact == null) {
@@ -189,9 +195,11 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
                       _hiddenBlockKey == null;
                    final current = _painter;
                    final layoutCompatible = current != null &&
+                       current.pageIndex == widget.pageIndex &&
                        current.artifact == artifact &&
                        current.alignment == widget.alignment &&
-                       current.fontScale == fontScale;
+                       current.fontScale == fontScale &&
+                       current.bodyFontRatio == bodyFontRatio;
                   final painter = layoutCompatible &&
                           current.background == background &&
                           current.foreground == foreground &&
@@ -199,12 +207,14 @@ class _ReaderTranslationLayerState extends State<_ReaderTranslationLayer> {
                           current.hiddenBlockKey == _hiddenBlockKey
                       ? current
                       : _ComicTranslationPainter(
+                          pageIndex: widget.pageIndex,
                           artifact: artifact,
                           fit: BoxFit.contain,
                           alignment: widget.alignment,
                           background: background,
                           foreground: foreground,
                           fontScale: fontScale,
+                          bodyFontRatio: bodyFontRatio,
                           hasCleanOverlay: showCleanOverlay,
                           hiddenBlockKey: _hiddenBlockKey,
                           layoutCache: layoutCompatible

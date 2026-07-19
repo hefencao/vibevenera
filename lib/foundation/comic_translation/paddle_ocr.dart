@@ -24,7 +24,7 @@ final class AndroidPaddleComicOcrEngine
 
   @override
   String get modelVersion =>
-      '${ComicTranslationModelManager.bundle.version}:bubble-v13:pixel-mask-v4';
+      '${ComicTranslationModelManager.bundle.version}:bubble-v20:pixel-mask-v5';
 
   @override
   bool get supportsAnimatedPosterFrame => false;
@@ -99,6 +99,14 @@ final class AndroidPaddleComicOcrEngine
             );
           })
           .toList();
+      final bubbleCandidatePolygon =
+          (region['bubbleCandidatePoints'] as List?)?.map((rawPoint) {
+        final point = rawPoint as List;
+        return NormalizedPoint(
+          (point[0] as num).toDouble() / width,
+          (point[1] as num).toDouble() / height,
+        );
+      }).toList();
       final sourceMaskPolygons = (region['sourceMaskPolygons'] as List)
           .map((rawPolygon) => (rawPolygon as List)
               .map((rawPoint) {
@@ -138,6 +146,7 @@ final class AndroidPaddleComicOcrEngine
         foregroundArgb: region['foregroundArgb'] as int?,
         bubbleGroupId: region['bubbleGroupId'] as int?,
         bubblePolygon: bubblePolygon,
+        bubbleCandidatePolygon: bubbleCandidatePolygon,
       );
     }).toList();
     return ComicOcrArtifact(

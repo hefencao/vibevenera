@@ -14,6 +14,31 @@ double comicTextFontSize({
   return stableExtent * .72 + areaSize * .28;
 }
 
+double comicTextSourceFontSize({
+  required double crossExtent,
+  required double mainExtent,
+  required int decodedCharacters,
+  required bool bodyContext,
+  required bool squareGlyphs,
+}) {
+  final geometricCharacters = bodyContext
+      ? math.max(1, (mainExtent / math.max(1, crossExtent)).round())
+      : decodedCharacters;
+  final characters = math.max(decodedCharacters, geometricCharacters);
+  final correctedMainExtent = squareGlyphs && characters > 1
+      ? math.max(
+          mainExtent,
+          (mainExtent - crossExtent) / (characters - 1) * characters,
+        )
+      : mainExtent;
+  return comicTextFontSize(
+    crossExtent: crossExtent,
+    mainExtent: correctedMainExtent,
+    characters: characters,
+    bodyContext: bodyContext,
+  );
+}
+
 final class ComicTextRegion<T> {
   final T value;
   final String id;

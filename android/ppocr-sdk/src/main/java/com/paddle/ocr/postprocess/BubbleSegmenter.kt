@@ -42,6 +42,7 @@ object BubbleSegmenter {
     data class SegmentationResult(
         val regions: List<RegionSegmentation>,
         val sourceIndices: List<Int>,
+        val bubbleCandidatePolygons: List<List<PointF>?>,
         val cleanOverlay: Bitmap?,
     )
 
@@ -58,7 +59,9 @@ object BubbleSegmenter {
         boxes: List<OCRBox>,
         retainedIndices: ((List<RegionSegmentation>) -> List<Int>)? = null,
     ): SegmentationResult {
-        if (boxes.isEmpty()) return SegmentationResult(emptyList(), emptyList(), null)
+        if (boxes.isEmpty()) return SegmentationResult(
+            emptyList(), emptyList(), emptyList(), null,
+        )
         val image = BitmapUtils.bitmapToBGRMat(bitmap)
         val known = mutableListOf<BubbleCandidate>()
         return try {
@@ -86,11 +89,26 @@ object BubbleSegmenter {
                     sourceMaskPolygons = masks.polygons,
                 )
             }
+            val unassigned = regions.indices.filter {
+                regions[it].bubbleGroupId == null
+            }
+            val recovered = if (unassigned.isEmpty()) emptyList() else {
+                recoverLightBubbles(image, boxes, unassigned)
+            }
+            val candidatePolygons = boxes.mapIndexed { index, box ->
+                if (regions[index].bubbleGroupId != null) null else {
+                    val point = center(box)
+                    recovered.asSequence().filter { candidate ->
+                        contains(candidate.polygon, point)
+                    }.minByOrNull { it.area }?.polygon
+                }
+            }
             val selected = retainedIndices?.invoke(regions) ?: regions.indices.toList()
             val selectedRegions = selected.map { regions[it] }
             SegmentationResult(
                 selectedRegions,
                 selected,
+                selected.map { candidatePolygons[it] },
                 if (selected.isEmpty()) null else {
                     cleanOverlay(image, selected.map { boxes[it] }, selectedRegions)
                 },
@@ -228,6 +246,107 @@ object BubbleSegmenter {
         if (width <= 0 || height <= 0) return 0.0
         return width.toDouble() * height /
             min(a.width().toDouble() * a.height(), b.width().toDouble() * b.height())
+    }
+
+    /** A short/incomplete OCR box can make the normal seed component look
+     * oversized, especially when two balloons share one white component.
+     * Recover a layout-only contour for still-unassigned text; this must not
+     * alter native bubble assignment before Dart text grouping has finished. */
+    private fun recoverLightBubbles(
+        image: Mat,
+        boxes: List<OCRBox>,
+        unassigned: List<Int>,
+    ): List<BubbleCandidate> {
+        val gray = Mat()
+        val light = Mat()
+        val opened = Mat()
+        val kernel = Imgproc.getStructuringElement(
+            Imgproc.MORPH_RECT,
+            Size(3.0, 3.0),
+        )
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        return try {
+            Imgproc.cvtColor(image, gray, Imgproc.COLOR_BGR2GRAY)
+            Imgproc.threshold(gray, light, 210.0, 255.0, Imgproc.THRESH_BINARY)
+            // Candidate-only topology repair: sever narrow white leaks through
+            // an otherwise closed balloon outline. Formal native segmentation
+            // keeps the original pixels and does not use this relaxation.
+            Imgproc.morphologyEx(light, opened, Imgproc.MORPH_OPEN, kernel)
+            Imgproc.findContours(
+                opened, contours, hierarchy, Imgproc.RETR_CCOMP,
+                Imgproc.CHAIN_APPROX_SIMPLE,
+            )
+            val imageArea = image.cols().toDouble() * image.rows()
+            val recovered = mutableListOf<BubbleCandidate>()
+            for ((contourIndex, contour) in contours.withIndex()) {
+                // RETR_LIST treated dark glyph holes as bubble candidates.
+                // CCOMP keeps them as children of the surrounding white
+                // component; only foreground components may be bubbles.
+                if (hierarchy.get(0, contourIndex)[3] >= 0) continue
+                val rect = Imgproc.boundingRect(contour)
+                if (rect.width < 20 || rect.height < 16) continue
+                val area = Imgproc.contourArea(contour)
+                if (area / imageArea !in 0.00005..0.24 ||
+                    area / rect.area() < 0.08
+                ) continue
+                val contour2f = MatOfPoint2f(*contour.toArray())
+                val approximation = MatOfPoint2f()
+                try {
+                    val members = unassigned.filter { index ->
+                        val center = center(boxes[index])
+                        val text = bounds(
+                            boxes[index].points, image.cols(), image.rows(),
+                        )
+                        Imgproc.pointPolygonTest(
+                            contour2f,
+                            Point(center.x.toDouble(), center.y.toDouble()),
+                            false,
+                        ) >= 0 &&
+                            rect.width >= text.width * 1.15 &&
+                            rect.height >= text.height * 1.15
+                    }
+                    if (members.isEmpty()) continue
+                    val perimeter = Imgproc.arcLength(contour2f, true)
+                    if (perimeter <= 0) continue
+                    val extent = area / rect.area()
+                    if (area / imageArea > 0.08 && extent > 0.88) continue
+                    Imgproc.approxPolyDP(
+                        contour2f, approximation,
+                        max(0.75, perimeter * 0.008), true,
+                    )
+                    val polygon = canonical(approximation.toArray().map {
+                        PointF(it.x.toFloat(), it.y.toFloat())
+                    })
+                    if (polygon.size < 4) continue
+                    val candidate = BubbleCandidate(
+                        id = -1,
+                        polygon = polygon,
+                        color = Color.WHITE,
+                        area = area,
+                        bounds = rect,
+                    )
+                    val duplicate = recovered.indexOfFirst {
+                        sameCandidate(it, candidate)
+                    }
+                    if (duplicate < 0) recovered += candidate
+                    else if (candidate.area > recovered[duplicate].area) {
+                        recovered[duplicate] = candidate
+                    }
+                } finally {
+                    contour2f.release()
+                    approximation.release()
+                }
+            }
+            recovered
+        } finally {
+            gray.release()
+            light.release()
+            opened.release()
+            kernel.release()
+            contours.forEach(MatOfPoint::release)
+            hierarchy.release()
+        }
     }
 
     private fun cleanOverlay(

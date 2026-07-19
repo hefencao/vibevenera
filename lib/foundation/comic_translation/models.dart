@@ -92,6 +92,7 @@ final class ComicOcrRegion {
   final int? foregroundArgb;
   final int? bubbleGroupId;
   final List<NormalizedPoint>? bubblePolygon;
+  final List<NormalizedPoint>? bubbleCandidatePolygon;
   final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
 
@@ -108,6 +109,7 @@ final class ComicOcrRegion {
     this.foregroundArgb,
     this.bubbleGroupId,
     this.bubblePolygon,
+    this.bubbleCandidatePolygon,
     this.frameSpan,
   });
 
@@ -127,6 +129,9 @@ final class ComicOcrRegion {
     foregroundArgb: json['foregroundArgb'] as int?,
     bubbleGroupId: json['bubbleGroupId'] as int?,
     bubblePolygon: (json['bubblePolygon'] as List?)
+        ?.map((point) => NormalizedPoint.fromJson(point as List))
+        .toList(),
+    bubbleCandidatePolygon: (json['bubbleCandidatePolygon'] as List?)
         ?.map((point) => NormalizedPoint.fromJson(point as List))
         .toList(),
     sourceMaskPolygons: (json['sourceMaskPolygons'] as List? ?? const [])
@@ -154,6 +159,9 @@ final class ComicOcrRegion {
     if (bubbleGroupId != null) 'bubbleGroupId': bubbleGroupId,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
+    if (bubbleCandidatePolygon != null)
+      'bubbleCandidatePolygon': bubbleCandidatePolygon!
+          .map((point) => point.toJson()).toList(),
     'sourceMaskPolygons': sourceMaskPolygons
         .map((polygon) => polygon.map((point) => point.toJson()).toList())
         .toList(),
@@ -239,6 +247,7 @@ final class ComicTranslatedRegion {
   final int? foregroundArgb;
   final int? bubbleGroupId;
   final List<NormalizedPoint>? bubblePolygon;
+  final List<NormalizedPoint>? bubbleCandidatePolygon;
   final List<List<NormalizedPoint>> sourceMaskPolygons;
   final AnimatedFrameSpan? frameSpan;
 
@@ -255,6 +264,7 @@ final class ComicTranslatedRegion {
     this.foregroundArgb,
     this.bubbleGroupId,
     this.bubblePolygon,
+    this.bubbleCandidatePolygon,
     this.frameSpan,
   });
 
@@ -275,6 +285,9 @@ final class ComicTranslatedRegion {
         foregroundArgb: json['foregroundArgb'] as int?,
         bubbleGroupId: json['bubbleGroupId'] as int?,
         bubblePolygon: (json['bubblePolygon'] as List?)
+            ?.map((point) => NormalizedPoint.fromJson(point as List))
+            .toList(),
+        bubbleCandidatePolygon: (json['bubbleCandidatePolygon'] as List?)
             ?.map((point) => NormalizedPoint.fromJson(point as List))
             .toList(),
         sourceMaskPolygons: (json['sourceMaskPolygons'] as List? ?? const [])
@@ -302,6 +315,9 @@ final class ComicTranslatedRegion {
     if (bubbleGroupId != null) 'bubbleGroupId': bubbleGroupId,
     if (bubblePolygon != null)
       'bubblePolygon': bubblePolygon!.map((point) => point.toJson()).toList(),
+    if (bubbleCandidatePolygon != null)
+      'bubbleCandidatePolygon': bubbleCandidatePolygon!
+          .map((point) => point.toJson()).toList(),
     'sourceMaskPolygons': sourceMaskPolygons
         .map((polygon) => polygon.map((point) => point.toJson()).toList())
         .toList(),

@@ -7,8 +7,10 @@ class _TranslationLayoutSearch {
   final int sourceCharacters;
   final double sourceArea;
   final Rect sourceBounds;
+  final Rect availableBounds;
   final double preferredFont;
   final bool body;
+  final bool insideBubble;
   int _optionIndex = 0;
   int _binaryStep = 0;
   int _fontStep = -1;
@@ -19,6 +21,7 @@ class _TranslationLayoutSearch {
   double _minimumFont = 2;
   _TranslationLayoutCandidate? _best;
   _TranslationLayoutCandidate? _bodyBest;
+  double _bodyBestDistance = double.infinity;
   _TranslationLayoutPlan? plan;
 
   _TranslationLayoutSearch(
@@ -47,19 +50,15 @@ class _TranslationLayoutSearch {
        sourceBounds = regionBounds.reduce(
          (value, next) => value.expandToInclude(next),
        ),
+       availableBounds = bounds,
        preferredFont = painter._sourceFontSize(block, regionBounds) *
            painter.fontScale,
-       body = block.regions.every((region) =>
-               region.region.kind != ComicTextKind.soundEffect) &&
-           (block.regions.any((region) =>
-               region.region.bubbleGroupId != null ||
-               region.region.bubblePolygon != null) ||
-               block.regions.fold(0, (count, region) =>
-                   count + painter._characters(region.region.sourceText)) >= 4);
+       body = painter._isBodyBlock(block),
+       insideBubble = insideBubble;
 
   bool step() {
     if (_optionIndex >= options.length) {
-      plan = (_bodyBest ?? _best)!.plan;
+      _finish();
       return true;
     }
     final option = options[_optionIndex];
@@ -109,8 +108,46 @@ class _TranslationLayoutSearch {
     _optionInitialized = false;
     _lowerBoundFits = false;
     if (_optionIndex < options.length) return false;
-    plan = (_bodyBest ?? _best)!.plan;
+    _finish();
     return true;
+  }
+
+  void _finish() {
+    final selected = _bodyBest ?? _best!;
+    plan = selected.plan;
+    if (insideBubble) {
+      final laneBounds = selected.plan.lanes
+          .map((lane) => lane.bounds)
+          .reduce((value, next) => value.expandToInclude(next));
+      Log.warning(
+        'Translation.Layout',
+        'bubble layout selected block=${block.key} '
+            'available/source='
+            '${(availableBounds.width / sourceBounds.width).toStringAsFixed(2)}x'
+            '${(availableBounds.height / sourceBounds.height).toStringAsFixed(2)} '
+            'lane/source='
+            '${(laneBounds.width / sourceBounds.width).toStringAsFixed(2)}x'
+            '${(laneBounds.height / sourceBounds.height).toStringAsFixed(2)} '
+            'font=${selected.plan.fontSize.toStringAsFixed(2)} '
+            'preferred=${preferredFont.toStringAsFixed(2)} '
+            'scale=${painter.fontScale.toStringAsFixed(3)} '
+            'bodyRatio=${painter.bodyFontRatio?.toStringAsFixed(5) ?? '-'} '
+            'body=$body '
+            'bands=${block.bands.length} '
+            'source=${block.regions.map((region) =>
+                region.region.sourceText).join('|')}',
+      );
+    }
+    if (body && _bodyBest == null) {
+      Log.warning(
+        'Translation.Layout',
+        'body clamp fallback block=${block.key} '
+            'preferred=${preferredFont.toStringAsFixed(2)} '
+            'selected=${selected.plan.fontSize.toStringAsFixed(2)} '
+            'source=${block.regions.map((region) =>
+                region.region.sourceText).join('|')}',
+      );
+    }
   }
 
   void _consider(
@@ -170,10 +207,17 @@ class _TranslationLayoutSearch {
       score,
     );
     if (_best == null || score < _best!.score) _best = candidate;
-    final ratio = fontSize / preferredFont;
-    if (body && ratio >= .82 && ratio <= 1.18 &&
-        (_bodyBest == null || score < _bodyBest!.score)) {
-      _bodyBest = candidate;
+    if (body) {
+      final reference = preferredFont;
+      final ratio = fontSize / reference;
+      final distance = math.log(ratio).abs();
+      if (ratio >= 1 / 1.15 && ratio <= 1.15 &&
+          (distance < _bodyBestDistance - .005 ||
+              (distance - _bodyBestDistance).abs() <= .005 &&
+                  (_bodyBest == null || score < _bodyBest!.score))) {
+        _bodyBest = candidate;
+        _bodyBestDistance = distance;
+      }
     }
   }
 }
