@@ -241,7 +241,7 @@ final class ComicTranslationRuntime {
           modelType: profile.model.trim(),
           apiKey: apiKey,
         ),
-        'local' when Platform.isAndroid => LocalMarianComicTranslationEngine(
+        'local' when Platform.isAndroid => LocalCTranslate2ComicTranslationEngine(
           ComicLocalTranslationModelManager.instance,
         ),
         _ => null,

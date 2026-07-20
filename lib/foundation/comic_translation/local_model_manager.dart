@@ -6,17 +6,20 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 final class ComicLocalTranslationModel {
-  static const schemaVersion = 2;
-  static const engine = 'ctranslate2-marian';
+  static const schemaVersion = 4;
+  static const engine = 'ctranslate2-seq2seq';
+  static const _legacyEngine = 'ctranslate2-marian';
 
   final String id;
   final String version;
   final String displayName;
-  final String sourceLanguage;
+  final List<String> sourceLanguages;
   final String targetLanguage;
   final String license;
-  final String sourcePrefix;
+  final List<String> sourcePrefixTokens;
   final String sourceEosToken;
+  final List<String> targetPrefixTokens;
+  final int beamSize;
   final String sourceUrl;
   final Map<String, String> files;
   final String path;
@@ -25,11 +28,13 @@ final class ComicLocalTranslationModel {
     required this.id,
     required this.version,
     required this.displayName,
-    required this.sourceLanguage,
+    required this.sourceLanguages,
     required this.targetLanguage,
     required this.license,
-    required this.sourcePrefix,
+    required this.sourcePrefixTokens,
     required this.sourceEosToken,
+    required this.targetPrefixTokens,
+    required this.beamSize,
     required this.sourceUrl,
     required this.files,
     required this.path,
@@ -40,8 +45,8 @@ final class ComicLocalTranslationModel {
     String path,
   ) {
     final manifestVersion = json['schemaVersion'] as int;
-    if (manifestVersion != 1 && manifestVersion != schemaVersion ||
-        json['engine'] != engine) {
+    if (manifestVersion < 1 || manifestVersion > schemaVersion ||
+        json['engine'] != engine && json['engine'] != _legacyEngine) {
       throw const FormatException('Unsupported local translation model format');
     }
     final files = Map<String, dynamic>.from(json['files'] as Map).map(
@@ -51,13 +56,24 @@ final class ComicLocalTranslationModel {
       id: json['id'] as String,
       version: json['version'] as String,
       displayName: json['displayName'] as String,
-      sourceLanguage: _language(json['sourceLanguage'] as String),
+      sourceLanguages: manifestVersion >= 4
+          ? (json['sourceLanguages'] as List)
+              .cast<String>().map(_language).toList()
+          : [_language(json['sourceLanguage'] as String)],
       targetLanguage: _language(json['targetLanguage'] as String),
       license: json['license'] as String,
-      sourcePrefix: json['sourcePrefix'] as String? ?? '',
+      sourcePrefixTokens: manifestVersion >= 3
+          ? (json['sourcePrefixTokens'] as List).cast<String>()
+          : (json['sourcePrefix'] as String? ?? '')
+              .trim().split(RegExp(r'\s+')).where((token) => token.isNotEmpty)
+              .toList(),
       sourceEosToken: manifestVersion == 1
           ? '</s>'
           : json['sourceEosToken'] as String,
+      targetPrefixTokens: manifestVersion >= 4
+          ? (json['targetPrefixTokens'] as List).cast<String>()
+          : const [],
+      beamSize: manifestVersion >= 4 ? json['beamSize'] as int : 2,
       sourceUrl: json['sourceUrl'] as String? ?? '',
       files: files,
       path: path,
@@ -68,13 +84,17 @@ final class ComicLocalTranslationModel {
 
   String filePath(String name) => '$path${Platform.pathSeparator}$name';
 
+  String get sourceLanguage => sourceLanguages.join('/');
+
   String get runtimeKey {
     final entries = files.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
     final fingerprint = sha256.convert(utf8.encode(jsonEncode({
       'schema': schemaVersion,
-      'prefix': sourcePrefix,
+      'prefixTokens': sourcePrefixTokens,
       'eos': sourceEosToken,
+      'targetPrefixTokens': targetPrefixTokens,
+      'beamSize': beamSize,
       'files': {for (final entry in entries) entry.key: entry.value},
     })));
     return '$id:$version:$fingerprint';
@@ -86,11 +106,13 @@ final class ComicLocalTranslationModel {
     'id': id,
     'version': version,
     'displayName': displayName,
-    'sourceLanguage': sourceLanguage,
+    'sourceLanguages': sourceLanguages,
     'targetLanguage': targetLanguage,
     'license': license,
-    'sourcePrefix': sourcePrefix,
+    'sourcePrefixTokens': sourcePrefixTokens,
     'sourceEosToken': sourceEosToken,
+    'targetPrefixTokens': targetPrefixTokens,
+    'beamSize': beamSize,
     'sourceUrl': sourceUrl,
     'files': files,
   };
@@ -98,7 +120,8 @@ final class ComicLocalTranslationModel {
   void _validateManifest() {
     if (!RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$').hasMatch(id) ||
         id.isEmpty || version.isEmpty || displayName.isEmpty || license.isEmpty ||
-        sourceEosToken.isEmpty) {
+        sourceLanguages.isEmpty || sourceEosToken.isEmpty ||
+        beamSize < 1 || beamSize > 16) {
       throw const FormatException('Invalid local translation model metadata');
     }
     const required = {'model.bin', 'config.json', 'source.spm', 'target.spm'};
@@ -191,7 +214,7 @@ final class ComicLocalTranslationModelManager {
     final normalizedSource = _normalizeSource(source);
     final normalizedTarget = _normalizeTarget(target);
     return _models.where((model) =>
-        model.sourceLanguage == normalizedSource &&
+        model.sourceLanguages.contains(normalizedSource) &&
         model.targetLanguage == normalizedTarget).firstOrNull;
   }
 

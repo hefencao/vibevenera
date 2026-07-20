@@ -7,7 +7,7 @@ import 'package:venera/utils/opencc.dart';
 import 'engine.dart';
 import 'local_model_manager.dart';
 
-final class LocalMarianComicTranslationEngine
+final class LocalCTranslate2ComicTranslationEngine
     implements ComicTextTranslationEngine, ComicTextTranslationEngineDiagnostics {
   static const _channel = MethodChannel('venera/comic_translation_local');
 
@@ -16,7 +16,7 @@ final class LocalMarianComicTranslationEngine
   ComicTextTranslationRunMetrics? _lastRunMetrics;
   List<String> _lastRawResponses = const [];
 
-  LocalMarianComicTranslationEngine(this.models);
+  LocalCTranslate2ComicTranslationEngine(this.models);
 
   static Future<bool> isNativeAvailable() async =>
       Platform.isAndroid &&
@@ -34,7 +34,7 @@ final class LocalMarianComicTranslationEngine
       id: 'local-ctranslate2:${pipeline.map((model) => model.id).join('+')}',
       modelVersion: '${pipeline.map((model) => model.runtimeKey).join('>')}:'
           'package-v${ComicLocalTranslationModel.schemaVersion}:'
-          'group-beam2-v1',
+          'group-seq2seq-protocol-v3',
     );
   }
 
@@ -73,13 +73,10 @@ final class LocalMarianComicTranslationEngine
     final batchDurations = <Duration>[];
     for (final model in pipeline) {
       await _loadModel(model);
-      final input = model.sourcePrefix.isEmpty
-          ? texts
-          : texts.map((text) => '${model.sourcePrefix}$text').toList();
       final stageTimer = Stopwatch()..start();
       final raw = await _channel.invokeListMethod<String>('translate', {
         'modelKey': model.runtimeKey,
-        'texts': input,
+        'texts': texts,
       });
       stageTimer.stop();
       batchDurations.add(stageTimer.elapsed);
@@ -105,7 +102,11 @@ final class LocalMarianComicTranslationEngine
     final translations = <String, List<String>>{};
     for (var i = 0; i < request.units.length; i++) {
       translations[request.units[i].id] = [
-        traditional ? OpenCC.simplifiedToTraditional(texts[i]) : texts[i],
+        traditional
+            ? OpenCC.simplifiedToTraditional(
+                OpenCC.traditionalToSimplified(texts[i]),
+              )
+            : OpenCC.traditionalToSimplified(texts[i]),
       ];
     }
     _lastRunMetrics = ComicTextTranslationRunMetrics(
@@ -124,7 +125,10 @@ final class LocalMarianComicTranslationEngine
       'modelPath': model.path,
       'sourceSpm': model.filePath('source.spm'),
       'targetSpm': model.filePath('target.spm'),
+      'sourcePrefixTokens': model.sourcePrefixTokens,
       'sourceEosToken': model.sourceEosToken,
+      'targetPrefixTokens': model.targetPrefixTokens,
+      'beamSize': model.beamSize,
       'threads': math.min(4, math.max(1, Platform.numberOfProcessors ~/ 2)),
     });
     _loadedModels.add(model.runtimeKey);

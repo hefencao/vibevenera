@@ -8,13 +8,17 @@ import 'package:venera/foundation/comic_translation/engine.dart';
 import 'package:venera/foundation/comic_translation/local_model_manager.dart';
 import 'package:venera/foundation/comic_translation/local_translation.dart';
 import 'package:venera/foundation/comic_translation/models.dart';
+import 'package:venera/utils/opencc.dart';
 
 Future<Directory> modelDirectory(
   Directory root,
   String id,
   String sourceLanguage,
   String targetLanguage, {
-  String sourcePrefix = '',
+  List<String> sourcePrefixTokens = const [],
+  List<String>? sourceLanguages,
+  List<String> targetPrefixTokens = const [],
+  int beamSize = 4,
   int schemaVersion = ComicLocalTranslationModel.schemaVersion,
 }) async {
   final source = Directory('${root.path}${Platform.pathSeparator}$id');
@@ -37,13 +41,24 @@ Future<Directory> modelDirectory(
     'id': id,
     'version': '1',
     'displayName': id,
-    'sourceLanguage': sourceLanguage,
     'targetLanguage': targetLanguage,
     'license': 'Apache-2.0',
-    'sourcePrefix': sourcePrefix,
     'sourceUrl': 'https://example.com/$id',
     'files': files,
   };
+  if (schemaVersion >= 4) {
+    manifest['sourceLanguages'] = sourceLanguages ?? [sourceLanguage];
+    manifest['targetPrefixTokens'] = targetPrefixTokens;
+    manifest['beamSize'] = beamSize;
+  } else {
+    manifest['sourceLanguage'] = sourceLanguage;
+  }
+  if (schemaVersion >= 3) {
+    manifest['sourcePrefixTokens'] = sourcePrefixTokens;
+  } else {
+    manifest['sourcePrefix'] = '${sourcePrefixTokens.join(' ')} '
+        .trimLeft();
+  }
   if (schemaVersion >= 2) manifest['sourceEosToken'] = '</s>';
   await File('${source.path}${Platform.pathSeparator}manifest.json')
       .writeAsString(jsonEncode(manifest));
@@ -53,14 +68,16 @@ Future<Directory> modelDirectory(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test('resolves direct and pivot local translation pipelines', () async {
+    await OpenCC.init();
+    expect(OpenCC.traditionalToSimplified('什麼麽'), '什么么');
     final temp = await Directory.systemTemp.createTemp('venera-local-model-');
     addTearDown(() => temp.delete(recursive: true));
     final manager = ComicLocalTranslationModelManager.instance;
     await manager.init('${temp.path}${Platform.pathSeparator}data');
     for (final pair in const [
-      ('ja-en', 'ja', 'en', ''),
-      ('ko-en', 'ko', 'en', ''),
-      ('en-zh', 'en', 'zh-CN', '>>cmn_Hans<< '),
+      ('ja-en', 'ja', 'en', <String>[]),
+      ('ko-en', 'ko', 'en', <String>[]),
+      ('en-zh', 'en', 'zh-CN', ['>>cmn_Hans<<']),
     ]) {
       await manager.installFromDirectory(
         (await modelDirectory(
@@ -68,7 +85,7 @@ void main() {
           pair.$1,
           pair.$2,
           pair.$3,
-          sourcePrefix: pair.$4,
+          sourcePrefixTokens: pair.$4,
         )).path,
       );
     }
@@ -81,8 +98,9 @@ void main() {
       ['ko-en', 'en-zh'],
     );
     final chinese = manager.modelFor('en', 'zh-TW')!;
-    expect(chinese.sourcePrefix, '>>cmn_Hans<< ');
+    expect(chinese.sourcePrefixTokens, ['>>cmn_Hans<<']);
     expect(chinese.sourceEosToken, '</s>');
+    expect(chinese.beamSize, 4);
 
     const channel = MethodChannel('venera/comic_translation_local');
     final calls = <MethodCall>[];
@@ -100,12 +118,12 @@ void main() {
             return ['I will see you tomorrow.'];
           }
           expect(key, startsWith('en-zh:'));
-          expect(arguments['texts'], ['>>cmn_Hans<< I will see you tomorrow.']);
+          expect(arguments['texts'], ['I will see you tomorrow.']);
           return ['明天见'];
         });
     addTearDown(() => TestDefaultBinaryMessengerBinding
         .instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
-    final engine = LocalMarianComicTranslationEngine(manager);
+    final engine = LocalCTranslate2ComicTranslationEngine(manager);
     final result = await engine.translate(ComicTranslationRequest(
       ocr: const ComicOcrArtifact(
         contentDigest: 'test',
@@ -157,15 +175,32 @@ void main() {
     expect(engine.lastRawResponses.first, contains('よろしくね'));
     expect(calls.where((call) => call.method == 'load'), hasLength(2));
     expect(calls.where((call) => call.method == 'translate'), hasLength(2));
+    final chineseLoad = calls.where((call) => call.method == 'load')
+        .map((call) => Map<String, dynamic>.from(call.arguments as Map))
+        .firstWhere((arguments) =>
+            (arguments['modelKey'] as String).startsWith('en-zh:'));
+    expect(chineseLoad['sourcePrefixTokens'], ['>>cmn_Hans<<']);
+    expect(chineseLoad['targetPrefixTokens'], isEmpty);
+    expect(chineseLoad['beamSize'], 4);
     await engine.unload();
 
     final direct = await manager.installFromDirectory(
-      (await modelDirectory(temp, 'ja-zh', 'ja', 'zh-CN')).path,
+      (await modelDirectory(
+        temp,
+        'ja-ko-zh',
+        'ja',
+        'zh-CN',
+        sourceLanguages: const ['ja', 'ko'],
+        sourcePrefixTokens: const ['__zh__'],
+        targetPrefixTokens: const ['__zh__'],
+        beamSize: 5,
+      )).path,
     );
     expect(manager.pipelineFor('ja', 'zh-TW'), [direct]);
+    expect(manager.pipelineFor('ko', 'zh-CN'), [direct]);
     expect(
       await File(direct.filePath('model.bin')).readAsString(),
-      'ja-zh-model.bin-content',
+      'ja-ko-zh-model.bin-content',
     );
 
     final legacy = await manager.installFromDirectory(
@@ -174,13 +209,16 @@ void main() {
         'legacy-en-ja',
         'en',
         'ja',
-        schemaVersion: 1,
+        schemaVersion: 2,
+        sourcePrefixTokens: const ['>>ja<<'],
       )).path,
     );
     expect(legacy.sourceEosToken, '</s>');
+    expect(legacy.sourcePrefixTokens, ['>>ja<<']);
     final installedManifest = jsonDecode(await File(
       '${legacy.path}${Platform.pathSeparator}installation.json',
     ).readAsString()) as Map;
-    expect(installedManifest['schemaVersion'], 2);
+    expect(installedManifest['schemaVersion'], 4);
+    expect(installedManifest['engine'], ComicLocalTranslationModel.engine);
   });
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,61 +20,165 @@ class ModelSpec:
     source: str
     target: str
     name: str
-    prefix: str
+    prefix_tokens: tuple[str, ...]
     sample: str
     expected: tuple[str, ...]
 
 
-MODELS = {
+SMALL100_REPOSITORY = "alirezamsh/small100"
+SMALL100_REVISION = "8ab680e26a596d2e3d2d2d17ae0f68df1037328c"
+LEGACY_MODELS = {
     spec.pair: spec
     for spec in (
         ModelSpec(
             "ja-en",
             "Helsinki-NLP/opus-mt-ja-en",
             "0770961a39ba6bd66305b149c3f4110bcafca2e6",
-            "ja",
-            "en",
-            "OPUS-MT Japanese English INT8",
-            "",
-            "また明日よろしくね",
-            ("tomorrow",),
+            "ja", "en", "OPUS-MT Japanese English INT8", (),
+            "また明日よろしくね", ("tomorrow",),
         ),
         ModelSpec(
             "ko-en",
             "Helsinki-NLP/opus-mt-ko-en",
             "e42d1f41b66194e6d10512f8a27bebc1f4f5097e",
-            "ko",
-            "en",
-            "OPUS-MT Korean English INT8",
-            "",
-            "내일 다시 만나요",
-            ("tomorrow",),
+            "ko", "en", "OPUS-MT Korean English INT8", (),
+            "내일 다시 만나요", ("tomorrow",),
         ),
         ModelSpec(
             "en-zh",
             "Helsinki-NLP/opus-mt-en-zh",
             "408d9bc410a388e1d9aef112a2daba955b945255",
-            "en",
-            "zh-CN",
-            "OPUS-MT English Simplified Chinese INT8",
-            ">>cmn_Hans<< ",
-            "I will see you tomorrow.",
-            ("明天",),
+            "en", "zh-CN", "OPUS-MT English Simplified Chinese INT8",
+            (">>cmn_Hans<<",), "I will see you tomorrow.", ("明天",),
         ),
     )
 }
 
 
-def translate(model_path: Path, spec: ModelSpec, text: str) -> str:
+def translate(model_path: Path, text: str) -> str:
+    manifest = json.loads(
+        (model_path / "manifest.json").read_text(encoding="utf-8"),
+    )
     source = spm.SentencePieceProcessor(model_file=str(model_path / "source.spm"))
     target = spm.SentencePieceProcessor(model_file=str(model_path / "target.spm"))
-    tokens = source.encode(spec.prefix + text, out_type=str) + ["</s>"]
-    result = ctranslate2.Translator(str(model_path), device="cpu").translate_batch(
-        [tokens], beam_size=2, max_decoding_length=128,
-    )[0]
-    if not result.hypotheses or len(result.hypotheses[0]) >= 128:
-        raise RuntimeError(f"{spec.pair} smoke test did not terminate")
-    return target.decode(result.hypotheses[0]).strip()
+    tokens = (
+        list(manifest["sourcePrefixTokens"])
+        + source.encode(text, out_type=str)
+        + [manifest["sourceEosToken"]]
+    )
+    target_prefix = manifest["targetPrefixTokens"]
+    options = {
+        "beam_size": manifest["beamSize"],
+        "max_decoding_length": 256,
+    }
+    if target_prefix:
+        options["target_prefix"] = [target_prefix]
+    result = ctranslate2.Translator(
+        str(model_path), device="cpu",
+    ).translate_batch([tokens], **options)[0]
+    if not result.hypotheses or len(result.hypotheses[0]) >= 256:
+        raise RuntimeError("Smoke test did not terminate")
+    pieces = result.hypotheses[0]
+    if target_prefix:
+        if pieces[:len(target_prefix)] != target_prefix:
+            raise RuntimeError("Target prefix was not preserved")
+        pieces = pieces[len(target_prefix):]
+    return target.decode(pieces).strip()
+
+
+def build_small100(output_root: Path, cache: Path) -> Path:
+    source = Path(snapshot_download(
+        SMALL100_REPOSITORY,
+        revision=SMALL100_REVISION,
+        local_dir=cache / "small100",
+        allow_patterns=[
+            "config.json", "generation_config.json", "model.safetensors",
+            "sentencepiece.bpe.model", "special_tokens_map.json",
+            "tokenizer_config.json", "vocab.json",
+        ],
+    ))
+    output = output_root / "small100-ja-ko-zh"
+    if output.exists():
+        shutil.rmtree(output)
+    convert_model(
+        str(source), output, "small100-ja-ko-zh-int8",
+        SMALL100_REVISION[:12],
+        "SMaLL-100 Japanese Korean Chinese INT8",
+        ("ja", "ko"), "zh-CN", "MIT",
+        source_prefix_tokens=("__zh__",),
+        source_eos_token="</s>",
+        target_prefix_tokens=("__zh__",),
+        beam_size=5,
+        source_tokenizer="sentencepiece.bpe.model",
+        target_tokenizer="sentencepiece.bpe.model",
+        source_url=(
+            f"https://huggingface.co/{SMALL100_REPOSITORY}/tree/"
+            f"{SMALL100_REVISION}"
+        ),
+    )
+    cases = (
+        ("あの", lambda value: any(word in value for word in
+          ("那个", "那個", "请问", "請問", "嗯", "呃", "喂"))),
+        ("何を\nですか？", lambda value: "什么" in value or "什麼" in value),
+        (
+            "혹시 비가 오면 어떻게 하죠? 아, 그리고 렌터카는 미리 예약하는 게 좋을 것 같아요.",
+            lambda value: "雨" in value and "租" in value,
+        ),
+    )
+    for source_text, valid in cases:
+        translated = translate(output, source_text)
+        if not valid(translated):
+            raise RuntimeError(
+                f"SMaLL-100 smoke test failed: {source_text!r} -> {translated!r}",
+            )
+        print(f"small100: {source_text!r} -> {translated}")
+    return output
+
+
+def build_legacy(
+    output_root: Path,
+    cache: Path,
+    pairs: list[str],
+) -> None:
+    built = {}
+    for pair in pairs:
+        spec = LEGACY_MODELS[pair]
+        source = Path(snapshot_download(
+            spec.repository,
+            revision=spec.revision,
+            local_dir=cache / pair,
+            allow_patterns=[
+                "config.json", "generation_config.json", "pytorch_model.bin",
+                "source.spm", "target.spm", "tokenizer_config.json",
+                "vocab.json", "README.md", "metadata.json",
+            ],
+        ))
+        output = output_root / pair
+        if output.exists():
+            shutil.rmtree(output)
+        convert_model(
+            str(source), output, f"helsinki-opus-mt-{pair}-int8",
+            spec.revision[:12], spec.name, spec.source, spec.target,
+            "Apache-2.0", source_prefix_tokens=spec.prefix_tokens,
+            source_eos_token="</s>", beam_size=4,
+            source_url=(
+                f"https://huggingface.co/{spec.repository}/tree/{spec.revision}"
+            ),
+        )
+        translated = translate(output, spec.sample)
+        if not any(value.lower() in translated.lower() for value in spec.expected):
+            raise RuntimeError(
+                f"{pair} smoke test failed: {spec.sample!r} -> {translated!r}",
+            )
+        print(f"{pair}: {spec.sample} -> {translated}")
+        built[pair] = output
+    if built.keys() >= LEGACY_MODELS.keys():
+        for pair in ("ja-en", "ko-en"):
+            english = translate(built[pair], LEGACY_MODELS[pair].sample)
+            translated = translate(built["en-zh"], english)
+            if "明天" not in translated:
+                raise RuntimeError(f"{pair}>en-zh smoke test failed: {translated!r}")
+            print(f"{pair}>en-zh: {LEGACY_MODELS[pair].sample} -> {translated}")
 
 
 def main() -> None:
@@ -82,72 +187,14 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, default=Path("curated_models"))
     parser.add_argument("--cache", type=Path, default=Path(".model_cache"))
-    parser.add_argument("--pairs", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--legacy-opus", action="store_true")
+    parser.add_argument("--pairs", nargs="+", choices=LEGACY_MODELS)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     args.cache.mkdir(parents=True, exist_ok=True)
-    built = {}
-    for pair in args.pairs:
-        spec = MODELS[pair]
-        source = Path(snapshot_download(
-            spec.repository,
-            revision=spec.revision,
-            local_dir=args.cache / pair,
-            allow_patterns=[
-                "config.json",
-                "generation_config.json",
-                "pytorch_model.bin",
-                "source.spm",
-                "target.spm",
-                "tokenizer_config.json",
-                "vocab.json",
-                "README.md",
-                "metadata.json",
-            ],
-        ))
-        output = args.output / pair
-        if output.exists():
-            shutil.rmtree(output)
-        convert_model(
-            str(source),
-            output,
-            f"helsinki-opus-mt-{pair}-int8",
-            spec.revision[:12],
-            spec.name,
-            spec.source,
-            spec.target,
-            "Apache-2.0",
-            source_prefix=spec.prefix,
-            source_eos_token="</s>",
-            source_url=f"https://huggingface.co/{spec.repository}/tree/{spec.revision}",
-        )
-        translated = translate(output, spec, spec.sample)
-        if not any(value.lower() in translated.lower() for value in spec.expected):
-            raise RuntimeError(
-                f"{pair} smoke test failed: {spec.sample!r} -> {translated!r}",
-            )
-        print(f"{pair}: {spec.sample} -> {translated}")
-        built[pair] = output
-    if built.keys() >= MODELS.keys():
-        chinese = MODELS["en-zh"]
-        for pair in ("ja-en", "ko-en"):
-            english = translate(built[pair], MODELS[pair], MODELS[pair].sample)
-            translated = translate(built["en-zh"], chinese, english)
-            if "明天" not in translated:
-                raise RuntimeError(f"{pair}>en-zh smoke test failed: {translated!r}")
-            print(f"{pair}>en-zh: {MODELS[pair].sample} -> {translated}")
-        for source, expected in (
-            ("いえいえ", "问题"),
-            ("…じゃあ\n食べ終わった\nところで", "吃"),
-        ):
-            english = translate(built["ja-en"], MODELS["ja-en"], source)
-            translated = translate(built["en-zh"], chinese, english)
-            if expected not in translated:
-                raise RuntimeError(
-                    f"ja-en-zh dialogue smoke test failed: "
-                    f"{source!r} -> {english!r} -> {translated!r}",
-                )
-            print(f"ja-en-zh dialogue: {source!r} -> {translated}")
+    build_small100(args.output, args.cache)
+    if args.legacy_opus or args.pairs:
+        build_legacy(args.output, args.cache, args.pairs or list(LEGACY_MODELS))
 
 
 if __name__ == "__main__":

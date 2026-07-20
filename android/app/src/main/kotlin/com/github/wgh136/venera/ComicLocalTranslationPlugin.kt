@@ -24,7 +24,10 @@ private object LocalTranslationNative {
         modelPath: String,
         sourceSpm: String,
         targetSpm: String,
+        sourcePrefixTokens: Array<String>,
         sourceEosToken: String,
+        targetPrefixTokens: Array<String>,
+        beamSize: Int,
         threads: Int,
     ): Long
     external fun translate(handle: Long, texts: Array<String>): Array<String>
@@ -68,7 +71,10 @@ class ComicLocalTranslationPlugin(
             call.argument<String>("modelPath")!!,
             call.argument<String>("sourceSpm")!!,
             call.argument<String>("targetSpm")!!,
+            call.argument<List<String>>("sourcePrefixTokens")!!.toTypedArray(),
             call.argument<String>("sourceEosToken")!!,
+            call.argument<List<String>>("targetPrefixTokens")!!.toTypedArray(),
+            call.argument<Number>("beamSize")!!.toInt(),
             call.argument<Number>("threads")!!.toInt(),
         )
     }

@@ -227,7 +227,7 @@ class _ComicTranslationBackendPageState
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Text(
-                  'Import a direct INT8 CTranslate2 Marian model or every model in a source-to-English-to-target pipeline.'.tl,
+                  'Import an INT8 CTranslate2 sequence-to-sequence model. Direct multi-source models are preferred over pivot pipelines.'.tl,
                   style: ts.s12,
                 ),
               ),
@@ -676,7 +676,7 @@ class _ComicTranslationBackendPageState
       return false;
     }
     if (backend == 'local' &&
-        !await LocalMarianComicTranslationEngine.isNativeAvailable()) {
+        !await LocalCTranslate2ComicTranslationEngine.isNativeAvailable()) {
       if (mounted) {
         context.showMessage(
           message: 'CTranslate2 runtime is not included in this build'.tl,
