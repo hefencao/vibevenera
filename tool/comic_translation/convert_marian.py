@@ -90,7 +90,7 @@ def convert_model(
         )
     package_files = sorted(required | vocabulary)
     manifest = {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "engine": "ctranslate2-seq2seq",
         "id": model_id,
         "version": version,
@@ -105,6 +105,9 @@ def convert_model(
         "sourceEosToken": source_eos_token,
         "targetPrefixTokens": list(target_prefix_tokens),
         "beamSize": beam_size,
+        "promptTemplate": "",
+        "contextSize": 0,
+        "maxOutputTokens": 0,
         "sourceUrl": source_url,
         "files": {name: digest(output / name) for name in package_files},
     }

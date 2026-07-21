@@ -39,6 +39,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var webpTexturePlugin: WebPTexturePlugin? = null
     private var comicTranslationOcrPlugin: ComicTranslationOcrPlugin? = null
     private var comicLocalTranslationPlugin: ComicLocalTranslationPlugin? = null
+    private var comicHyMtTranslationPlugin: ComicHyMtTranslationPlugin? = null
 
     private val storageRequestCode = 0x10
     private var storagePermissionRequest: ((Boolean) -> Unit)? = null
@@ -113,6 +114,8 @@ class MainActivity : FlutterFragmentActivity() {
         comicTranslationOcrPlugin = null
         comicLocalTranslationPlugin?.dispose()
         comicLocalTranslationPlugin = null
+        comicHyMtTranslationPlugin?.dispose()
+        comicHyMtTranslationPlugin = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
@@ -121,6 +124,7 @@ class MainActivity : FlutterFragmentActivity() {
         webpTexturePlugin = WebPTexturePlugin(flutterEngine)
         comicTranslationOcrPlugin = ComicTranslationOcrPlugin(this, flutterEngine)
         comicLocalTranslationPlugin = ComicLocalTranslationPlugin(flutterEngine)
+        comicHyMtTranslationPlugin = ComicHyMtTranslationPlugin(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "venera/method_channel"

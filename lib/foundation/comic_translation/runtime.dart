@@ -207,6 +207,8 @@ final class ComicTranslationRuntime {
               appdata.settings['comicTranslationAdditionalPrompt'] as String,
         );
     final backend = appdata.settings['comicTranslationBackend'] as String;
+    final localModelId =
+        appdata.settings['comicTranslationLocalModel'] as String;
     if (backend != 'none' && backend != 'local' && profile.backend != backend) {
       throw StateError(
         'Comic translation profile ${profile.id} belongs to '
@@ -217,6 +219,7 @@ final class ComicTranslationRuntime {
     final translationConfiguration = backend == 'local'
         ? jsonEncode([
             backend,
+            localModelId,
             for (final model in ComicLocalTranslationModelManager.instance.models)
               model.runtimeKey,
           ])
@@ -241,8 +244,9 @@ final class ComicTranslationRuntime {
           modelType: profile.model.trim(),
           apiKey: apiKey,
         ),
-        'local' when Platform.isAndroid => LocalCTranslate2ComicTranslationEngine(
+        'local' when Platform.isAndroid => LocalComicTranslationEngine(
           ComicLocalTranslationModelManager.instance,
+          selectedModelId: localModelId,
         ),
         _ => null,
       };

@@ -1,126 +1,112 @@
 # Local Comic Translation Models
 
-Android 本地文本翻译使用 **CTranslate2 INT8 + SentencePiece**。模型权重不进入 APK；简体输出统一执行
-繁转简，繁体输出再执行应用内简转繁，不额外常驻一份权重。
+Android 本地文本翻译默认使用 **Hy-MT1.5-1.8B 2-bit GGUF + llama.cpp**。模型权重不进入 APK；
+设置页按固定 revision 下载、断点续传并校验 SHA-256。简体输出统一执行繁转简，繁体目标再执行应用内
+简转繁，不额外常驻一份翻译权重。
 
 ## 1. 推荐模型
 
-推荐单模型直连链路：
+推荐直连链路：
 
 ```text
-ja ┐
-   ├→ SMaLL-100 INT8 → zh-CN → OpenCC(可选 zh-TW)
-ko ┘
+ja/ko → Hy-MT1.5-1.8B 2-bit → zh-CN → OpenCC(可选 zh-TW)
 ```
 
-旧 OPUS-MT 链路 `ja/ko → en → zh` 不再作为推荐模型。问题不是 token 协议：即使语言 token 正确，
-`ja/ko → en` 仍可能丢句，旧 `en → zh` 对短口语也会产生 `Hey. → 顿` 一类错误；枢轴第一段丢失的
-语义无法在第二段恢复。SMaLL-100 在一个模型内直接覆盖日/韩→中文，不再暴露英语中间文本。
+设置 → 阅读 → 翻译模型与 API → 本地翻译模型中点击“下载 Hy-MT 2-bit”。下载完成后该模型会成为
+“当前本地模型”；也可切回自动选择或选择已导入的其他模型。官方 GGUF 固定为
+`AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF@ef3a410f443c23a155e563814defc5a933a3a35c`，文件
+600,535,360 bytes，SHA-256 为
+`46e587d917fc4f6f5bda602f10c4a53da8840240355824bcc0e227559c9cba3e`。它使用官方 PR #19357
+定义的 Q2_0c tensor type 40；运行库不修改 llama.cpp 源码。
 
-PC 安装固定版本依赖并构建：
-
-```powershell
-python -m pip install -r tool/comic_translation/requirements.txt
-python tool/comic_translation/build_curated_models.py `
-  --output build/local-models `
-  --cache .local/comic_translation-model-cache
-```
-
-脚本固定使用 `alirezamsh/small100@8ab680e26a596d2e3d2d2d17ae0f68df1037328c`，转换为 INT8，
-并强制验证以下退化样例：短日语 `あの`、同组 `何を\nですか？`，以及同时包含“下雨”和“提前预订
-租车”的长韩语。任一语义缺失会直接使构建失败。输出目录为 `small100-ja-ko-zh`；只需在
-设置 → 阅读 → 翻译模型与 API → 本地翻译模型中导入这一个目录。
-
-`--legacy-opus` 仍可额外构建旧三段模型，供回归比较，不应作为默认安装建议。SMaLL-100 原始 FP32
-权重约 1.33 GB；INT8 包仍明显大于旧的单个 Marian 包，应在目标设备实测加载内存、首轮延迟和持续
-吞吐。应用只保持一个直连 native handle，而不是同时保持两个枢轴 handle。
+旧 OPUS-MT `ja/ko → en → zh` 的问题不是 token 协议：第一段可能丢句，旧 `en → zh` 对短口语也会
+产生 `Hey. → 顿` 一类错误，枢轴第一段丢失的语义无法恢复。SMaLL-100 和自定义 Marian/CTranslate2
+包仍可导入用于比较，但不再是默认安装建议。
 
 ## 2. 模型包协议
 
-schema v4 支持通用 CTranslate2 sequence-to-sequence 模型：
+schema v5 支持两个 engine。Hy-MT GGUF：
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
+  "engine": "llama.cpp-hymt",
+  "id": "hy-mt1.5-1.8b-2bit",
+  "sourceLanguages": ["ja", "ko"],
+  "targetLanguage": "zh-CN",
+  "promptTemplate": "Translate the following segment into Chinese, without additional explanation：{text}",
+  "contextSize": 1024,
+  "maxOutputTokens": 64,
+  "files": {"model.gguf": "<sha256>"}
+}
+```
+
+旧 CTranslate2 sequence-to-sequence 包继续使用：
+
+```json
+{
+  "schemaVersion": 5,
   "engine": "ctranslate2-seq2seq",
   "sourceLanguages": ["ja", "ko"],
   "targetLanguage": "zh-CN",
   "sourcePrefixTokens": ["__zh__"],
   "sourceEosToken": "</s>",
   "targetPrefixTokens": ["__zh__"],
-  "beamSize": 5
+  "beamSize": 5,
+  "promptTemplate": "",
+  "contextSize": 0,
+  "maxOutputTokens": 0
 }
 ```
 
-- `sourceLanguages` 允许一份多语模型服务多个源语言，避免复制相同权重。
-- `sourcePrefixTokens` / `sourceEosToken` 直接参与 encoder token 序列。
-- `targetPrefixTokens` 通过 CTranslate2 `target_prefix` 约束 decoder，并在 SentencePiece 解码前移除。
-- `beamSize` 属于模型包，而不是 native 硬编码参数。SMaLL-100 使用其建议值 5；旧 schema v1-v3
-  迁移时保持之前的 beam 2 行为。
+所有文件摘要、engine、prompt、上下文参数和生成上限都进入翻译缓存身份。应用先复制到 staging、逐文件
+校验 SHA-256，再原子替换同 ID 的旧版本；Reader 不直接引用用户选择目录。schema v1-v4 的旧安装
+清单会迁移到 v5，不会自动替换其权重。
 
-SMaLL-100 的契约是 `__zh__ + source pieces + </s>`，decoder 也以 `__zh__` 开始。语言 token 不能拼进
-原文再交给 SentencePiece；否则会被拆成普通/未知片段并污染译文。native 对目标前缀做精确校验，协议
-不匹配会显式失败而不是静默输出错误文本。
+## 3. Hy-MT 运行协议
 
-模型目录至少包含：
+Flutter 只发送模型包中的翻译指令，native 按官方 chat template 构造：
 
 ```text
-manifest.json
-model.bin
-config.json
-source.spm
-target.spm
-shared_vocabulary.json
+<｜hy_begin▁of▁sentence｜><｜hy_User｜>{instruction}<｜hy_Assistant｜>
 ```
 
-也支持 `source_vocabulary.json + target_vocabulary.json`。应用先复制到 staging、逐文件校验 SHA-256，
-再原子替换同 ID 的旧版本；Reader 不直接引用用户选择目录。schema v1-v3 的旧安装清单会迁移为 v4，
-但不会自动把旧 OPUS 权重替换成 SMaLL-100。
+llama.cpp 参数为 `top_k=20`、`top_p=0.6`、`temperature=0.7`、`repetition_penalty=1.05`；每个 unit
+开始前清空上下文。一个气泡中的 OCR 行先按阅读顺序合并为一个输入，插件在独立单线程 worker 中顺序
+生成，不阻塞 Flutter UI 或 Android platform thread，也不同时保留多份大上下文。
 
-## 3. 自定义转换
+Android runtime 直接使用官方 `pr-19357-sme2-int2` 源码，以
+`GGML_CPU_ARM_ARCH=armv8.2-a+dotprod` 和 `GGML_CPU_KLEIDIAI=ON` 交叉编译静态 CPU backend。这样
+Q2_0c 使用 PR 自带的 DotProd KleidiAI 内核，同时不引入自定义 tensor enum、动态 backend 装载或第三方
+C/C++ 补丁。
 
-Marian 单语模型仍可使用默认 tokenizer 文件名。多源/多语模型可以重复传入源语言，并分别声明 encoder
-和 decoder 控制 token：
+若某个旧模型对噪声/符号 unit 返回空串，该 unit 保留原文并在 benchmark 原始响应中标记 `[empty]`；
+其余 unit 仍正常回填，不再由一个空结果使整页进入失败状态。
+
+## 4. 自定义 CTranslate2 转换
+
+Marian/多语 sequence-to-sequence 模型仍可用转换脚本生成兼容包：
 
 ```powershell
 python tool/comic_translation/convert_marian.py `
   --model <Hugging-Face-seq2seq-model> `
   --output build/local-models/custom `
-  --id custom-int8 `
-  --version 1 `
-  --name "Custom INT8" `
-  --source-language ja `
-  --source-language ko `
-  --target-language zh-CN `
-  --license <license> `
-  --source-prefix-token __zh__ `
-  --target-prefix-token __zh__ `
-  --beam-size 5 `
-  --source-tokenizer sentencepiece.bpe.model `
-  --target-tokenizer sentencepiece.bpe.model
+  --id custom-int8 --version 1 --name "Custom INT8" `
+  --source-language ja --source-language ko --target-language zh-CN `
+  --license <license>
 ```
 
-转换器会检查 source/target 控制 token 是否真实存在于相应 CTranslate2 词表。转换成功只说明运行协议
-兼容；语义质量仍必须用目标场景中的短口语、长句、省略和同组多行文本单独审核。
+转换成功仅说明运行协议兼容；语义质量仍必须用目标场景中的短口语、长句、省略和同组多行文本审核。
 
-## 4. Android native runtime
+## 5. Android native runtime
 
-运行库由固定版本源码可复现构建：
+运行库由固定版本源码构建：
 
 ```powershell
 tool/comic_translation/build_android_runtime.ps1 -Abis arm64-v8a
 ```
 
-脚本构建 CTranslate2 4.7.2、SentencePiece 0.2.1、Ruy 和 INT8 CPU 路径，并应用 Android 缺少
-`pthread_setaffinity_np` 的最小补丁。stripped ARM64 依赖合计约 5.5 MiB，输出到
-`.local/comic_translation_native/runtime`；CMake 会自动发现。未提供运行库时仍可构建并使用远程翻译，
-本地 backend 的 `isAvailable` 返回 false。
-
-## 5. 运行边界
-
-- Flutter UI isolate 与 Android platform thread 不执行推理；插件使用独立单线程 worker。
-- 一个气泡 unit 是一个 batch item；同组 OCR 行/列按阅读顺序合并后整页调用 `translate_batch`。
-- direct pair 优先，否则才查找 `source→en→target`；多源直连模型会同时命中日语和韩语。
-- 所有权重摘要、控制 token、beam 和 schema 都进入翻译缓存身份。
-- 本地模型无跨页上下文；最后一个 session 退出后释放 native handles。
-- 本地失败不会回退到网络 API。
+脚本执行官方的 `git fetch origin pull/19357/head:pr-19357-sme2-int2` 与 checkout，然后构建
+CTranslate2/SentencePiece 和未修改的 llama.cpp，输出到
+`.local/comic_translation_native/runtime`，CMake 自动发现。未提供某个运行库时仍可构建并使用其他后端；
+选择对应本地模型时 `isAvailable` 会明确失败，不会回退网络 API。

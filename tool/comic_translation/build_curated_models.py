@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import ctranslate2
 import sentencepiece as spm
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from convert_marian import convert_model
 
@@ -27,6 +28,10 @@ class ModelSpec:
 
 SMALL100_REPOSITORY = "alirezamsh/small100"
 SMALL100_REVISION = "8ab680e26a596d2e3d2d2d17ae0f68df1037328c"
+HYMT_REPOSITORY = "AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF"
+HYMT_REVISION = "ef3a410f443c23a155e563814defc5a933a3a35c"
+HYMT_FILE = "Hy-MT1.5-1.8B-2bit.gguf"
+HYMT_SHA256 = "46e587d917fc4f6f5bda602f10c4a53da8840240355824bcc0e227559c9cba3e"
 LEGACY_MODELS = {
     spec.pair: spec
     for spec in (
@@ -53,6 +58,60 @@ LEGACY_MODELS = {
         ),
     )
 }
+
+
+def file_digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(4 * 1024 * 1024):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def build_hymt(output_root: Path, cache: Path) -> Path:
+    source = Path(hf_hub_download(
+        repo_id=HYMT_REPOSITORY,
+        filename=HYMT_FILE,
+        revision=HYMT_REVISION,
+        cache_dir=cache,
+    ))
+    digest = file_digest(source)
+    if digest != HYMT_SHA256:
+        raise RuntimeError(f"Hy-MT SHA-256 mismatch: {digest}")
+    output = output_root / "hy-mt1.5-1.8b-2bit"
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True)
+    shutil.copyfile(source, output / "model.gguf")
+    manifest = {
+        "schemaVersion": 5,
+        "engine": "llama.cpp-hymt",
+        "id": "hy-mt1.5-1.8b-2bit",
+        "version": HYMT_REVISION[:12],
+        "displayName": "Hy-MT1.5-1.8B 2-bit",
+        "sourceLanguages": ["ja", "ko"],
+        "targetLanguage": "zh-CN",
+        "license": "Tencent Hunyuan Community License",
+        "sourcePrefixTokens": [],
+        "sourceEosToken": "",
+        "targetPrefixTokens": [],
+        "beamSize": 1,
+        "promptTemplate": (
+            "Translate the following segment into Chinese, "
+            "without additional explanation：{text}"
+        ),
+        "contextSize": 1024,
+        "maxOutputTokens": 64,
+        "sourceUrl": (
+            f"https://huggingface.co/{HYMT_REPOSITORY}/tree/{HYMT_REVISION}"
+        ),
+        "files": {"model.gguf": digest},
+    }
+    (output / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return output
 
 
 def translate(model_path: Path, text: str) -> str:
@@ -187,12 +246,15 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, default=Path("curated_models"))
     parser.add_argument("--cache", type=Path, default=Path(".model_cache"))
+    parser.add_argument("--small100", action="store_true")
     parser.add_argument("--legacy-opus", action="store_true")
     parser.add_argument("--pairs", nargs="+", choices=LEGACY_MODELS)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     args.cache.mkdir(parents=True, exist_ok=True)
-    build_small100(args.output, args.cache)
+    build_hymt(args.output, args.cache)
+    if args.small100:
+        build_small100(args.output, args.cache)
     if args.legacy_opus or args.pairs:
         build_legacy(args.output, args.cache, args.pairs or list(LEGACY_MODELS))
 

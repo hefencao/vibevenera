@@ -1,6 +1,6 @@
 # Comic Translation Architecture
 
-> 当前架构，更新于 2026-07-19。漫画翻译是 Reader 图片管线的旁路消费者，
+> 当前架构，更新于 2026-07-20。漫画翻译是 Reader 图片管线的旁路消费者，
 > 不属于下载、WebP/GIF 解码或 present 管线。
 
 ## 1. 边界
@@ -49,21 +49,28 @@ Android 本地 OCR 使用独立 `ppocr-sdk` module。Flutter 侧模型管理器�
 PaddleOCR。MethodChannel 不传原图字节，也不在 Android platform 主线程推理。
 
 OCR 与本地文本翻译的模型生命周期已拆开：`ComicOcrModelManager` 只管理 PaddleOCR，
-`ComicLocalTranslationModelManager` 管理按源语言集合/目标语言安装的 CTranslate2 INT8 包。本地文本引擎通过
-独立单线程 MethodChannel 调用 CTranslate2 + SentencePiece；同组 OCR 行/列先按阅读顺序组成一个 unit，
-以换行保留原分段并作为一个 batch item，绝不逐 region 调用模型。返回值
-按请求顺序映射，不向模型发送 region/unit ID，也不经过 JSON 协议。选择策略优先直连 pair，否则使用
-`ja/ko→zh-CN` 多源直连 SMaLL-100；仅当未安装直连模型时才允许完整枢轴链路。插件在同一个 worker
-内按 model key 保持 native handle，不会在切页时反复卸载。简中结果先统一繁转简，繁中目标再走现有
-OpenCC 字符转换。本地模型不使用
-跨页 prompt，因此不会因前页上下文改变重复生成缓存；远程 OpenAI-compatible/DeepL 继续声明
-`previousPages` 能力并保留原有上下文语义。
+`ComicLocalTranslationModelManager` 管理按 engine、源语言集合和目标语言安装的本地模型。默认模型是
+Hy-MT1.5-1.8B 2-bit GGUF，由固定 URL 断点续传、长度/SHA-256 校验后原子发布；用户可在设置中选择
+当前模型。旧 CTranslate2 INT8 包仍可导入。
 
-多语模型的语言前缀是词表 token。native 必须先用 SentencePiece 编码正文，再将
+本地文本引擎按 engine 分派到两个独立单线程 MethodChannel：Hy-MT 使用 AngelSlim 官方 GGUF 和未修改的
+llama.cpp `pr-19357-sme2-int2` Q2_0c（tensor type 40）。旧模型使用
+CTranslate2 + SentencePiece。同组 OCR 行/列先按阅读顺序组成一个 unit，以换行保留原分段；返回值按
+请求顺序映射，不向模型发送 region/unit ID，也不经过 JSON 协议。Hy-MT 直连 `ja/ko→zh-CN`；旧模型
+保持直连优先、完整枢轴链路次之。plugin 按 model key 保持 native handle，不在切页时反复卸载。简中
+结果统一繁转简，繁中目标再走 OpenCC。本地模型不使用跨页 prompt；远程 OpenAI-compatible/DeepL
+继续声明 `previousPages` 能力。单个 unit 返回空串时保留该 unit 原文并记录 `[empty]`，其他 unit 仍完成，
+不再让噪声识别导致整页翻译失败。
+
+Hy-MT 的 Android CPU backend 以 `armv8.2-a+dotprod` 和 `GGML_CPU_KLEIDIAI=ON` 编译为普通静态
+`libggml-cpu.so`，直接链接到应用 wrapper。构建链路不修改 llama.cpp C/C++ 源码，也不另行维护 GGUF enum
+兼容补丁或动态 CPU backend 装载器。
+
+旧 CTranslate2 多语模型的语言前缀是词表 token。native 必须先用 SentencePiece 编码正文，再将
 `sourcePrefixTokens` 原样插入 encoder token 序列，并通过 CTranslate2 `target_prefix` 传入
 `targetPrefixTokens`。decoder 返回后先精确移除该前缀再做 SentencePiece 解码。禁止把语言 token 拼进
-字符串交给 SentencePiece；否则会被拆成普通/未知片段并直接污染译文。beam 由 schema v4 模型包声明，
-不再硬编码为 2。
+字符串交给 SentencePiece；否则会被拆成普通/未知片段并直接污染译文。beam 由模型包声明。Hy-MT 使用
+schema v5 的 prompt template/context/output 参数，并在 native 中套用其 chat template；两种协议不可互换。
 
 强制规则：
 
@@ -85,7 +92,7 @@ Translation key = OCR digest + translation engine/model + target language
 ```
 
 翻译 engine 不再暴露一个与请求无关的固定 model version，而是通过 `identityFor(request)` 返回
-实际直连/枢轴链路中全部模型的身份、权重摘要、源/目标前缀、EOS 和 beam。`contextMode=none` 的本地 engine 使用
+实际直连/枢轴链路中全部模型的身份、engine、权重摘要、prompt/context 参数或源/目标前缀、EOS 和 beam。`contextMode=none` 的本地 engine 使用
 空上下文及稳定摘要；声明
 `previousPages` 的远程 engine 才读取、散列和发送前页内容。这样同一个动态本地 backend 切换
 `ja→zh-CN` / `ko→zh-CN` 时不会串用 artifact，也不会把无效上下文变体写入数据库。
@@ -300,7 +307,7 @@ float Mat、通道 Mat 和逐通道数组的重复副本；Bitmap 已是 ARGB888
 2. PP-OCRv5 mobile det/rec：兼容性和日文准确率基线；
 3. 手动指定韩文时切换到 `korean_PP-OCRv5_mobile_rec`；切换时释放前一个 recognition session，
    不让两套 ONNX recognition 权重同时常驻；
-4. 本地 CTranslate2 sequence-to-sequence（多源日/韩→中文直连优先）与显式远程翻译后端。
+4. 本地 Hy-MT1.5 1.8B 2-bit 直连日/韩→中文、兼容 CTranslate2 sequence-to-sequence，以及显式远程翻译后端。
 
 PP-OCRv6 tiny 先只作为体积/速度基线；其日文覆盖和漫画竖排准确率必须以实际模型包验证，
 不能仅凭通用 OCR 指标作为默认模型。
@@ -313,8 +320,7 @@ WebP/GIF frame timing。验证前不把某个未经实测的 Flutter OCR 插件�
 已完成：旁路模型、内容寻址数据库、独立调度、缓存完成事件、Reader overlay、设置入口、
 动图协议、Android PaddleOCR runtime、应用内模型下载和 benchmark harness。
 
-已提供 OpenAI-compatible、DeepL 和 Android CTranslate2 sequence-to-sequence adapter。本地模型采用带 SHA-256
-manifest 的目录导入，构建端必须随 APK 提供 CTranslate2/SentencePiece ARM64 runtime；仓库提供固定
-revision 的 runtime/精选 SMaLL-100 直连模型构建与语义回归脚本，但不捆绑第三方权重。未完成：应用内直接下载、
-iOS/桌面 OCR 与本地翻译 runtime、learned balloon detector、用户校正、拟声词和动图实际分析。OCR/本地翻译 runtime
+已提供 OpenAI-compatible、DeepL、Android llama.cpp Hy-MT 和 CTranslate2 sequence-to-sequence adapter。Hy-MT
+模型可在应用内下载并校验，APK 只包含固定 revision 的 Q2_0c runtime，不捆绑权重；自定义模型仍使用带
+SHA-256 manifest 的目录导入。未完成：iOS/桌面 OCR 与本地翻译 runtime、learned balloon detector、用户校正、拟声词和动图实际分析。OCR/本地翻译 runtime
 或对应语言对模型缺失时 UI/任务明确报错，不进行网络回退。

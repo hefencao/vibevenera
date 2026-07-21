@@ -7,20 +7,25 @@ import 'package:venera/utils/opencc.dart';
 import 'engine.dart';
 import 'local_model_manager.dart';
 
-final class LocalCTranslate2ComicTranslationEngine
+final class LocalComicTranslationEngine
     implements ComicTextTranslationEngine, ComicTextTranslationEngineDiagnostics {
-  static const _channel = MethodChannel('venera/comic_translation_local');
+  static const _ctranslate2Channel =
+      MethodChannel('venera/comic_translation_local');
+  static const _hyMtChannel = MethodChannel('venera/comic_translation_hymt');
 
   final ComicLocalTranslationModelManager models;
+  final String selectedModelId;
   final _loadedModels = <String>{};
+  final _loadedEngines = <String>{};
   ComicTextTranslationRunMetrics? _lastRunMetrics;
   List<String> _lastRawResponses = const [];
 
-  LocalCTranslate2ComicTranslationEngine(this.models);
+  LocalComicTranslationEngine(this.models, {this.selectedModelId = ''});
 
-  static Future<bool> isNativeAvailable() async =>
-      Platform.isAndroid &&
-      await _channel.invokeMethod<bool>('isAvailable') == true;
+  static Future<bool> isNativeAvailable(
+    ComicLocalTranslationModel model,
+  ) async => Platform.isAndroid && await _channelFor(model)
+      .invokeMethod<bool>('isAvailable') == true;
 
   @override
   ComicTranslationContextMode get contextMode => ComicTranslationContextMode.none;
@@ -31,10 +36,10 @@ final class LocalCTranslate2ComicTranslationEngine
   ) {
     final pipeline = _pipelineFor(request);
     return ComicTranslationEngineIdentity(
-      id: 'local-ctranslate2:${pipeline.map((model) => model.id).join('+')}',
+      id: 'local:${pipeline.map((model) => model.id).join('+')}',
       modelVersion: '${pipeline.map((model) => model.runtimeKey).join('>')}:'
           'package-v${ComicLocalTranslationModel.schemaVersion}:'
-          'group-seq2seq-protocol-v3',
+          'group-local-protocol-v4',
     );
   }
 
@@ -49,8 +54,12 @@ final class LocalCTranslate2ComicTranslationEngine
     if (!Platform.isAndroid) {
       throw UnsupportedError('Local translation is currently Android-only');
     }
-    if (!await isNativeAvailable()) {
-      throw StateError('CTranslate2 native runtime is not included in this build');
+    final model = selectedModelId.isEmpty
+        ? models.models.firstOrNull
+        : models.modelById(selectedModelId);
+    if (model == null) throw StateError('No local translation model is selected');
+    if (!await isNativeAvailable(model)) {
+      throw StateError('${model.engine} native runtime is not included in this build');
     }
   }
 
@@ -74,33 +83,44 @@ final class LocalCTranslate2ComicTranslationEngine
     for (final model in pipeline) {
       await _loadModel(model);
       final stageTimer = Stopwatch()..start();
-      final raw = await _channel.invokeListMethod<String>('translate', {
+      final active = <int>[
+        for (var i = 0; i < texts.length; i++)
+          if (texts[i].isNotEmpty) i,
+      ];
+      if (active.isEmpty) break;
+      final raw = await _channelFor(model).invokeListMethod<String>('translate', {
         'modelKey': model.runtimeKey,
-        'texts': texts,
+        'texts': [for (final i in active) _inputFor(model, texts[i])],
       });
       stageTimer.stop();
       batchDurations.add(stageTimer.elapsed);
-      if (raw == null || raw.length != request.units.length) {
+      if (raw == null || raw.length != active.length) {
         throw StateError(
           'Local translator returned ${raw?.length} results for '
-          '${request.units.length} units',
+          '${active.length} units',
         );
+      }
+      final next = List<String>.filled(texts.length, '');
+      for (var i = 0; i < active.length; i++) {
+        next[active[i]] = raw[i].trim();
       }
       _lastRawResponses = [
         ..._lastRawResponses,
         '${model.displayName} (${model.sourceLanguage} → ${model.targetLanguage})\n'
-            '${List.generate(request.units.length, (i) => '${request.units[i].id}: ${texts[i].replaceAll('\n', ' | ')} → ${raw[i]}').join('\n')}',
+            '${List.generate(active.length, (i) => '${request.units[active[i]].id}: ${texts[active[i]].replaceAll('\n', ' | ')} → ${raw[i].isEmpty ? '[empty]' : raw[i]}').join('\n')}',
       ];
-      texts = raw.map((text) => text.trim()).toList(growable: false);
-      final empty = texts.indexWhere((text) => text.isEmpty);
-      if (empty >= 0) {
-        throw StateError('Local translation unit ${request.units[empty].id} is empty');
-      }
+      texts = next;
     }
     timer.stop();
     final traditional = _isTraditionalTarget(request.targetLanguage);
     final translations = <String, List<String>>{};
     for (var i = 0; i < request.units.length; i++) {
+      if (texts[i].isEmpty) {
+        translations[request.units[i].id] = [
+          request.units[i].sourceLines.join(),
+        ];
+        continue;
+      }
       translations[request.units[i].id] = [
         traditional
             ? OpenCC.simplifiedToTraditional(
@@ -120,25 +140,47 @@ final class LocalCTranslate2ComicTranslationEngine
 
   Future<void> _loadModel(ComicLocalTranslationModel model) async {
     if (_loadedModels.contains(model.runtimeKey)) return;
-    await _channel.invokeMethod<void>('load', {
+    final arguments = <String, dynamic>{
       'modelKey': model.runtimeKey,
-      'modelPath': model.path,
-      'sourceSpm': model.filePath('source.spm'),
-      'targetSpm': model.filePath('target.spm'),
-      'sourcePrefixTokens': model.sourcePrefixTokens,
-      'sourceEosToken': model.sourceEosToken,
-      'targetPrefixTokens': model.targetPrefixTokens,
-      'beamSize': model.beamSize,
       'threads': math.min(4, math.max(1, Platform.numberOfProcessors ~/ 2)),
-    });
+      if (model.engine == ComicLocalTranslationModel.hyMtGgufEngine) ...{
+        'modelPath': model.filePath('model.gguf'),
+        'contextSize': model.contextSize,
+        'maxOutputTokens': model.maxOutputTokens,
+      } else ...{
+        'modelPath': model.path,
+        'sourceSpm': model.filePath('source.spm'),
+        'targetSpm': model.filePath('target.spm'),
+        'sourcePrefixTokens': model.sourcePrefixTokens,
+        'sourceEosToken': model.sourceEosToken,
+        'targetPrefixTokens': model.targetPrefixTokens,
+        'beamSize': model.beamSize,
+      },
+    };
+    await _channelFor(model).invokeMethod<void>('load', arguments);
     _loadedModels.add(model.runtimeKey);
+    _loadedEngines.add(model.engine);
   }
+
+  String _inputFor(ComicLocalTranslationModel model, String text) =>
+      model.engine == ComicLocalTranslationModel.hyMtGgufEngine
+          ? model.promptTemplate.replaceAll('{text}', text)
+          : text;
+
+  static MethodChannel _channelFor(ComicLocalTranslationModel model) =>
+      model.engine == ComicLocalTranslationModel.hyMtGgufEngine
+          ? _hyMtChannel
+          : _ctranslate2Channel;
 
   List<ComicLocalTranslationModel> _pipelineFor(
     ComicTranslationRequest request,
   ) {
     final source = _sourceLanguage(request);
-    final pipeline = models.pipelineFor(source, request.targetLanguage);
+    final pipeline = models.pipelineFor(
+      source,
+      request.targetLanguage,
+      modelId: selectedModelId,
+    );
     if (pipeline == null) {
       throw StateError(
         'No local translation pipeline for $source → ${request.targetLanguage}',
@@ -161,7 +203,11 @@ final class LocalCTranslate2ComicTranslationEngine
     }
     if (hangul > japanese) return 'ko';
     if (japanese > 0) return 'ja';
-    if (han > 0 && models.pipelineFor('ja', request.targetLanguage) != null) {
+    if (han > 0 && models.pipelineFor(
+      'ja',
+      request.targetLanguage,
+      modelId: selectedModelId,
+    ) != null) {
       return 'ja';
     }
     throw StateError('Local translation cannot infer the source language');
@@ -175,7 +221,13 @@ final class LocalCTranslate2ComicTranslationEngine
   @override
   Future<void> unload() async {
     if (_loadedModels.isEmpty) return;
-    await _channel.invokeMethod<void>('unload');
+    if (_loadedEngines.contains(ComicLocalTranslationModel.ctranslate2Engine)) {
+      await _ctranslate2Channel.invokeMethod<void>('unload');
+    }
+    if (_loadedEngines.contains(ComicLocalTranslationModel.hyMtGgufEngine)) {
+      await _hyMtChannel.invokeMethod<void>('unload');
+    }
     _loadedModels.clear();
+    _loadedEngines.clear();
   }
 }

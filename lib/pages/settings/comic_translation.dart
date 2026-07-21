@@ -11,6 +11,7 @@ class ComicTranslationBackendPage extends StatefulWidget {
 class _ComicTranslationBackendPageState
     extends State<ComicTranslationBackendPage> {
   late String backend;
+  late String localModelId;
   late String activeProfileId;
   late List<ComicTranslationRemoteProfile> profiles;
   late final TextEditingController profileName;
@@ -23,6 +24,7 @@ class _ComicTranslationBackendPageState
   @override
   void initState() {
     backend = appdata.settings['comicTranslationBackend'] as String;
+    localModelId = appdata.settings['comicTranslationLocalModel'] as String;
     profiles = (appdata.settings['comicTranslationRemoteProfiles'] as List)
         .map((value) => ComicTranslationRemoteProfile.fromJson(
               Map<String, dynamic>.from(value as Map),
@@ -177,6 +179,34 @@ class _ComicTranslationBackendPageState
                         '${model.displayName} · ${model.sourceLanguage} → '
                         '${model.targetLanguage}').join('\n')),
               ),
+              ListTile(
+                title: Text('Current local model'.tl),
+                trailing: DropdownButton<String>(
+                  value: localModels.modelById(localModelId) == null
+                      ? ''
+                      : localModelId,
+                  items: [
+                    DropdownMenuItem(
+                      value: '',
+                      child: Text('Automatic'.tl),
+                    ),
+                    for (final model in localModels.models)
+                      DropdownMenuItem(
+                        value: model.id,
+                        child: SizedBox(
+                          width: 180,
+                          child: Text(
+                            model.displayName,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                  ],
+                  onChanged: working || localModels.installing
+                      ? null
+                      : (value) => _selectLocalModel(value!),
+                ),
+              ),
               if (!App.isAndroid)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -193,9 +223,15 @@ class _ComicTranslationBackendPageState
                       if (progress.phase != ComicLocalModelPhase.idle) ...[
                         LinearProgressIndicator(value: progress.fraction),
                         Text(
-                          progress.phase == ComicLocalModelPhase.verifying
-                              ? 'Verifying model'.tl
-                              : '${'Copying model'.tl} · ${progress.fileName}',
+                          switch (progress.phase) {
+                            ComicLocalModelPhase.downloading =>
+                              '${'Downloading model'.tl} · '
+                                  '${_modelSize(progress.receivedBytes)} / '
+                                  '${_modelSize(progress.totalBytes)}',
+                            ComicLocalModelPhase.verifying =>
+                              'Verifying model'.tl,
+                            _ => '${'Copying model'.tl} · ${progress.fileName}',
+                          },
                           textAlign: TextAlign.center,
                           style: ts.s12,
                         ).paddingVertical(6),
@@ -212,6 +248,14 @@ class _ComicTranslationBackendPageState
                               icon: const Icon(Icons.delete_outline),
                               label: Text(model.displayName),
                             ),
+                          if (localModels.modelById(hyMt15TwoBitModel.id) == null)
+                            FilledButton.icon(
+                              onPressed: localModels.installing
+                                  ? null
+                                  : _installHyMt,
+                              icon: const Icon(Icons.download_outlined),
+                              label: Text('Download Hy-MT 2-bit'.tl),
+                            ),
                           FilledButton.icon(
                             onPressed: localModels.installing
                                 ? null
@@ -227,7 +271,7 @@ class _ComicTranslationBackendPageState
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Text(
-                  'Import an INT8 CTranslate2 sequence-to-sequence model. Direct multi-source models are preferred over pivot pipelines.'.tl,
+                  'Hy-MT1.5 1.8B 2-bit is the recommended local model. Legacy CTranslate2 sequence-to-sequence models can still be imported.'.tl,
                   style: ts.s12,
                 ),
               ),
@@ -235,10 +279,10 @@ class _ComicTranslationBackendPageState
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
                   onPressed: () => launchUrlString(
-                    'https://opennmt.net/CTranslate2/guides/transformers.html',
+                    'https://huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF',
                   ),
                   icon: const Icon(Icons.menu_book_outlined),
-                  label: Text('Local model conversion guide'.tl),
+                  label: Text('Local model guide'.tl),
                 ),
               ).paddingHorizontal(8),
               const Divider(),
@@ -251,7 +295,7 @@ class _ComicTranslationBackendPageState
                     if (App.isAndroid)
                       DropdownMenuItem(
                         value: 'local',
-                        child: Text('Local CTranslate2'.tl),
+                        child: Text('Local model'.tl),
                       ),
                     DropdownMenuItem(
                       value: 'openaiCompatible',
@@ -570,12 +614,25 @@ class _ComicTranslationBackendPageState
     if (mounted) setState(() {});
   }
 
+  Future<void> _selectLocalModel(String id) async {
+    localModelId = id;
+    appdata.settings['comicTranslationLocalModel'] = id;
+    await appdata.saveData();
+    ComicTranslationRuntime.instance.configure();
+    if (mounted) setState(() {});
+  }
+
   String? _validate() {
     if (backend == 'none') return null;
     if (backend == 'local') {
       if (!App.isAndroid) return 'Local translation requires Android'.tl;
       if (ComicLocalTranslationModelManager.instance.models.isEmpty) {
         return 'Import a local translation model first'.tl;
+      }
+      if (localModelId.isNotEmpty &&
+          ComicLocalTranslationModelManager.instance.modelById(localModelId) ==
+              null) {
+        return 'The selected local model is not installed'.tl;
       }
       return null;
     }
@@ -635,6 +692,31 @@ class _ComicTranslationBackendPageState
     try {
       final model = await ComicLocalTranslationModelManager.instance
           .installFromDirectory(directory.path);
+      localModelId = model.id;
+      appdata.settings['comicTranslationLocalModel'] = model.id;
+      await appdata.saveData();
+      ComicTranslationRuntime.instance.configure();
+      if (mounted) {
+        context.showMessage(
+          message: '${'Local translation model installed'.tl}: '
+              '${model.displayName}',
+        );
+      }
+    } catch (error) {
+      if (mounted) context.showMessage(message: error.toString());
+    } finally {
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _installHyMt() async {
+    setState(() {});
+    try {
+      final model = await ComicLocalTranslationModelManager.instance
+          .installHyMt15TwoBit();
+      localModelId = model.id;
+      appdata.settings['comicTranslationLocalModel'] = model.id;
+      await appdata.saveData();
       ComicTranslationRuntime.instance.configure();
       if (mounted) {
         context.showMessage(
@@ -657,12 +739,16 @@ class _ComicTranslationBackendPageState
       confirmText: 'Remove',
       onConfirm: () async {
         await ComicLocalTranslationModelManager.instance.remove(model.id);
+        if (localModelId == model.id) {
+          localModelId = '';
+          appdata.settings['comicTranslationLocalModel'] = '';
+        }
         if (backend == 'local' &&
             ComicLocalTranslationModelManager.instance.models.isEmpty) {
           backend = 'none';
           appdata.settings['comicTranslationBackend'] = backend;
-          await appdata.saveData();
         }
+        await appdata.saveData();
         ComicTranslationRuntime.instance.configure();
         if (mounted) setState(() {});
       },
@@ -675,18 +761,24 @@ class _ComicTranslationBackendPageState
       context.showMessage(message: error);
       return false;
     }
-    if (backend == 'local' &&
-        !await LocalCTranslate2ComicTranslationEngine.isNativeAvailable()) {
-      if (mounted) {
-        context.showMessage(
-          message: 'CTranslate2 runtime is not included in this build'.tl,
-        );
+    if (backend == 'local') {
+      final manager = ComicLocalTranslationModelManager.instance;
+      final selected = localModelId.isEmpty
+          ? manager.models.first
+          : manager.modelById(localModelId)!;
+      if (!await LocalComicTranslationEngine.isNativeAvailable(selected)) {
+        if (mounted) {
+          context.showMessage(
+            message: 'The selected local model runtime is not included in this build'.tl,
+          );
+        }
+        return false;
       }
-      return false;
     }
     setState(() => working = true);
     if (_isRemoteBackend) _updateActiveProfile();
     appdata.settings['comicTranslationBackend'] = backend;
+    appdata.settings['comicTranslationLocalModel'] = localModelId;
     appdata.settings['comicTranslationRemoteProfiles'] =
         profiles.map((profile) => profile.toJson()).toList();
     if (_isRemoteBackend) {

@@ -190,3 +190,34 @@ if(EXISTS "${CTRANSLATE2_ROOT}/include/ctranslate2/translator.h" AND
 else()
     message(STATUS "CTranslate2/SentencePiece Android packages not set; local translation disabled")
 endif()
+
+# Hy-MT1.5 2-bit uses the Q2_0c GGUF kernel from a pinned llama.cpp runtime.
+set(LLAMA_ROOT "$ENV{LLAMA_ROOT}" CACHE PATH "llama.cpp Android package")
+if(NOT LLAMA_ROOT)
+    set(LLAMA_ROOT
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.local/comic_translation_native/runtime/llama")
+endif()
+set(_llama_lib "${LLAMA_ROOT}/lib/${ANDROID_ABI}/libllama.so")
+set(_ggml_lib "${LLAMA_ROOT}/lib/${ANDROID_ABI}/libggml.so")
+set(_ggml_base_lib "${LLAMA_ROOT}/lib/${ANDROID_ABI}/libggml-base.so")
+set(_ggml_cpu_lib "${LLAMA_ROOT}/lib/${ANDROID_ABI}/libggml-cpu.so")
+if(EXISTS "${LLAMA_ROOT}/include/llama.h" AND
+   EXISTS "${LLAMA_ROOT}/include/ggml-backend.h" AND
+   EXISTS "${_llama_lib}" AND EXISTS "${_ggml_lib}" AND
+   EXISTS "${_ggml_base_lib}" AND EXISTS "${_ggml_cpu_lib}")
+    foreach(_library llama ggml ggml-base ggml-cpu)
+        string(REPLACE "-" "_" _target "${_library}")
+        add_library(${_target} SHARED IMPORTED)
+        set_target_properties(${_target} PROPERTIES IMPORTED_LOCATION
+            "${LLAMA_ROOT}/lib/${ANDROID_ABI}/lib${_library}.so")
+    endforeach()
+    add_library(venera_hymt SHARED comic_translation_hymt.cpp)
+    target_compile_features(venera_hymt PRIVATE cxx_std_17)
+    target_include_directories(venera_hymt PRIVATE "${LLAMA_ROOT}/include")
+    target_link_libraries(venera_hymt llama ggml ggml_base ggml_cpu log android)
+    set_target_properties(venera_hymt PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    )
+else()
+    message(STATUS "llama.cpp Android package not set; Hy-MT translation disabled")
+endif()

@@ -20,11 +20,14 @@ if (!$AndroidSdk -or !(Test-Path $AndroidSdk)) { throw "Android SDK not found; s
 $root = "$repo\.local\comic_translation_native"
 $ct2 = "$root\CTranslate2"
 $spm = "$root\sentencepiece"
+$llama = "$root\llama.cpp"
 $ct2Git = $ct2.Replace('\', '/')
 $spmGit = $spm.Replace('\', '/')
+$llamaGit = $llama.Replace('\', '/')
 $runtime = "$root\runtime"
 $ct2Commit = "9ff9c719e62b98fb8a993c1629833b0ddab447db"
 $spmCommit = "31646a467d2051eb904e0b45de3a73e91fe1c1e3"
+$llamaBranch = "pr-19357-sme2-int2"
 $cmake = "$AndroidSdk\cmake\3.22.1\bin\cmake.exe"
 $ninja = "$AndroidSdk\cmake\3.22.1\bin\ninja.exe"
 $toolchain = "$AndroidSdk\ndk\$NdkVersion\build\cmake\android.toolchain.cmake"
@@ -42,9 +45,17 @@ if (!(Test-Path "$ct2\.git")) {
 if (!(Test-Path "$spm\.git")) {
     Run { git clone https://github.com/google/sentencepiece.git $spm }
 }
+if (!(Test-Path "$llama\.git")) {
+    Run { git clone https://github.com/ggml-org/llama.cpp.git $llama }
+}
 Run { git -c "safe.directory=$ct2Git" -C $ct2 checkout --detach $ct2Commit }
 Run { git -c "safe.directory=$ct2Git" -C $ct2 submodule update --init --recursive }
 Run { git -c "safe.directory=$spmGit" -C $spm checkout --detach $spmCommit }
+Run { git -c "safe.directory=$llamaGit" -C $llama checkout --detach --force }
+Run { git -c "safe.directory=$llamaGit" -C $llama fetch origin "pull/19357/head:$llamaBranch" }
+Run { git -c "safe.directory=$llamaGit" -C $llama checkout --force $llamaBranch }
+$llamaCommit = (git -c "safe.directory=$llamaGit" -C $llama rev-parse HEAD).Trim()
+Run { git -c "safe.directory=$llamaGit" -C $llama diff --quiet }
 
 $threadPool = Get-Content -Raw "$ct2\src\thread_pool.cc"
 if (!$threadPool.Contains("defined(__ANDROID__)")) {
@@ -52,11 +63,14 @@ if (!$threadPool.Contains("defined(__ANDROID__)")) {
 }
 
 if (Test-Path $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force }
-New-Item -ItemType Directory -Force "$runtime\ctranslate2\include", "$runtime\sentencepiece\include", "$runtime\licenses" | Out-Null
+New-Item -ItemType Directory -Force "$runtime\ctranslate2\include", "$runtime\sentencepiece\include", "$runtime\llama\include", "$runtime\licenses" | Out-Null
 Copy-Item -Recurse "$ct2\include\*" "$runtime\ctranslate2\include\"
 Copy-Item "$spm\src\*.h" "$runtime\sentencepiece\include\"
 Copy-Item "$ct2\LICENSE" "$runtime\ctranslate2\LICENSE"
 Copy-Item "$spm\LICENSE" "$runtime\sentencepiece\LICENSE"
+Copy-Item "$llama\include\*.h" "$runtime\llama\include\"
+Copy-Item "$llama\ggml\include\*.h" "$runtime\llama\include\"
+Copy-Item "$llama\LICENSE" "$runtime\llama\LICENSE"
 Copy-Item "$ct2\third_party\ruy\LICENSE" "$runtime\licenses\ruy.txt"
 Copy-Item "$ct2\third_party\ruy\third_party\cpuinfo\LICENSE" "$runtime\licenses\cpuinfo.txt"
 Copy-Item "$ct2\third_party\spdlog\LICENSE" "$runtime\licenses\spdlog.txt"
@@ -66,6 +80,8 @@ Copy-Item "$spm\third_party\absl\LICENSE" "$runtime\licenses\abseil.txt"
 foreach ($abi in $Abis) {
     $ct2Build = "$root\build\ctranslate2\$abi"
     $spmBuild = "$root\build\sentencepiece\$abi"
+    $llamaBuild = "$root\build\llama\$abi"
+    if (Test-Path $llamaBuild) { Remove-Item -LiteralPath $llamaBuild -Recurse -Force }
     Run {
         & $cmake -S $ct2 -B $ct2Build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" `
             "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DANDROID_ABI=$abi" `
@@ -82,9 +98,27 @@ foreach ($abi in $Abis) {
             -DSPM_ENABLE_SHARED=ON -DSPM_BUILD_TEST=OFF -DSPM_ENABLE_TCMALLOC=OFF
     }
     Run { & $cmake --build $spmBuild --target sentencepiece -j $Jobs }
-    New-Item -ItemType Directory -Force "$runtime\ctranslate2\lib\$abi", "$runtime\sentencepiece\lib\$abi" | Out-Null
+    Run {
+        & $cmake -S $llama -B $llamaBuild -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" `
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DANDROID_ABI=$abi" `
+            -DANDROID_PLATFORM=android-24 -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_COMMON=OFF `
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF `
+            -DLLAMA_BUILD_APP=OFF -DGGML_OPENMP=OFF -DGGML_NATIVE=OFF `
+            "-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod" `
+            -DGGML_CPU_KLEIDIAI=ON -DGGML_LLAMAFILE=OFF
+    }
+    Run { & $cmake --build $llamaBuild --target llama -j $Jobs }
+    New-Item -ItemType Directory -Force "$runtime\ctranslate2\lib\$abi", "$runtime\sentencepiece\lib\$abi", "$runtime\llama\lib\$abi" | Out-Null
     Copy-Item "$ct2Build\libctranslate2.so" "$runtime\ctranslate2\lib\$abi\"
     Copy-Item "$spmBuild\src\libsentencepiece.so" "$runtime\sentencepiece\lib\$abi\"
+    foreach ($library in @("libllama.so", "libggml.so", "libggml-base.so", "libggml-cpu.so")) {
+        $built = Get-ChildItem $llamaBuild -Recurse -Filter $library | Select-Object -First 1
+        if (!$built) { throw "$library was not built" }
+        Copy-Item $built.FullName "$runtime\llama\lib\$abi\$library"
+        Run { & $strip "$runtime\llama\lib\$abi\$library" }
+    }
     Run { & $strip "$runtime\ctranslate2\lib\$abi\libctranslate2.so" }
     Run { & $strip "$runtime\sentencepiece\lib\$abi\libsentencepiece.so" }
 }
@@ -92,6 +126,7 @@ foreach ($abi in $Abis) {
 @{
     ctranslate2 = @{ version = "4.7.2"; commit = $ct2Commit }
     sentencepiece = @{ version = "0.2.1"; commit = $spmCommit }
+    llama = @{ commit = $llamaCommit; branch = $llamaBranch; feature = "official Q2_0c/KleidiAI DotProd" }
     abis = $Abis
 } | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 "$runtime\versions.json"
 Write-Host "Runtime package: $runtime"
