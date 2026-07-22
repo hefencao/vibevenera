@@ -34,7 +34,7 @@ schema v5 支持两个 engine。Hy-MT GGUF：
   "id": "hy-mt1.5-1.8b-2bit",
   "sourceLanguages": ["ja", "ko"],
   "targetLanguage": "zh-CN",
-  "promptTemplate": "Translate the following segment into Chinese, without additional explanation：{text}",
+  "promptTemplate": "将以下文本翻译为{target_language}，注意只需要输出翻译后的结果，不要额外解释：\\n\\n{text}",
   "contextSize": 1024,
   "maxOutputTokens": 64,
   "files": {"model.gguf": "<sha256>"}
@@ -100,13 +100,19 @@ python tool/comic_translation/convert_marian.py `
 
 ## 5. Android native runtime
 
-运行库由固定版本源码构建：
+运行库由固定版本源码构建。WSL/Linux 使用：
+
+```bash
+tool/comic_translation/build_android_runtime.sh --abis arm64-v8a
+```
+
+原生 Windows 仍可使用：
 
 ```powershell
 tool/comic_translation/build_android_runtime.ps1 -Abis arm64-v8a
 ```
 
-脚本执行官方的 `git fetch origin pull/19357/head:pr-19357-sme2-int2` 与 checkout，然后构建
-CTranslate2/SentencePiece 和未修改的 llama.cpp，输出到
-`.local/comic_translation_native/runtime`，CMake 自动发现。未提供某个运行库时仍可构建并使用其他后端；
-选择对应本地模型时 `isAvailable` 会明确失败，不会回退网络 API。
+脚本取得固定的 llama.cpp PR #19357 提交，然后构建 CTranslate2/SentencePiece 和未修改的
+llama.cpp，输出到 `.local/comic_translation_native/runtime`。Release 构建缺少这些运行库时会直接失败，
+避免生成不含本地翻译能力的安装包。第三方源码、项目补丁、依赖提交和 APK 检查方法见
+[Android native 依赖与可复现构建](ANDROID_NATIVE_DEPENDENCIES.md)。

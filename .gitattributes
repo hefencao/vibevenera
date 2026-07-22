@@ -1,0 +1,7 @@
+# Executable scripts must remain usable when the repository is checked out by
+# Git configured with core.autocrlf=true (common after migrating to WSL).
+*.sh text eol=lf
+
+# Keep native Windows launch scripts in their conventional working-tree form.
+*.bat text eol=crlf
+*.ps1 text eol=crlf

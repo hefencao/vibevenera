@@ -97,8 +97,8 @@ def build_hymt(output_root: Path, cache: Path) -> Path:
         "targetPrefixTokens": [],
         "beamSize": 1,
         "promptTemplate": (
-            "Translate the following segment into Chinese, "
-            "without additional explanation：{text}"
+            "将以下文本翻译为{target_language}，"
+            "注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
         ),
         "contextSize": 1024,
         "maxOutputTokens": 64,

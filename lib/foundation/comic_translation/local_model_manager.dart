@@ -57,14 +57,16 @@ final class ComicLocalTranslationModel {
   ) {
     final manifestVersion = json['schemaVersion'] as int;
     final engine = json['engine'] as String;
-    if (manifestVersion < 1 || manifestVersion > schemaVersion ||
-        engine != ctranslate2Engine && engine != hyMtGgufEngine &&
-        engine != _legacyEngine) {
+    if (manifestVersion < 1 ||
+        manifestVersion > schemaVersion ||
+        engine != ctranslate2Engine &&
+            engine != hyMtGgufEngine &&
+            engine != _legacyEngine) {
       throw const FormatException('Unsupported local translation model format');
     }
-    final files = Map<String, dynamic>.from(json['files'] as Map).map(
-      (name, digest) => MapEntry(name, digest as String),
-    );
+    final files = Map<String, dynamic>.from(
+      json['files'] as Map,
+    ).map((name, digest) => MapEntry(name, digest as String));
     final model = ComicLocalTranslationModel(
       engine: engine == _legacyEngine ? ctranslate2Engine : engine,
       id: json['id'] as String,
@@ -72,15 +74,19 @@ final class ComicLocalTranslationModel {
       displayName: json['displayName'] as String,
       sourceLanguages: manifestVersion >= 4
           ? (json['sourceLanguages'] as List)
-              .cast<String>().map(_language).toList()
+                .cast<String>()
+                .map(_language)
+                .toList()
           : [_language(json['sourceLanguage'] as String)],
       targetLanguage: _language(json['targetLanguage'] as String),
       license: json['license'] as String,
       sourcePrefixTokens: manifestVersion >= 3
           ? (json['sourcePrefixTokens'] as List).cast<String>()
           : (json['sourcePrefix'] as String? ?? '')
-              .trim().split(RegExp(r'\s+')).where((token) => token.isNotEmpty)
-              .toList(),
+                .trim()
+                .split(RegExp(r'\s+'))
+                .where((token) => token.isNotEmpty)
+                .toList(),
       sourceEosToken: manifestVersion == 1
           ? '</s>'
           : json['sourceEosToken'] as String,
@@ -91,9 +97,7 @@ final class ComicLocalTranslationModel {
       promptTemplate: manifestVersion >= 5
           ? json['promptTemplate'] as String? ?? ''
           : '',
-      contextSize: manifestVersion >= 5
-          ? json['contextSize'] as int? ?? 0
-          : 0,
+      contextSize: manifestVersion >= 5 ? json['contextSize'] as int? ?? 0 : 0,
       maxOutputTokens: manifestVersion >= 5
           ? json['maxOutputTokens'] as int? ?? 0
           : 0,
@@ -112,18 +116,22 @@ final class ComicLocalTranslationModel {
   String get runtimeKey {
     final entries = files.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key));
-    final fingerprint = sha256.convert(utf8.encode(jsonEncode({
-      'schema': schemaVersion,
-      'engine': engine,
-      'prefixTokens': sourcePrefixTokens,
-      'eos': sourceEosToken,
-      'targetPrefixTokens': targetPrefixTokens,
-      'beamSize': beamSize,
-      'promptTemplate': promptTemplate,
-      'contextSize': contextSize,
-      'maxOutputTokens': maxOutputTokens,
-      'files': {for (final entry in entries) entry.key: entry.value},
-    })));
+    final fingerprint = sha256.convert(
+      utf8.encode(
+        jsonEncode({
+          'schema': schemaVersion,
+          'engine': engine,
+          'prefixTokens': sourcePrefixTokens,
+          'eos': sourceEosToken,
+          'targetPrefixTokens': targetPrefixTokens,
+          'beamSize': beamSize,
+          'promptTemplate': promptTemplate,
+          'contextSize': contextSize,
+          'maxOutputTokens': maxOutputTokens,
+          'files': {for (final entry in entries) entry.key: entry.value},
+        }),
+      ),
+    );
     return '$id:$version:$fingerprint';
   }
 
@@ -149,13 +157,18 @@ final class ComicLocalTranslationModel {
 
   void _validateManifest() {
     if (!RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$').hasMatch(id) ||
-        id.isEmpty || version.isEmpty || displayName.isEmpty || license.isEmpty ||
+        id.isEmpty ||
+        version.isEmpty ||
+        displayName.isEmpty ||
+        license.isEmpty ||
         sourceLanguages.isEmpty ||
         engine == ctranslate2Engine &&
             (sourceEosToken.isEmpty || beamSize < 1 || beamSize > 16) ||
         engine == hyMtGgufEngine &&
-            (!promptTemplate.contains('{text}') || contextSize < 256 ||
-                maxOutputTokens < 1 || maxOutputTokens >= contextSize)) {
+            (!promptTemplate.contains('{text}') ||
+                contextSize < 256 ||
+                maxOutputTokens < 1 ||
+                maxOutputTokens >= contextSize)) {
       throw const FormatException('Invalid local translation model metadata');
     }
     final required = engine == hyMtGgufEngine
@@ -165,7 +178,8 @@ final class ComicLocalTranslationModel {
       throw const FormatException('Local translation model is incomplete');
     }
     final shared = files.containsKey('shared_vocabulary.json');
-    final separate = files.containsKey('source_vocabulary.json') &&
+    final separate =
+        files.containsKey('source_vocabulary.json') &&
         files.containsKey('target_vocabulary.json');
     if (engine == ctranslate2Engine && !shared && !separate) {
       throw const FormatException('Local translation vocabulary is missing');
@@ -194,10 +208,12 @@ const hyMt15TwoBitModel = (
   fileName: 'model.gguf',
   bytes: 600535360,
   sha256: '46e587d917fc4f6f5bda602f10c4a53da8840240355824bcc0e227559c9cba3e',
-  url: 'https://huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF/resolve/'
+  url:
+      'https://huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF/resolve/'
       'ef3a410f443c23a155e563814defc5a933a3a35c/'
       'Hy-MT1.5-1.8B-2bit.gguf',
-  sourceUrl: 'https://huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF/'
+  sourceUrl:
+      'https://huggingface.co/AngelSlim/Hy-MT1.5-1.8B-2bit-GGUF/'
       'tree/ef3a410f443c23a155e563814defc5a933a3a35c',
 );
 
@@ -222,7 +238,9 @@ final class ComicLocalModelProgress {
 
   double get fraction => totalBytes > 0
       ? receivedBytes / totalBytes
-      : totalFiles == 0 ? 0 : completedFiles / totalFiles;
+      : totalFiles == 0
+      ? 0
+      : completedFiles / totalFiles;
 }
 
 final class ComicLocalTranslationModelManager {
@@ -292,9 +310,13 @@ final class ComicLocalTranslationModelManager {
   ComicLocalTranslationModel? modelFor(String source, String target) {
     final normalizedSource = _normalizeSource(source);
     final normalizedTarget = _normalizeTarget(target);
-    return _models.where((model) =>
-        model.sourceLanguages.contains(normalizedSource) &&
-        model.targetLanguage == normalizedTarget).firstOrNull;
+    return _models
+        .where(
+          (model) =>
+              model.sourceLanguages.contains(normalizedSource) &&
+              model.targetLanguage == normalizedTarget,
+        )
+        .firstOrNull;
   }
 
   List<ComicLocalTranslationModel>? pipelineFor(
@@ -323,7 +345,8 @@ final class ComicLocalTranslationModelManager {
 
   Future<ComicLocalTranslationModel> installFromDirectory(String sourcePath) {
     final task = _installing;
-    if (task != null) throw StateError('Local model installation is in progress');
+    if (task != null)
+      throw StateError('Local model installation is in progress');
     final future = _install(sourcePath).whenComplete(() {
       _installing = null;
       progress.value = const ComicLocalModelProgress();
@@ -334,7 +357,8 @@ final class ComicLocalTranslationModelManager {
 
   Future<ComicLocalTranslationModel> installHyMt15TwoBit() {
     final task = _installing;
-    if (task != null) throw StateError('Local model installation is in progress');
+    if (task != null)
+      throw StateError('Local model installation is in progress');
     final future = _installHyMt15TwoBit().whenComplete(() {
       _installing = null;
       progress.value = const ComicLocalModelProgress();
@@ -352,7 +376,8 @@ final class ComicLocalTranslationModelManager {
       '${downloadDirectory.path}${Platform.pathSeparator}'
       '${hyMt15TwoBitModel.id}-${hyMt15TwoBitModel.version}.part',
     );
-    final completeLength = await partial.exists() &&
+    final completeLength =
+        await partial.exists() &&
         await partial.length() == hyMt15TwoBitModel.bytes;
     if (completeLength) {
       progress.value = ComicLocalModelProgress(
@@ -400,8 +425,9 @@ final class ComicLocalTranslationModelManager {
       'sourceEosToken': '',
       'targetPrefixTokens': const <String>[],
       'beamSize': 1,
-      'promptTemplate': 'Translate the following segment into Chinese, '
-          'without additional explanation：{text}',
+      'promptTemplate':
+          '将以下文本翻译为{target_language}，'
+          '注意只需要输出翻译后的结果，不要额外解释：\n\n{text}',
       'contextSize': 1024,
       'maxOutputTokens': 64,
       'sourceUrl': hyMt15TwoBitModel.sourceUrl,
@@ -416,9 +442,13 @@ final class ComicLocalTranslationModelManager {
     await partial.rename(
       '${staging.path}${Platform.pathSeparator}${hyMt15TwoBitModel.fileName}',
     );
-    final staged = ComicLocalTranslationModel.fromManifest(manifest, staging.path);
-    await File('${staging.path}${Platform.pathSeparator}installation.json')
-        .writeAsString(jsonEncode(staged.toManifest()), flush: true);
+    final staged = ComicLocalTranslationModel.fromManifest(
+      manifest,
+      staging.path,
+    );
+    await File(
+      '${staging.path}${Platform.pathSeparator}installation.json',
+    ).writeAsString(jsonEncode(staged.toManifest()), flush: true);
     await _promote(staging, staged.id);
     return _models.firstWhere((model) => model.id == staged.id);
   }
@@ -439,7 +469,8 @@ final class ComicLocalTranslationModelManager {
           headers: {if (offset > 0) 'Range': 'bytes=$offset-'},
         ),
       );
-      final append = offset > 0 && response.statusCode == HttpStatus.partialContent;
+      final append =
+          offset > 0 && response.statusCode == HttpStatus.partialContent;
       if (offset > 0 && !append) offset = 0;
       if (append) {
         final range = response.headers.value('content-range');
@@ -490,8 +521,9 @@ final class ComicLocalTranslationModelManager {
   Future<bool> _verifiedFile(File file, int bytes, String expected) async {
     if (!await file.exists() || await file.length() != bytes) return false;
     final path = file.path;
-    final digest = await Isolate.run(() async =>
-        (await sha256.bind(File(path).openRead()).first).toString());
+    final digest = await Isolate.run(
+      () async => (await sha256.bind(File(path).openRead()).first).toString(),
+    );
     return digest == expected;
   }
 
@@ -506,7 +538,10 @@ final class ComicLocalTranslationModelManager {
     final manifest = Map<String, dynamic>.from(
       jsonDecode(await manifestFile.readAsString()) as Map,
     );
-    final parsed = ComicLocalTranslationModel.fromManifest(manifest, source.path);
+    final parsed = ComicLocalTranslationModel.fromManifest(
+      manifest,
+      source.path,
+    );
     final staging = Directory(
       '${_root.path}${Platform.pathSeparator}.${parsed.id}.installing',
     );
@@ -527,18 +562,20 @@ final class ComicLocalTranslationModelManager {
       await input.copy('${staging.path}${Platform.pathSeparator}${entry.key}');
       completed++;
     }
-    final staged = ComicLocalTranslationModel.fromManifest(manifest, staging.path);
+    final staged = ComicLocalTranslationModel.fromManifest(
+      manifest,
+      staging.path,
+    );
     await _verify(staged);
-    await File('${staging.path}${Platform.pathSeparator}installation.json')
-        .writeAsString(jsonEncode(staged.toManifest()), flush: true);
+    await File(
+      '${staging.path}${Platform.pathSeparator}installation.json',
+    ).writeAsString(jsonEncode(staged.toManifest()), flush: true);
     await _promote(staging, parsed.id);
     return _models.firstWhere((model) => model.id == parsed.id);
   }
 
   Future<void> _promote(Directory staging, String id) async {
-    final target = Directory(
-      '${_root.path}${Platform.pathSeparator}$id',
-    );
+    final target = Directory('${_root.path}${Platform.pathSeparator}$id');
     final backup = Directory('${target.path}.old');
     if (await backup.exists()) await backup.delete(recursive: true);
     if (await target.exists()) await target.rename(backup.path);
@@ -562,8 +599,9 @@ final class ComicLocalTranslationModelManager {
         totalFiles: model.files.length,
       );
       final path = model.filePath(entry.key);
-      final digest = await Isolate.run(() async =>
-          (await sha256.bind(File(path).openRead()).first).toString());
+      final digest = await Isolate.run(
+        () async => (await sha256.bind(File(path).openRead()).first).toString(),
+      );
       if (digest != entry.value) {
         throw StateError('SHA-256 mismatch: ${entry.key}');
       }
@@ -583,7 +621,8 @@ final class ComicLocalTranslationModelManager {
   Future<void> _scan() async {
     final models = <ComicLocalTranslationModel>[];
     await for (final entry in _root.list()) {
-      if (entry is! Directory || entry.path.endsWith('.old') ||
+      if (entry is! Directory ||
+          entry.path.endsWith('.old') ||
           entry.path.endsWith('.installing')) {
         continue;
       }
@@ -604,7 +643,10 @@ final class ComicLocalTranslationModelManager {
         continue;
       }
       if (json['schemaVersion'] != ComicLocalTranslationModel.schemaVersion) {
-        await manifest.writeAsString(jsonEncode(model.toManifest()), flush: true);
+        await manifest.writeAsString(
+          jsonEncode(model.toManifest()),
+          flush: true,
+        );
       }
       for (final name in model.files.keys) {
         if (!await File(model.filePath(name)).exists()) {

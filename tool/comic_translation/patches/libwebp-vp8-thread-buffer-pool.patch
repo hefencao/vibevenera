@@ -1,0 +1,120 @@
+diff --git a/src/dec/frame_dec.c b/src/dec/frame_dec.c
+index 136ba5a3..064256ae 100644
+--- a/src/dec/frame_dec.c
++++ b/src/dec/frame_dec.c
+@@ -727,13 +727,20 @@ static int AllocateMemory(VP8Decoder* const dec) {
+   if (needed > dec->mem_size) {
+     WebPSafeFree(dec->mem);
+     dec->mem_size = 0;
+-    dec->mem = WebPSafeMalloc(needed, sizeof(uint8_t));
+-    if (dec->mem == NULL) {
+-      return VP8SetError(dec, VP8_STATUS_OUT_OF_MEMORY,
+-                         "no memory during frame initialization.");
++    // Try per-thread pool first (reuses previous frame's working buffer)
++    size_t pool_size = 0;
++    dec->mem = (uint8_t*)VP8MemPoolAcquire((size_t)needed, &pool_size);
++    if (dec->mem != NULL) {
++      dec->mem_size = pool_size;
++    } else {
++      dec->mem = (uint8_t*)WebPSafeMalloc((size_t)needed, sizeof(uint8_t));
++      if (dec->mem == NULL) {
++        return VP8SetError(dec, VP8_STATUS_OUT_OF_MEMORY,
++                           "no memory during frame initialization.");
++      }
++      // down-cast is ok, thanks to WebPSafeMalloc() above.
++      dec->mem_size = (size_t)needed;
+     }
+-    // down-cast is ok, thanks to WebPSafeMalloc() above.
+-    dec->mem_size = (size_t)needed;
+   }
+ 
+   mem = (uint8_t*)dec->mem;
+diff --git a/src/dec/vp8_dec.c b/src/dec/vp8_dec.c
+index 26831042..d7868009 100644
+--- a/src/dec/vp8_dec.c
++++ b/src/dec/vp8_dec.c
+@@ -34,6 +34,56 @@
+ 
+ WEBP_ASSUME_UNSAFE_INDEXABLE_ABI
+ 
++//------------------------------------------------------------------------------
++// Per-thread working buffer pool (~10-20MB).
++// VP8Decoder struct is still calloc'd fresh, so all state remains clean.
++// Only the large dec->mem buffer is recycled across frames.
++// Uses pthread TLS (NOT __thread) because __thread in dlopen'd .so
++// on Android is broken because the dynamic linker doesn't init TLS blocks.
++//------------------------------------------------------------------------------
++#include <pthread.h>
++
++static pthread_key_t g_mem_pool_key;
++static pthread_once_t g_mem_pool_once = PTHREAD_ONCE_INIT;
++
++typedef struct { uint8_t* ptr; size_t size; } MemPoolEntry;
++
++static void MemPoolKeyInit(void) {
++  pthread_key_create(&g_mem_pool_key, free); // free pooled buffer on thread exit
++}
++
++static MemPoolEntry* MemPoolGet(void) {
++  pthread_once(&g_mem_pool_once, MemPoolKeyInit);
++  MemPoolEntry* e = (MemPoolEntry*)pthread_getspecific(g_mem_pool_key);
++  if (e == NULL) {
++    e = (MemPoolEntry*)calloc(1, sizeof(MemPoolEntry));
++    pthread_setspecific(g_mem_pool_key, e);
++  }
++  return e;
++}
++
++void VP8MemPoolReturn(void* mem, size_t size) {
++  if (mem == NULL || size == 0) return;
++  MemPoolEntry* e = MemPoolGet();
++  if (e->ptr != NULL) free(e->ptr);
++  e->ptr = (uint8_t*)mem;
++  e->size = size;
++}
++
++void* VP8MemPoolAcquire(size_t needed, size_t* out_size) {
++  MemPoolEntry* e = MemPoolGet();
++  if (e->ptr != NULL && e->size >= needed) {
++    void* mem = e->ptr;
++    *out_size = e->size;
++    e->ptr = NULL;
++    e->size = 0;
++    memset(mem, 0, *out_size);
++    return mem;
++  }
++  if (e->ptr != NULL) { free(e->ptr); e->ptr = NULL; e->size = 0; }
++  return NULL;
++}
++
+ //------------------------------------------------------------------------------
+ 
+ int WebPGetDecoderVersion(void) {
+@@ -734,7 +784,7 @@ void VP8Clear(VP8Decoder* const dec) {
+   }
+   WebPGetWorkerInterface()->End(&dec->worker);
+   WebPDeallocateAlphaMemory(dec);
+-  WebPSafeFree(dec->mem);
++  VP8MemPoolReturn(dec->mem, dec->mem_size);  // return to pool, not free
+   dec->mem = NULL;
+   dec->mem_size = 0;
+   WEBP_UNSAFE_MEMSET(&dec->br, 0, sizeof(dec->br));
+diff --git a/src/dec/vp8i_dec.h b/src/dec/vp8i_dec.h
+index ec074ed1..65b6a6e6 100644
+--- a/src/dec/vp8i_dec.h
++++ b/src/dec/vp8i_dec.h
+@@ -273,6 +273,14 @@ struct VP8Decoder {
+   int alpha_dithering;  // derived from decoding options (0=off, 100=full)
+ };
+ 
++//------------------------------------------------------------------------------
++// Per-thread VP8Decoder working buffer pool.
++// Avoids per-frame 10-20MB malloc/free by reusing the working buffer
++// across successive WebPDecode calls within the same thread.
++// VP8Clear returns the buffer; AllocateMemory retrieves it.
++void VP8MemPoolReturn(void* mem, size_t size);
++void* VP8MemPoolAcquire(size_t needed, size_t* out_size);
++
+ //------------------------------------------------------------------------------
+ // internal functions. Not public.
+ 

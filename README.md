@@ -37,6 +37,9 @@ See [Comic Source](doc/comic_source.md)
 
 The Chinese translation of the manga tags is from this project.
 
+Android native dependencies are kept outside the project source tree and built
+reproducibly; see [Android native dependencies](docs/ANDROID_NATIVE_DEPENDENCIES.md).
+
 ## Headless Mode
 See [Headless Doc](doc/headless_doc.md)
 

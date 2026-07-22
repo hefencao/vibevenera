@@ -32,7 +32,9 @@ Future<Directory> modelDirectory(
     'shared_vocabulary.json',
   ]) {
     final bytes = utf8.encode('$id-$name-content');
-    await File('${source.path}${Platform.pathSeparator}$name').writeAsBytes(bytes);
+    await File(
+      '${source.path}${Platform.pathSeparator}$name',
+    ).writeAsBytes(bytes);
     files[name] = sha256.convert(bytes).toString();
   }
   final manifest = {
@@ -56,12 +58,12 @@ Future<Directory> modelDirectory(
   if (schemaVersion >= 3) {
     manifest['sourcePrefixTokens'] = sourcePrefixTokens;
   } else {
-    manifest['sourcePrefix'] = '${sourcePrefixTokens.join(' ')} '
-        .trimLeft();
+    manifest['sourcePrefix'] = '${sourcePrefixTokens.join(' ')} '.trimLeft();
   }
   if (schemaVersion >= 2) manifest['sourceEosToken'] = '</s>';
-  await File('${source.path}${Platform.pathSeparator}manifest.json')
-      .writeAsString(jsonEncode(manifest));
+  await File(
+    '${source.path}${Platform.pathSeparator}manifest.json',
+  ).writeAsString(jsonEncode(manifest));
   return source;
 }
 
@@ -69,28 +71,32 @@ Future<Directory> hyModelDirectory(Directory root) async {
   final source = Directory('${root.path}${Platform.pathSeparator}hy-mt');
   await source.create();
   final bytes = utf8.encode('fake-gguf');
-  await File('${source.path}${Platform.pathSeparator}model.gguf')
-      .writeAsBytes(bytes);
-  await File('${source.path}${Platform.pathSeparator}manifest.json')
-      .writeAsString(jsonEncode({
-        'schemaVersion': ComicLocalTranslationModel.schemaVersion,
-        'engine': ComicLocalTranslationModel.hyMtGgufEngine,
-        'id': 'hy-mt',
-        'version': '1',
-        'displayName': 'Hy-MT',
-        'sourceLanguages': ['ja', 'ko'],
-        'targetLanguage': 'zh-CN',
-        'license': 'test',
-        'sourcePrefixTokens': <String>[],
-        'sourceEosToken': '',
-        'targetPrefixTokens': <String>[],
-        'beamSize': 1,
-        'promptTemplate': 'Translate to Chinese:\n{text}',
-        'contextSize': 1024,
-        'maxOutputTokens': 256,
-        'sourceUrl': 'https://example.com/hy-mt',
-        'files': {'model.gguf': sha256.convert(bytes).toString()},
-      }));
+  await File(
+    '${source.path}${Platform.pathSeparator}model.gguf',
+  ).writeAsBytes(bytes);
+  await File(
+    '${source.path}${Platform.pathSeparator}manifest.json',
+  ).writeAsString(
+    jsonEncode({
+      'schemaVersion': ComicLocalTranslationModel.schemaVersion,
+      'engine': ComicLocalTranslationModel.hyMtGgufEngine,
+      'id': 'hy-mt',
+      'version': '1',
+      'displayName': 'Hy-MT',
+      'sourceLanguages': ['ja', 'ko'],
+      'targetLanguage': 'zh-CN',
+      'license': 'test',
+      'sourcePrefixTokens': <String>[],
+      'sourceEosToken': '',
+      'targetPrefixTokens': <String>[],
+      'beamSize': 1,
+      'promptTemplate': 'Translate to Chinese:\n{text}',
+      'contextSize': 1024,
+      'maxOutputTokens': 256,
+      'sourceUrl': 'https://example.com/hy-mt',
+      'files': {'model.gguf': sha256.convert(bytes).toString()},
+    }),
+  );
   return source;
 }
 
@@ -118,16 +124,17 @@ void main() {
         )).path,
       );
     }
+    expect(manager.pipelineFor('ja-JP', 'zh-TW')?.map((model) => model.id), [
+      'ja-en',
+      'en-zh',
+    ]);
+    expect(manager.pipelineFor('ko-KR', 'zh-CN')?.map((model) => model.id), [
+      'ko-en',
+      'en-zh',
+    ]);
     expect(
-      manager.pipelineFor('ja-JP', 'zh-TW')?.map((model) => model.id),
-      ['ja-en', 'en-zh'],
-    );
-    expect(
-      manager.pipelineFor('ko-KR', 'zh-CN')?.map((model) => model.id),
-      ['ko-en', 'en-zh'],
-    );
-    expect(
-      manager.pipelineFor('ja', 'zh-CN', modelId: 'ja-en')
+      manager
+          .pipelineFor('ja', 'zh-CN', modelId: 'ja-en')
           ?.map((model) => model.id),
       ['ja-en', 'en-zh'],
     );
@@ -156,64 +163,73 @@ void main() {
           expect(arguments['texts'], ['I will see you tomorrow.']);
           return ['明天见'];
         });
-    addTearDown(() => TestDefaultBinaryMessengerBinding
-        .instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null));
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
     final engine = LocalComicTranslationEngine(manager);
-    final result = await engine.translate(ComicTranslationRequest(
-      ocr: const ComicOcrArtifact(
-        contentDigest: 'test',
-        engineId: 'test',
-        modelVersion: '1',
-        sourceLanguage: 'ja',
-        imageWidth: 1,
-        imageHeight: 1,
-        mediaKind: ComicTranslationMediaKind.staticImage,
-        animatedMode: AnimatedTranslationMode.posterFrame,
-        regions: [ComicOcrRegion(
-          id: 'r0',
-          polygon: [
-            NormalizedPoint(0.1, 0.1),
-            NormalizedPoint(0.2, 0.1),
-            NormalizedPoint(0.2, 0.4),
-            NormalizedPoint(0.1, 0.4),
+    final result = await engine.translate(
+      ComicTranslationRequest(
+        ocr: const ComicOcrArtifact(
+          contentDigest: 'test',
+          engineId: 'test',
+          modelVersion: '1',
+          sourceLanguage: 'ja',
+          imageWidth: 1,
+          imageHeight: 1,
+          mediaKind: ComicTranslationMediaKind.staticImage,
+          animatedMode: AnimatedTranslationMode.posterFrame,
+          regions: [
+            ComicOcrRegion(
+              id: 'r0',
+              polygon: [
+                NormalizedPoint(0.1, 0.1),
+                NormalizedPoint(0.2, 0.1),
+                NormalizedPoint(0.2, 0.4),
+                NormalizedPoint(0.1, 0.4),
+              ],
+              text: 'また明日',
+              confidence: 1,
+              orientation: ComicTextOrientation.vertical,
+              kind: ComicTextKind.dialogue,
+              readingOrder: 0,
+              sourceMaskPolygons: [],
+              bubbleGroupId: 0,
+            ),
+            ComicOcrRegion(
+              id: 'r1',
+              polygon: [
+                NormalizedPoint(0.21, 0.1),
+                NormalizedPoint(0.31, 0.1),
+                NormalizedPoint(0.31, 0.4),
+                NormalizedPoint(0.21, 0.4),
+              ],
+              text: 'よろしくね',
+              confidence: 1,
+              orientation: ComicTextOrientation.vertical,
+              kind: ComicTextKind.dialogue,
+              readingOrder: 1,
+              sourceMaskPolygons: [],
+              bubbleGroupId: 0,
+            ),
           ],
-          text: 'また明日',
-          confidence: 1,
-          orientation: ComicTextOrientation.vertical,
-          kind: ComicTextKind.dialogue,
-          readingOrder: 0,
-          sourceMaskPolygons: [],
-          bubbleGroupId: 0,
-        ), ComicOcrRegion(
-          id: 'r1',
-          polygon: [
-            NormalizedPoint(0.21, 0.1),
-            NormalizedPoint(0.31, 0.1),
-            NormalizedPoint(0.31, 0.4),
-            NormalizedPoint(0.21, 0.4),
-          ],
-          text: 'よろしくね',
-          confidence: 1,
-          orientation: ComicTextOrientation.vertical,
-          kind: ComicTextKind.dialogue,
-          readingOrder: 1,
-          sourceMaskPolygons: [],
-          bubbleGroupId: 0,
-        )],
+        ),
+        targetLanguage: 'zh-CN',
+        previousPages: const [],
       ),
-      targetLanguage: 'zh-CN',
-      previousPages: const [],
-    ));
+    );
     expect(result.translations.values.single, ['明天见']);
     expect(engine.lastRawResponses, hasLength(2));
     expect(engine.lastRawResponses.first, contains('また明日'));
     expect(engine.lastRawResponses.first, contains('よろしくね'));
     expect(calls.where((call) => call.method == 'load'), hasLength(2));
     expect(calls.where((call) => call.method == 'translate'), hasLength(2));
-    final chineseLoad = calls.where((call) => call.method == 'load')
+    final chineseLoad = calls
+        .where((call) => call.method == 'load')
         .map((call) => Map<String, dynamic>.from(call.arguments as Map))
-        .firstWhere((arguments) =>
-            (arguments['modelKey'] as String).startsWith('en-zh:'));
+        .firstWhere(
+          (arguments) => (arguments['modelKey'] as String).startsWith('en-zh:'),
+        );
     expect(chineseLoad['sourcePrefixTokens'], ['>>cmn_Hans<<']);
     expect(chineseLoad['targetPrefixTokens'], isEmpty);
     expect(chineseLoad['beamSize'], 4);
@@ -238,40 +254,47 @@ void main() {
       'ja-ko-zh-model.bin-content',
     );
 
-    final partial = await LocalComicTranslationEngine(
-      manager,
-      selectedModelId: direct.id,
-    ).translate(ComicTranslationRequest(
-      ocr: const ComicOcrArtifact(
-        contentDigest: 'empty-unit',
-        engineId: 'test',
-        modelVersion: '1',
-        sourceLanguage: 'ja',
-        imageWidth: 1,
-        imageHeight: 1,
-        mediaKind: ComicTranslationMediaKind.staticImage,
-        animatedMode: AnimatedTranslationMode.posterFrame,
-        regions: [],
-      ),
-      units: const [
-        ComicTranslationUnit(
-          id: 'r0',
-          regionIds: ['r0'],
-          sourceLines: ['原文一'],
-          orientation: ComicTextOrientation.vertical,
-          bandRegionIds: [['r0']],
-        ),
-        ComicTranslationUnit(
-          id: 'r1',
-          regionIds: ['r1'],
-          sourceLines: ['原文二'],
-          orientation: ComicTextOrientation.vertical,
-          bandRegionIds: [['r1']],
-        ),
-      ],
-      targetLanguage: 'zh-CN',
-      previousPages: const [],
-    ));
+    final partial =
+        await LocalComicTranslationEngine(
+          manager,
+          selectedModelId: direct.id,
+        ).translate(
+          ComicTranslationRequest(
+            ocr: const ComicOcrArtifact(
+              contentDigest: 'empty-unit',
+              engineId: 'test',
+              modelVersion: '1',
+              sourceLanguage: 'ja',
+              imageWidth: 1,
+              imageHeight: 1,
+              mediaKind: ComicTranslationMediaKind.staticImage,
+              animatedMode: AnimatedTranslationMode.posterFrame,
+              regions: [],
+            ),
+            units: const [
+              ComicTranslationUnit(
+                id: 'r0',
+                regionIds: ['r0'],
+                sourceLines: ['原文一'],
+                orientation: ComicTextOrientation.vertical,
+                bandRegionIds: [
+                  ['r0'],
+                ],
+              ),
+              ComicTranslationUnit(
+                id: 'r1',
+                regionIds: ['r1'],
+                sourceLines: ['原文二'],
+                orientation: ComicTextOrientation.vertical,
+                bandRegionIds: [
+                  ['r1'],
+                ],
+              ),
+            ],
+            targetLanguage: 'zh-CN',
+            previousPages: const [],
+          ),
+        );
     expect(partial.translations['r0'], ['译文']);
     expect(partial.translations['r1'], ['原文二']);
 
@@ -287,9 +310,13 @@ void main() {
     );
     expect(legacy.sourceEosToken, '</s>');
     expect(legacy.sourcePrefixTokens, ['>>ja<<']);
-    final installedManifest = jsonDecode(await File(
-      '${legacy.path}${Platform.pathSeparator}installation.json',
-    ).readAsString()) as Map;
+    final installedManifest =
+        jsonDecode(
+              await File(
+                '${legacy.path}${Platform.pathSeparator}installation.json',
+              ).readAsString(),
+            )
+            as Map;
     expect(
       installedManifest['schemaVersion'],
       ComicLocalTranslationModel.schemaVersion,
@@ -308,36 +335,68 @@ void main() {
         .setMockMethodCallHandler(hyChannel, (call) async {
           if (call.method == 'load' || call.method == 'unload') return null;
           final arguments = Map<String, dynamic>.from(call.arguments as Map);
-          expect(arguments['texts'], ['Translate to Chinese:\nまた明日']);
+          expect(arguments['texts'], hasLength(1));
+          final prompt = (arguments['texts'] as List).single as String;
+          expect(prompt, contains('上文（仅供参考）：'));
+          expect(prompt, contains('原文：おはよう'));
+          expect(prompt, contains('译文：早上好'));
+          expect(prompt, contains('翻译为中文'));
+          expect(prompt, contains('また明日'));
           return ['明天见'];
         });
-    addTearDown(() => TestDefaultBinaryMessengerBinding
-        .instance.defaultBinaryMessenger.setMockMethodCallHandler(hyChannel, null));
-    final hyResult = await LocalComicTranslationEngine(
-      manager,
-      selectedModelId: hy.id,
-    ).translate(ComicTranslationRequest(
-      ocr: const ComicOcrArtifact(
-        contentDigest: 'hy',
-        engineId: 'test',
-        modelVersion: '1',
-        sourceLanguage: 'ja',
-        imageWidth: 1,
-        imageHeight: 1,
-        mediaKind: ComicTranslationMediaKind.staticImage,
-        animatedMode: AnimatedTranslationMode.posterFrame,
-        regions: [],
-      ),
-      units: const [ComicTranslationUnit(
-        id: 'r0',
-        regionIds: ['r0'],
-        sourceLines: ['また明日'],
-        orientation: ComicTextOrientation.vertical,
-        bandRegionIds: [['r0']],
-      )],
-      targetLanguage: 'zh-CN',
-      previousPages: const [],
-    ));
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(hyChannel, null),
+    );
+    final hyResult =
+        await LocalComicTranslationEngine(
+          manager,
+          selectedModelId: hy.id,
+        ).translate(
+          ComicTranslationRequest(
+            ocr: const ComicOcrArtifact(
+              contentDigest: 'hy',
+              engineId: 'test',
+              modelVersion: '1',
+              sourceLanguage: 'ja',
+              imageWidth: 1,
+              imageHeight: 1,
+              mediaKind: ComicTranslationMediaKind.staticImage,
+              animatedMode: AnimatedTranslationMode.posterFrame,
+              regions: [],
+            ),
+            units: const [
+              ComicTranslationUnit(
+                id: 'r0',
+                regionIds: ['r0'],
+                sourceLines: ['また明日'],
+                orientation: ComicTextOrientation.vertical,
+                bandRegionIds: [
+                  ['r0'],
+                ],
+              ),
+            ],
+            targetLanguage: 'zh-CN',
+            previousPages: const [
+              ComicTranslationContextEntry(
+                pageIndex: 0,
+                sourceTexts: ['おはよう'],
+                translatedTexts: ['早上好'],
+              ),
+            ],
+          ),
+        );
     expect(hyResult.translations['r0'], ['明天见']);
+    expect(
+      LocalComicTranslationEngine(manager, selectedModelId: hy.id).contextMode,
+      ComicTranslationContextMode.previousPages,
+    );
+    expect(
+      LocalComicTranslationEngine(
+        manager,
+        selectedModelId: direct.id,
+      ).contextMode,
+      ComicTranslationContextMode.none,
+    );
   });
 }

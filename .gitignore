@@ -31,6 +31,8 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+# Reproducible third-party native checkouts and build outputs. Keep project
+# patches/scripts tracked; see docs/ANDROID_NATIVE_DEPENDENCIES.md.
 .local/
 web/
 

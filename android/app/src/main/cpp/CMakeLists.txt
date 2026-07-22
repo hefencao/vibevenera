@@ -8,11 +8,11 @@ project(venera_webp C CXX)
 set(LIBWEBP_PATH "$ENV{LIBWEBP_PATH}" CACHE PATH "Path to libwebp source tree")
 if(NOT LIBWEBP_PATH)
     set(_candidate_paths
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.local/comic_translation_native/libwebp"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../libwebp"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../libwebp"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../libwebp"
         "${CMAKE_CURRENT_SOURCE_DIR}/../libwebp"
-        "D:/work/Source/libwebp"
     )
     foreach(_candidate IN LISTS _candidate_paths)
         if(EXISTS "${_candidate}/src/webp/decode.h")
@@ -23,7 +23,9 @@ if(NOT LIBWEBP_PATH)
 endif()
 
 if(NOT EXISTS "${LIBWEBP_PATH}/src/webp/decode.h")
-    message(FATAL_ERROR "libwebp source tree not found. Set LIBWEBP_PATH or place libwebp under a supported path.")
+    message(FATAL_ERROR
+        "libwebp source tree not found. Run "
+        "tool/comic_translation/build_android_runtime.sh or set LIBWEBP_PATH.")
 endif()
 
 # ============================================================
@@ -158,6 +160,10 @@ set_target_properties(venera_webp PROPERTIES
 # roots to prebuilt Android CTranslate2 and SentencePiece packages. Keeping the
 # runtime optional preserves normal builds while the model files remain
 # user-installed data rather than APK assets.
+option(VENERA_REQUIRE_LOCAL_TRANSLATION
+    "Fail configuration when the local translation runtime is unavailable" OFF)
+set(VENERA_NATIVE_RUNTIME_REVISION "" CACHE STRING
+    "Runtime package revision used to invalidate Android CMake configuration")
 set(CTRANSLATE2_ROOT "$ENV{CTRANSLATE2_ROOT}" CACHE PATH "CTranslate2 Android package")
 set(SENTENCEPIECE_ROOT "$ENV{SENTENCEPIECE_ROOT}" CACHE PATH "SentencePiece Android package")
 if(NOT CTRANSLATE2_ROOT)
@@ -188,7 +194,13 @@ if(EXISTS "${CTRANSLATE2_ROOT}/include/ctranslate2/translator.h" AND
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
     )
 else()
-    message(STATUS "CTranslate2/SentencePiece Android packages not set; local translation disabled")
+    if(VENERA_REQUIRE_LOCAL_TRANSLATION)
+        message(FATAL_ERROR
+            "CTranslate2/SentencePiece Android runtime is missing for ${ANDROID_ABI}. "
+            "Run tool/comic_translation/build_android_runtime.sh first.")
+    endif()
+    message(STATUS
+        "CTranslate2/SentencePiece Android packages not set; local translation disabled")
 endif()
 
 # Hy-MT1.5 2-bit uses the Q2_0c GGUF kernel from a pinned llama.cpp runtime.
@@ -219,5 +231,10 @@ if(EXISTS "${LLAMA_ROOT}/include/llama.h" AND
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
     )
 else()
+    if(VENERA_REQUIRE_LOCAL_TRANSLATION)
+        message(FATAL_ERROR
+            "llama.cpp Android runtime is missing for ${ANDROID_ABI}. "
+            "Run tool/comic_translation/build_android_runtime.sh first.")
+    endif()
     message(STATUS "llama.cpp Android package not set; Hy-MT translation disabled")
 endif()
