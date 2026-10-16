@@ -26,15 +26,19 @@ tool/comic_translation/                 # 提交 Git：构建脚本与补丁
 | --- | --- | --- | --- |
 | CTranslate2 | `v4.7.2` / `9ff9c719e62b98fb8a993c1629833b0ddab447db` | 旧 seq2seq 模型 | MIT |
 | SentencePiece | `v0.2.1` / `31646a467d2051eb904e0b45de3a73e91fe1c1e3` | seq2seq tokenizer | Apache-2.0 |
-| llama.cpp PR #19357 | `a2baedad71a4d5685c83fe1939bb2e5f94e77f35` | Hy-MT Q2_0c 推理 | MIT |
+| llama.cpp + PR #19357 补丁 | `031ddb2e08962837c899374297da75f91cc0157d` + `llama-q2-0c.patch` | Hy-MT Q2_0c 推理 | MIT |
 | KleidiAI | `c6b34654b7654d43a0f808bca3dd1cbc38e2bac9` | llama.cpp arm64 DotProd kernel | Apache-2.0 |
 | libwebp | `3757b8afeb54e305eaef18502812a9a88b7ed662` | WebP 解码 | BSD-3-Clause |
 
-项目维护两个可审计补丁：
+项目维护三个可审计补丁：
 
 - `ctranslate2-android-thread-affinity.patch`：Android 不调用 Linux-only thread affinity。
 - `libwebp-vp8-thread-buffer-pool.patch`：复用同一解码线程的大块 VP8 工作缓冲区。原来位于 Windows
   外部 libwebp checkout 中的三个 staged 修改已迁移到此补丁，不再依赖 `/mnt/d/...`。
+- `llama-q2-0c.patch`：从上游固定基线重建原 PR 提交
+  `a2baedad71a4d5685c83fe1939bb2e5f94e77f35` 的完整源码树
+  `fd9d62cf87c9fb2b54dfbb7708beccb212bddbf3`。原提交已无法从上游下载；补丁保留相同的
+  Q2_0c 和 KleidiAI DotProd 实现，避免依赖会被改写的 PR head。
 
 构建完成后，`runtime/versions.json` 会记录实际提交、补丁和 ABI。模型权重仍由应用运行时下载，不进入
 APK。

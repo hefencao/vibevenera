@@ -29,8 +29,8 @@ $webpGit = $webp.Replace('\', '/')
 $runtime = "$root\runtime"
 $ct2Commit = "9ff9c719e62b98fb8a993c1629833b0ddab447db"
 $spmCommit = "31646a467d2051eb904e0b45de3a73e91fe1c1e3"
-$llamaCommit = "a2baedad71a4d5685c83fe1939bb2e5f94e77f35"
-$llamaBranch = "pr-19357-sme2-int2"
+$llamaCommit = "031ddb2e08962837c899374297da75f91cc0157d"
+$llamaSourceCommit = "a2baedad71a4d5685c83fe1939bb2e5f94e77f35"
 $kleidiaiCommit = "c6b34654b7654d43a0f808bca3dd1cbc38e2bac9"
 $webpCommit = "3757b8afeb54e305eaef18502812a9a88b7ed662"
 $cmake = "$AndroidSdk\cmake\3.22.1\bin\cmake.exe"
@@ -59,8 +59,7 @@ if (!(Test-Path "$webp\.git")) {
 Run { git -c "safe.directory=$ct2Git" -C $ct2 checkout --detach $ct2Commit }
 Run { git -c "safe.directory=$ct2Git" -C $ct2 submodule update --init --recursive }
 Run { git -c "safe.directory=$spmGit" -C $spm checkout --detach $spmCommit }
-Run { git -c "safe.directory=$llamaGit" -C $llama checkout --detach --force }
-Run { git -c "safe.directory=$llamaGit" -C $llama fetch --force origin "pull/19357/head:$llamaBranch" }
+Run { git -c "safe.directory=$llamaGit" -C $llama fetch --depth=1 origin $llamaCommit }
 Run { git -c "safe.directory=$llamaGit" -C $llama checkout --detach --force $llamaCommit }
 Run { git -c "safe.directory=$llamaGit" -C $llama diff --quiet }
 Run { git -c "safe.directory=$webpGit" -C $webp checkout --detach --force $webpCommit }
@@ -73,6 +72,7 @@ $vp8Decoder = Get-Content -Raw "$webp\src\dec\vp8_dec.c"
 if (!$vp8Decoder.Contains("VP8MemPoolAcquire")) {
     Run { git -c "safe.directory=$webpGit" -C $webp apply "$PSScriptRoot\patches\libwebp-vp8-thread-buffer-pool.patch" }
 }
+Run { git -c "safe.directory=$llamaGit" -C $llama apply "$PSScriptRoot\patches\llama-q2-0c.patch" }
 
 if (Test-Path $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force }
 New-Item -ItemType Directory -Force "$runtime\ctranslate2\include", "$runtime\sentencepiece\include", "$runtime\llama\include", "$runtime\licenses" | Out-Null
@@ -137,7 +137,7 @@ foreach ($abi in $Abis) {
 @{
     ctranslate2 = @{ version = "4.7.2"; commit = $ct2Commit }
     sentencepiece = @{ version = "0.2.1"; commit = $spmCommit }
-    llama = @{ commit = $llamaCommit; source = "pull/19357/head"; feature = "official Q2_0c/KleidiAI DotProd" }
+    llama = @{ commit = $llamaCommit; source_commit = $llamaSourceCommit; patch = "q2-0c"; feature = "Q2_0c/KleidiAI DotProd" }
     kleidiai = @{ commit = $kleidiaiCommit; source = "llama.cpp FetchContent" }
     libwebp = @{ commit = $webpCommit; patch = "vp8-thread-buffer-pool" }
     abis = $Abis

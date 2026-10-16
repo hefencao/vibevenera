@@ -13,8 +13,9 @@ native_root="${VENERA_NATIVE_ROOT:-$repo_root/.local/comic_translation_native}"
 
 ct2_commit="9ff9c719e62b98fb8a993c1629833b0ddab447db"
 spm_commit="31646a467d2051eb904e0b45de3a73e91fe1c1e3"
-llama_commit="a2baedad71a4d5685c83fe1939bb2e5f94e77f35"
-llama_ref="pull/19357/head"
+llama_commit="031ddb2e08962837c899374297da75f91cc0157d"
+llama_source_commit="a2baedad71a4d5685c83fe1939bb2e5f94e77f35"
+llama_patch="$script_dir/patches/llama-q2-0c.patch"
 kleidiai_commit="c6b34654b7654d43a0f808bca3dd1cbc38e2bac9"
 libwebp_commit="3757b8afeb54e305eaef18502812a9a88b7ed662"
 
@@ -197,7 +198,7 @@ clone_if_missing https://github.com/webmproject/libwebp.git "$libwebp"
 checkout_commit "$ct2" "$ct2_commit"
 git -C "$ct2" submodule update --init --recursive
 checkout_commit "$spm" "$spm_commit"
-checkout_commit "$llama" "$llama_commit" "$llama_ref"
+checkout_commit "$llama" "$llama_commit"
 checkout_commit "$libwebp" "$libwebp_commit"
 
 if ! grep -q 'defined(__ANDROID__)' "$ct2/src/thread_pool.cc"; then
@@ -210,6 +211,7 @@ if ! grep -q 'VP8MemPoolAcquire' "$libwebp/src/dec/vp8_dec.c"; then
     "$libwebp" \
     "$script_dir/patches/libwebp-vp8-thread-buffer-pool.patch"
 fi
+apply_patch_once "$llama" "$llama_patch"
 if ! git -C "$libwebp" apply --reverse --check \
     "$script_dir/patches/libwebp-vp8-thread-buffer-pool.patch" 2>/dev/null; then
   printf 'libwebp source does not exactly match the tracked project patch.\n' >&2
@@ -217,7 +219,8 @@ if ! git -C "$libwebp" apply --reverse --check \
 fi
 verify_expected_changes "$ct2" src/thread_pool.cc
 verify_expected_changes "$spm"
-verify_expected_changes "$llama"
+mapfile -t llama_patched_files < <(git -C "$llama" apply --numstat "$llama_patch" | cut -f3)
+verify_expected_changes "$llama" "${llama_patched_files[@]}"
 verify_expected_changes \
   "$libwebp" \
   src/dec/frame_dec.c \
@@ -340,7 +343,7 @@ cat > "$runtime/versions.json" <<EOF
 {
   "ctranslate2": {"version": "4.7.2", "commit": "$ct2_commit"},
   "sentencepiece": {"version": "0.2.1", "commit": "$spm_commit"},
-  "llama": {"commit": "$llama_commit", "feature": "Q2_0c/KleidiAI DotProd"},
+  "llama": {"commit": "$llama_commit", "source_commit": "$llama_source_commit", "patch": "q2-0c", "feature": "Q2_0c/KleidiAI DotProd"},
   "kleidiai": {"commit": "$kleidiai_commit", "source": "llama.cpp FetchContent"},
   "libwebp": {"commit": "$libwebp_commit", "patch": "vp8-thread-buffer-pool"},
   "abis": [$abi_json]

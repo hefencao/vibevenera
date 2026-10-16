@@ -2,6 +2,9 @@
 # Git configured with core.autocrlf=true (common after migrating to WSL).
 *.sh text eol=lf
 
+# Preserve upstream whitespace when reconstructing native dependency sources.
+*.patch text eol=lf -whitespace
+
 # Keep native Windows launch scripts in their conventional working-tree form.
 *.bat text eol=crlf
 *.ps1 text eol=crlf
