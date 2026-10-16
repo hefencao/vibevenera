@@ -25,6 +25,8 @@ class SideBarRoute<T> extends PopupRoute<T> {
 
   bool _barrierSawPointerDown = false;
 
+  AnimationController? get _transitionController => controller;
+
   @override
   Color? get barrierColor => showBarrier ? Colors.black54 : Colors.transparent;
 
@@ -224,7 +226,7 @@ class _PredictiveSideBarTransitionState
   void handleCommitBackGesture() {
     final route = widget.route;
     final navigator = route.navigator!;
-    final controller = route.controller!;
+    final controller = route._transitionController!;
     navigator.pop();
     if (!controller.isAnimating) {
       navigator.didStopUserGesture();

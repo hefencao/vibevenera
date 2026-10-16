@@ -1,4 +1,4 @@
-import 'dart:async' show Future, StreamController;
+import 'dart:async' show Future;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';

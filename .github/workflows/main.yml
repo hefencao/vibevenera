@@ -5,11 +5,14 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
   Build_MacOS:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -23,8 +26,12 @@ jobs:
           CERTIFICATE: ${{ secrets.CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
         run: |
-          echo "$CERTIFICATE" | base64 --decode > signing_certificate.p12
-          security import signing_certificate.p12 -k ~/Library/Keychains/login.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          if [[ -n "$CERTIFICATE" ]]; then
+            echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing_certificate.p12"
+            security import "$RUNNER_TEMP/signing_certificate.p12" -k ~/Library/Keychains/login.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          else
+            echo "Using the project's ad-hoc macOS signing configuration."
+          fi
 
       - name: Check rust-toolchain.toml
         run: rustup show
@@ -57,7 +64,7 @@ jobs:
   Build_IOS:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
@@ -67,9 +74,9 @@ jobs:
       - run: flutter pub get
       - run: flutter build ios --release --no-codesign
       - run: |
-          mkdir -p /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          mv /Users/runner/work/venera/venera/build/ios/iphoneos/Runner.app /Users/runner/work/venera/venera/build/ios/iphoneos/Payload
-          cd /Users/runner/work/venera/venera/build/ios/iphoneos/
+          mkdir -p build/ios/iphoneos/Payload
+          mv build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+          cd build/ios/iphoneos
           zip -r venera-ios.ipa Payload
       - name: Add version to filename
         run: |
@@ -83,7 +90,7 @@ jobs:
   Build_Android:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - run: rm -rf /opt/hostedtoolcache
       - uses: subosito/flutter-action@v2
         with:
@@ -104,15 +111,41 @@ jobs:
       - name: Check rust-toolchain.toml
         run: rustup show
       - run: flutter pub get
+      - name: Install Android native build tools
+        run: sdkmanager "ndk;28.0.13004108" "cmake;3.22.1"
+      - name: Build Android native dependencies
+        run: bash tool/comic_translation/build_android_runtime.sh --abis arm64-v8a --jobs 2
       - run: flutter build apk --release
+      - name: Verify Android translation libraries
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          libraries = (
+              "venera_webp", "venera_translation", "venera_hymt",
+              "ctranslate2", "sentencepiece", "llama", "ggml", "ggml-base", "ggml-cpu",
+          )
+          apks = list(Path("build/app/outputs/apk/release").glob("*.apk"))
+          if not apks:
+              raise SystemExit("No release APKs were built")
+          for apk in apks:
+              with ZipFile(apk) as archive:
+                  missing = [name for name in libraries
+                             if f"lib/arm64-v8a/lib{name}.so" not in archive.namelist()]
+              if missing:
+                  raise SystemExit(f"{apk.name}: missing native libraries: {missing}")
+              print(f"{apk.name}: all native libraries present")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: apks
           path: build/app/outputs/apk/release
+          if-no-files-found: error
   Build_Windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - name: install dependencies
         run: | 
           choco install yq -y
@@ -135,7 +168,7 @@ jobs:
   Build_Linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
@@ -163,10 +196,10 @@ jobs:
   Build_Linux_ARM64:
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'master'
+          channel: 'stable'
           flutter-version-file: pubspec.yaml
       - run: |
           flutter pub get
@@ -184,8 +217,10 @@ jobs:
 
   Release:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     needs: [Build_MacOS, Build_IOS, Build_Android, Build_Windows, Build_Linux, Build_Linux_ARM64]
-    if: github.event_name == 'release'  # 仅在 push 事件时执行
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -215,9 +250,10 @@ jobs:
         with:
           name: deb_arm64_build
           path: outputs
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease }}
           files: |
             outputs/*.ipa
             outputs/*.dmg
@@ -228,4 +264,4 @@ jobs:
             outputs/*.zst
             outputs/*.AppImage
         env:
-          GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ACTION_GITHUB_TOKEN || github.token }}

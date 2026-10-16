@@ -1148,7 +1148,6 @@ class WorkerPoolScheduler {
   final Queue<DecodeJob> _bgQueue = Queue();
 
   bool _isProcessing = false;
-  int _currentGeneration = 0;
 
   final List<SendPort?> _workerPorts = [null, null];
   final List<bool> _isInitializing = [false, false];
@@ -1165,10 +1164,6 @@ class WorkerPoolScheduler {
 
   // Round-robin counter for decoder creation (avoids worker 0 bottleneck)
   int _nextDecoderWorker = 0; // ignore: unused_field
-
-  void updateGeneration(int newGen) {
-    _currentGeneration = newGen;
-  }
 
   int decoderEpoch(int decoderAddress) => _decoderEpochs[decoderAddress] ?? 0;
 
