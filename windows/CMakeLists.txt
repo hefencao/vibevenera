@@ -57,6 +57,16 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+if(MSVC)
+  # These plugins still use the legacy WinRT coroutine headers.
+  foreach(PLUGIN_TARGET flutter_inappwebview_windows_plugin local_auth_windows_plugin)
+    if(TARGET ${PLUGIN_TARGET})
+      target_compile_definitions(${PLUGIN_TARGET} PRIVATE
+        _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+    endif()
+  endforeach()
+endif()
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can
