@@ -43,7 +43,16 @@ jobs:
 
       # Step 2: Build the Flutter macOS app
       - name: Build Flutter macOS App
-        run: flutter build macos --release
+        run: |
+          for attempt in 1 2 3; do
+            if flutter build macos --release; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep 10
+          done
 
       # Step 3: Create the DMG file
       - name: Create DMG
