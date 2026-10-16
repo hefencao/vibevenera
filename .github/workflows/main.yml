@@ -1,7 +1,12 @@
 name: Build ALL
 run-name: Build ALL
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional tag for a development prerelease'
+        required: false
+        type: string
   release:
     types: [published]
 
@@ -111,6 +116,8 @@ jobs:
       - name: Check rust-toolchain.toml
         run: rustup show
       - run: flutter pub get
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
       - name: Install Android native build tools
         run: sdkmanager "ndk;28.0.13004108" "cmake;3.22.1"
       - name: Build Android native dependencies
@@ -199,7 +206,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: 'master'
           flutter-version-file: pubspec.yaml
       - run: |
           flutter pub get
@@ -220,7 +227,7 @@ jobs:
     permissions:
       contents: write
     needs: [Build_MacOS, Build_IOS, Build_Android, Build_Windows, Build_Linux, Build_Linux_ARM64]
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && (github.ref_type == 'tag' || inputs.release_tag != ''))
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -252,7 +259,8 @@ jobs:
           path: outputs
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease }}
           files: |
             outputs/*.ipa

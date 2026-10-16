@@ -25,9 +25,9 @@ with open('debian/debian.yaml', 'w') as f:
 with open('debian/gui/venera.desktop', 'w') as f:
     f.write(desktopContent.replace('{{Version}}', version))
 
-subprocess.run(["flutter", "build", "linux"])
+subprocess.run(["flutter", "build", "linux"], check=True)
 
-subprocess.run(["$HOME/.pub-cache/bin/flutter_to_debian"], shell=True)
+subprocess.run(["$HOME/.pub-cache/bin/flutter_to_debian"], shell=True, check=True)
 
 with open('debian/debian.yaml', 'w') as f:
     f.write(debianContent)
