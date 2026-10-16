@@ -52,7 +52,15 @@ jobs:
           mkdir -p dist/dmg_contents
           cp -R build/macos/Build/Products/Release/venera.app dist/dmg_contents/
           ln -s /Applications dist/dmg_contents/Applications
-          hdiutil create -volname "venera" -srcfolder dist/dmg_contents -ov -format UDZO "dist/venera.dmg"
+          for attempt in 1 2 3; do
+            if hdiutil create -volname "venera" -srcfolder dist/dmg_contents -ov -format UDZO "dist/venera.dmg"; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Add version to filename
         run: |
